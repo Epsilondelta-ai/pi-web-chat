@@ -72,9 +72,14 @@ export function extractRefs(text) {
 }
 
 export function createChatSurface() {
-  const surface = document.createElement("section");
-  surface.className = "pi-web-chat-surface";
-  surface.innerHTML = `<div class="term"><div class="term-inner"></div></div>`;
+  const surface = document.createElement("main");
+  surface.className = "main pi-web-chat-surface";
+  surface.dataset.main = "session";
+  surface.innerHTML = `
+    <div class="term"><div class="term-inner"></div></div>
+    <button type="button" class="scroll-bottom-btn" data-action="scroll-bottom" aria-label="scroll to bottom"
+      title="scroll to bottom" hidden>↓</button>
+  `;
   return surface;
 }
 
