@@ -1,6 +1,29 @@
 const PLUGIN_CLASS = "pi-web-chat-enhanced";
 const FILE_REF_LIMIT = 12;
 
+const MATERIAL_PATHS = {
+  attachFile: [
+    "M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5",
+    "a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z",
+  ].join(""),
+  stop: "M6 6h12v12H6V6Z",
+  send: "M2 21 23 12 2 3v7l15 2-15 2v7Z",
+};
+
+const MATERIAL_ICONS = {
+  attachFile: materialIcon("attach_file", MATERIAL_PATHS.attachFile),
+  stop: materialIcon("stop", MATERIAL_PATHS.stop),
+  send: materialIcon("send", MATERIAL_PATHS.send),
+};
+
+function materialIcon(name, path) {
+  return [
+    `<svg class="material-icon" data-material-icon="${name}" xmlns="http://www.w3.org/2000/svg"`,
+    ` viewBox="0 0 24 24" aria-hidden="true" focusable="false">`,
+    `<path fill="currentColor" d="${path}"></path></svg>`,
+  ].join("");
+}
+
 export function activate(context) {
   const app = context.app;
   const state = createState(context);
@@ -92,17 +115,23 @@ export function createComposerSurface() {
       <div class="slash-list"></div>
     </div>
     <div class="prompt-bar">
-      <button class="attach-btn" type="button" aria-label="attach files" title="attach files">📎</button>
+      <button class="attach-btn" type="button" aria-label="attach files" title="attach files">
+        ${MATERIAL_ICONS.attachFile}
+      </button>
       <input type="file" multiple hidden data-file-input />
       <div class="prompt-input-col">
         <div class="attach-chips" hidden></div>
         <textarea class="prompt-textarea" placeholder="ask pi to do something…" rows="1"></textarea>
       </div>
       <div class="prompt-actions">
-        <button class="stop-btn" type="button" aria-label="stop" title="stop" hidden>■</button>
+        <button class="stop-btn" type="button" aria-label="stop" title="stop" hidden>
+          ${MATERIAL_ICONS.stop}
+        </button>
         <button class="mic-btn" type="button" data-action="toggle-speech-input" aria-label="start voice input"
           title="voice input" hidden>🎙</button>
-        <button class="send-btn" type="button" aria-label="send" title="send" aria-disabled="true">➤</button>
+        <button class="send-btn" type="button" aria-label="send" title="send" aria-disabled="true">
+          ${MATERIAL_ICONS.send}
+        </button>
       </div>
       <div class="drop-overlay" hidden><span>drop to attach</span></div>
     </div>
@@ -280,6 +309,12 @@ function installStyles() {
     .pi-web-chat-badge { color: var(--muted, #8a8f98); }
     .pi-web-chat-surface { display: contents; }
     .pi-web-chat-composer { display: block; }
+    .pi-web-chat-composer .material-icon {
+      display: block;
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
+    }
     .${PLUGIN_CLASS} .prompt-file-ref-pop::before,
     .${PLUGIN_CLASS} .slash-pop::before {
       content: "pi-web-chat";
