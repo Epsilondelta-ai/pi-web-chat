@@ -13,6 +13,7 @@ import {
   runShellCommand,
   safePath,
   searchWorkspaceFiles,
+  isMainModule,
 } from "../backend.js";
 
 test("extractFileRefs returns unique prompt refs", () => {
@@ -52,6 +53,18 @@ test("handle dispatches commands and unknown methods", async () => {
   assert.deepEqual(await handle("commands", ".", {}), { commands: CHAT_SLASH_COMMANDS });
   await assert.rejects(() => handle("missing", ".", {}), /unknown method/);
 });
+
+test("isMainModule follows symlinked plugin installs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
+  const target = join(root, "backend.js");
+  const link = join(root, "linked-backend.js");
+  await writeFile(target, "");
+  await import("node:fs/promises").then(({ symlink }) => symlink(target, link));
+
+  assert.equal(isMainModule(new URL(target, "file://").href, link), true);
+  assert.equal(isMainModule(new URL(target, "file://").href, ""), false);
+}
+);
 
 test("runShellCommand captures output and exit code", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
