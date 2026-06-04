@@ -23,9 +23,23 @@ In pi-web: **Settings → Plugins → local** and select this folder.
 }
 ```
 
-## Backend methods
+## Backend
 
-The backend script receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
+The plugin runs a prebuilt Go backend binary through `backend.js` for faster workspace file search/read operations.
+Supported targets are:
+
+- `darwin-amd64`
+- `darwin-arm64`
+- `linux-amd64`
+- `linux-arm64`
+
+Rebuild the binaries from `backend.go` with:
+
+```sh
+npm run build:backend
+```
+
+The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 
 - `commands` → `{ commands }`
 - `searchFiles` with `{ query, limit }` → `{ files }`

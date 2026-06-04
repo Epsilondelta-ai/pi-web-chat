@@ -6,7 +6,10 @@
   "description": "Trusted pi-web chat and prompt composer plugin with !, /, and @ backend support.",
   "scripts": {
     "test": "node --test",
-    "validate": "node scripts/validate.js"
+    "validate": "node scripts/validate.js",
+    "build:backend": "./scripts/build-backends.sh",
+    "pretest": "npm run build:backend",
+    "prevalidate": "npm run build:backend"
   },
   "keywords": [
     "pi-web",
