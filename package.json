@@ -1,0 +1,18 @@
+{
+  "name": "pi-web-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Trusted pi-web chat and prompt composer plugin with !, /, and @ backend support.",
+  "scripts": {
+    "test": "node --test",
+    "validate": "node scripts/validate.js"
+  },
+  "keywords": [
+    "pi-web",
+    "plugin",
+    "chat"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {}
+}
