@@ -4,15 +4,21 @@ const FILE_REF_LIMIT = 12;
 export function activate(context) {
   const app = context.app;
   const state = createState(context);
-  const style = installStyles(context);
-  const badge = installBadge(app);
+  const style = installStyles();
+  const chatSurface = createChatSurface();
+  const composerSurface = createComposerSurface();
+  const cleanupChat = context.mount.chat(chatSurface, { replace: true });
+  const cleanupComposer = context.mount.composer(composerSurface, { replace: true });
   const restoreMethods = patchAppMethods(app, state);
+  const badge = installBadge(app);
   app.classList.add(PLUGIN_CLASS);
   void refreshPluginCommands(app, state);
 
   return () => {
     restoreMethods();
     badge.remove();
+    cleanupComposer();
+    cleanupChat();
     style.remove();
     app.classList.remove(PLUGIN_CLASS);
   };
@@ -31,7 +37,7 @@ export function createState(context) {
 }
 
 export function backendCall(state, method, data = {}) {
-  const workspaceId = state.context.app.dataset.activeWorkspaceId || "";
+  const workspaceId = state.context.session?.activeWorkspaceId?.() || state.context.app.dataset.activeWorkspaceId || "";
   return state.context.backend(method, { workspaceId, data });
 }
 
@@ -65,8 +71,44 @@ export function extractRefs(text) {
   return refs;
 }
 
+export function createChatSurface() {
+  const surface = document.createElement("section");
+  surface.className = "pi-web-chat-surface";
+  surface.innerHTML = `<div class="term"><div class="term-inner"></div></div>`;
+  return surface;
+}
+
+export function createComposerSurface() {
+  const surface = document.createElement("section");
+  surface.className = "prompt-region pi-web-chat-composer";
+  surface.innerHTML = `
+    <div class="slash-pop" hidden>
+      <div class="slash-head">slash commands · type to filter</div>
+      <div class="slash-list"></div>
+    </div>
+    <div class="prompt-bar">
+      <button class="attach-btn" type="button" aria-label="attach files" title="attach files">📎</button>
+      <input type="file" multiple hidden data-file-input />
+      <div class="prompt-input-col">
+        <div class="attach-chips" hidden></div>
+        <textarea class="prompt-textarea" placeholder="ask pi to do something…" rows="1"></textarea>
+      </div>
+      <div class="prompt-actions">
+        <button class="stop-btn" type="button" aria-label="stop" title="stop" hidden>■</button>
+        <button class="mic-btn" type="button" data-action="toggle-speech-input" aria-label="start voice input"
+          title="voice input" hidden>🎙</button>
+        <button class="send-btn" type="button" aria-label="send" title="send" aria-disabled="true">➤</button>
+      </div>
+      <div class="drop-overlay" hidden><span>drop to attach</span></div>
+    </div>
+    <div class="prompt-meta" data-prompt-meta>
+      — | <span class="prompt-meta-item prompt-meta-branch"><span>—</span></span>
+    </div>
+  `;
+  return surface;
+}
+
 function patchAppMethods(app, state) {
-  const proto = Object.getPrototypeOf(app);
   const originals = {
     renderSlashCommands: app.renderSlashCommands,
     pickSlash: app.pickSlash,
@@ -85,7 +127,7 @@ function patchAppMethods(app, state) {
   app.pickSlash = function pickSlashWithPlugin(command) {
     const pluginCommand = state.commandMap.get(command);
     if (pluginCommand?.template) {
-      this.fillPrompt?.(pluginCommand.template);
+      state.context.composer?.setPrompt?.(pluginCommand.template);
       this.slashPopover?.setAttribute("hidden", "");
       return;
     }
@@ -136,7 +178,6 @@ function patchAppMethods(app, state) {
       if (fn) app[name] = fn;
       else delete app[name];
     }
-    Object.setPrototypeOf(app, proto);
   };
 }
 
@@ -145,8 +186,7 @@ async function refreshPluginCommands(app, state) {
     const response = await backendCall(state, "commands", {});
     state.commands = Array.isArray(response?.commands) ? response.commands : [];
     state.commandMap = new Map(state.commands.map((command) => [commandName(command), command]));
-    const list = app.querySelector(".slash-list");
-    if (list) app.renderSlashCommands?.([], []);
+    if (app.querySelector(".slash-list")) app.renderSlashCommands?.([], []);
   } catch (error) {
     console.warn("pi-web-chat commands unavailable", error);
   }
@@ -154,7 +194,7 @@ async function refreshPluginCommands(app, state) {
 
 async function attachReferencedFiles(app, state) {
   if (!app.prompt || app.promptShellMode) return;
-  const text = app.prompt.value || "";
+  const text = state.context.composer?.getPrompt?.() || app.prompt.value || "";
   const refs = [...new Set([...state.selectedRefs, ...extractRefs(text)])];
   if (!refs.length) return;
   try {
@@ -169,19 +209,22 @@ async function attachReferencedFiles(app, state) {
     if (app.attachments) app.attachments.hidden = !app.attachments.children.length;
     app.updatePrompt?.();
   } catch (error) {
-    app.appendMessage?.({ kind: "banner", text: `@ context failed: ${error instanceof Error ? error.message : String(error)}` });
+    state.context.chat?.appendMessage?.({
+      kind: "banner",
+      text: `@ context failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
   } finally {
     state.selectedRefs.clear();
   }
 }
 
 async function runBackendShell(app, state, command, hooks = {}) {
-  const workspaceId = app.dataset.activeWorkspaceId;
+  const workspaceId = state.context.session?.activeWorkspaceId?.() || app.dataset.activeWorkspaceId;
   if (!command || !workspaceId || !app.apiConnected) return;
   hooks.onStart?.();
   app.showSessionMain?.();
-  app.finalizeStreamingMessages?.();
-  app.appendMessage?.({
+  state.context.chat?.finalizeStreamingMessages?.();
+  state.context.chat?.appendMessage?.({
     kind: "tool",
     tool: "shell",
     args: `$ ${command}`,
@@ -226,10 +269,12 @@ function installBadge(app) {
   return badge;
 }
 
-function installStyles(context) {
+function installStyles() {
   const style = document.createElement("style");
   style.textContent = `
     .pi-web-chat-badge { color: var(--muted, #8a8f98); }
+    .pi-web-chat-surface { display: contents; }
+    .pi-web-chat-composer { display: block; }
     .${PLUGIN_CLASS} .prompt-file-ref-pop::before,
     .${PLUGIN_CLASS} .slash-pop::before {
       content: "pi-web-chat";
