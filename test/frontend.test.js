@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { commandName, createState, extractRefs, mergeCommands, backendCall, pluginStyleText } from "../index.js";
+import { Window } from "happy-dom";
+import { activate, commandName, createState, extractRefs, mergeCommands, backendCall, pluginStyleText } from "../index.js";
 
 test("commandName normalizes command shapes", () => {
   assert.equal(commandName({ command: "/x" }), "/x");
@@ -35,4 +36,47 @@ test("backendCall wraps workspaceId and data", async () => {
   });
   assert.deepEqual(await backendCall(state, "commands", { reload: true }), { ok: true });
   assert.deepEqual(calls, [["commands", { workspaceId: "w1", data: { reload: true } }]]);
+});
+
+test("activate mounts surfaces and restores patched app methods", () => {
+  const window = new Window();
+  const previousDocument = globalThis.document;
+  globalThis.document = window.document;
+
+  try {
+    const app = window.document.createElement("pi-app");
+    app.innerHTML = '<div data-prompt-meta></div>';
+    app.dataset.activeWorkspaceId = "w1";
+    app.renderSlashCommands = () => "core";
+    const mountCalls = [];
+    const cleanupCalls = [];
+
+    const cleanup = activate({
+      app,
+      backend() {
+        return Promise.resolve({ commands: [] });
+      },
+      mount: {
+        chat(element, options) {
+          mountCalls.push(["chat", element.className, options]);
+          return () => cleanupCalls.push("chat");
+        },
+        composer(element, options) {
+          mountCalls.push(["composer", element.className, options]);
+          return () => cleanupCalls.push("composer");
+        },
+      },
+    });
+
+    assert.equal(app.classList.contains("pi-web-chat-enhanced"), true);
+    assert.deepEqual(mountCalls.map((call) => call[0]), ["chat", "composer"]);
+    assert.equal(typeof app.submitPrompt, "function");
+    cleanup();
+    assert.equal(app.classList.contains("pi-web-chat-enhanced"), false);
+    assert.equal(app.renderSlashCommands(), "core");
+    assert.equal("submitPrompt" in app, false);
+    assert.deepEqual(cleanupCalls.sort(), ["chat", "composer"]);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });

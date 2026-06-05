@@ -23,6 +23,15 @@ In pi-web: **Settings → Plugins → local** and select this folder.
 }
 ```
 
+## Build
+
+The browser entry is authored in TypeScript under `src/` and bundled to the manifest entry `index.js`.
+
+```sh
+npm run build
+npm run typecheck
+```
+
 ## Backend
 
 The plugin runs a prebuilt Go backend binary through `backend.js` for faster workspace file search/read operations.
@@ -56,6 +65,5 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 ## Verify
 
 ```sh
-npm test
-npm run validate
+npm run check
 ```
