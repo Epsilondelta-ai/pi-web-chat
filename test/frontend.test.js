@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { commandName, createState, extractRefs, mergeCommands, backendCall } from "../index.js";
+import { commandName, createState, extractRefs, mergeCommands, backendCall, pluginStyleText } from "../index.js";
 
 test("commandName normalizes command shapes", () => {
   assert.equal(commandName({ command: "/x" }), "/x");
@@ -16,6 +16,12 @@ test("mergeCommands deduplicates core and plugin commands", () => {
 
 test("extractRefs parses unique @ refs", () => {
   assert.deepEqual(extractRefs("@a.ts then @dir/b.md and @a.ts"), ["a.ts", "dir/b.md"]);
+});
+
+test("plugin chat surface keeps grid placement on mobile", () => {
+  const styles = pluginStyleText();
+  assert.match(styles, /\.pi-web-chat-surface \{ display: flex; flex-direction: column; \}/);
+  assert.doesNotMatch(styles, /\.pi-web-chat-surface \{ display: contents; \}/);
 });
 
 test("backendCall wraps workspaceId and data", async () => {

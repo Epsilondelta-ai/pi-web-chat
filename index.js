@@ -303,11 +303,10 @@ function installBadge(app) {
   return badge;
 }
 
-function installStyles() {
-  const style = document.createElement("style");
-  style.textContent = `
+export function pluginStyleText() {
+  return `
     .pi-web-chat-badge { color: var(--muted, #8a8f98); }
-    .pi-web-chat-surface { display: contents; }
+    .pi-web-chat-surface { display: flex; flex-direction: column; }
     .pi-web-chat-composer { display: block; }
     .pi-web-chat-composer .material-icon {
       display: block;
@@ -326,6 +325,11 @@ function installStyles() {
       text-transform: uppercase;
     }
   `;
+}
+
+function installStyles() {
+  const style = document.createElement("style");
+  style.textContent = pluginStyleText();
   document.head.append(style);
   return style;
 }
