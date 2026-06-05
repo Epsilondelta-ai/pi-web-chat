@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Window } from "happy-dom";
-import { activate, commandName, createState, extractRefs, mergeCommands, backendCall, pluginStyleText } from "../index.js";
+import { activate, commandName, createState, extractRefs, mergeCommands, backendCall, getActiveWorkspaceId, pluginStyleText } from "../index.js";
 
 test("commandName normalizes command shapes", () => {
   assert.equal(commandName({ command: "/x" }), "/x");
@@ -36,6 +36,43 @@ test("backendCall wraps workspaceId and data", async () => {
   });
   assert.deepEqual(await backendCall(state, "commands", { reload: true }), { ok: true });
   assert.deepEqual(calls, [["commands", { workspaceId: "w1", data: { reload: true } }]]);
+});
+
+test("active workspace prefers sidebar snapshot and falls back to session and dataset", () => {
+  assert.equal(
+    getActiveWorkspaceId(createState({
+      app: {
+        dataset: { activeWorkspaceId: "dataset-workspace" },
+        piWebSidebar: { getSnapshot: () => ({ activeWorkspaceId: "sidebar-workspace" }) },
+      },
+      session: { activeWorkspaceId: () => "session-workspace" },
+      backend() {
+        return Promise.resolve({});
+      },
+    })),
+    "sidebar-workspace",
+  );
+
+  assert.equal(
+    getActiveWorkspaceId(createState({
+      app: { dataset: { activeWorkspaceId: "dataset-workspace" } },
+      session: { activeWorkspaceId: () => "session-workspace" },
+      backend() {
+        return Promise.resolve({});
+      },
+    })),
+    "session-workspace",
+  );
+
+  assert.equal(
+    getActiveWorkspaceId(createState({
+      app: { dataset: { activeWorkspaceId: "dataset-workspace" } },
+      backend() {
+        return Promise.resolve({});
+      },
+    })),
+    "dataset-workspace",
+  );
 });
 
 test("activate mounts surfaces and restores patched app methods", () => {

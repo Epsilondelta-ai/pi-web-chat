@@ -57,8 +57,17 @@ export function createState(context: PluginContext): PluginState {
   return { context, commands: [], commandMap: new Map(), fileSearchToken: 0, selectedRefs: new Set() };
 }
 
+export function getActiveWorkspaceId(state: PluginState): string {
+  return (
+    state.context.app.piWebSidebar?.getSnapshot?.().activeWorkspaceId ||
+    state.context.session?.activeWorkspaceId?.() ||
+    state.context.app.dataset.activeWorkspaceId ||
+    ""
+  );
+}
+
 export async function backendCall(state: PluginState, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
-  const workspaceId: string = state.context.session?.activeWorkspaceId?.() || state.context.app.dataset.activeWorkspaceId || "";
+  const workspaceId: string = getActiveWorkspaceId(state);
   const response: unknown = await state.context.backend(method, { workspaceId, data });
   return isRecord(response) ? response : {};
 }

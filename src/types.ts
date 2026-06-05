@@ -12,6 +12,8 @@ export type BackendResponse = {
 };
 export type BackendCall = (method: string, input: { workspaceId?: string; data?: JsonRecord }) => Promise<unknown>;
 export type Cleanup = () => void;
+export type SidebarSnapshot = { activeWorkspaceId?: string };
+export type SidebarApi = { getSnapshot?: () => SidebarSnapshot };
 export type PluginContext = {
   app: AppElement;
   backend: BackendCall;
@@ -51,6 +53,7 @@ export type ToolMessage = {
 };
 export type AppElement = HTMLElement & AppMethods & {
   apiConnected?: boolean;
+  piWebSidebar?: SidebarApi;
   attachmentContents?: FileAttachment[];
   attachments?: HTMLElement;
   currentPromptFileRef?: (value: string) => PromptFileRef | undefined;
