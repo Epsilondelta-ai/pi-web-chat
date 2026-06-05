@@ -9,10 +9,13 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test",
     "validate": "node scripts/validate.js",
-    "check": "npm run build && npm run typecheck && npm test && npm run validate",
+    "check": "npm run build && npm run typecheck && npm test && npm run security:scan && npm run validate",
     "build:backend": "./scripts/build-backends.sh",
     "pretest": "npm run build && npm run build:backend",
-    "prevalidate": "npm run build && npm run build:backend"
+    "prevalidate": "npm run build && npm run build:backend",
+    "security:deps": "bun audit",
+    "security:static": "node scripts/security-scan.js",
+    "security:scan": "npm run security:deps && npm run security:static"
   },
   "keywords": [
     "pi-web",
