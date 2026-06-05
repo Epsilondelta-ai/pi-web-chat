@@ -1,8 +1,8 @@
 import type { AppElement, BackendResponse, PluginState, ShellHooks } from "./types";
-import { backendCall } from "./index";
+import { backendCall, getActiveWorkspaceId } from "./index";
 
 export async function runBackendShell(app: AppElement, state: PluginState, command: string, hooks: ShellHooks = {}): Promise<void> {
-  const workspaceId: string | undefined = state.context.session?.activeWorkspaceId?.() || app.dataset.activeWorkspaceId;
+  const workspaceId: string = getActiveWorkspaceId(state);
 
   if (!command || !workspaceId || !app.apiConnected) {
     return;
