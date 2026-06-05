@@ -3,3 +3,5 @@ coverage/
 .DS_Store
 .rezero/memory/
 .pi/npm
+.pi/settings.json
+.pi/extensions/
