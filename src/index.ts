@@ -29,11 +29,13 @@ import type {
   PluginCommand,
   PluginContext,
   Runtime,
+  SidebarSelectedSession,
   ToastRequest,
 } from "./types";
 
 const STORAGE_KEY = "pi-web-chat.sessions.v1";
 const DRAFT_KEY = "pi-web-chat.draft.v1";
+const SIDEBAR_ACTIVE_SESSION_KEY = "plugin.pi-web-sidebar.activeSessionId";
 const FILE_REF_LIMIT = 12;
 const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
@@ -46,6 +48,7 @@ type Channels = {
   input$: BehaviorSubject<string>;
   submitted$: Subject<ChatInputSubmitted>;
   activeSessionId$: BehaviorSubject<string | null>;
+  sidebarSelectedSession$: BehaviorSubject<SidebarSelectedSession | null>;
   toastRequested$: Subject<ToastRequest>;
 };
 
@@ -96,7 +99,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
   const state: State = {
     context,
     channels,
-    store: loadStore(),
+    store: loadStore(getInitialSidebarSessionId(context, channels)),
     selectedRefs: new Set(),
     selectedLocalAttachments: [],
     selectedAttachmentNames: [],
@@ -104,6 +107,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
     fileSearchToken: 0,
   };
 
+  saveStore(state.store);
   channels.activeSessionId$.next(state.store.activeSessionId);
 
   const style = disposables.add(installStyles());
@@ -141,6 +145,7 @@ export function createChannels(pi: PiWebSubjects): Channels {
     input$: pi.behaviorSubject<string>("chat.input", ""),
     submitted$: pi.subject<ChatInputSubmitted>("chat.input.submitted"),
     activeSessionId$: pi.behaviorSubject<string | null>("session.activeId", null),
+    sidebarSelectedSession$: pi.behaviorSubject<SidebarSelectedSession | null>("plugin.pi-web-sidebar.selectedSession", readSidebarSelectedSession()),
     toastRequested$: pi.subject<ToastRequest>("toast.requested"),
   };
 }
@@ -184,6 +189,15 @@ export function getActiveWorkspaceId(context: PluginContext): string {
     context.app?.dataset.activeWorkspaceId ||
     ""
   );
+}
+
+function getInitialSidebarSessionId(context: PluginContext, channels: Channels): string {
+  return context.app?.piWebSidebar?.getSnapshot?.().activeSessionId || channels.sidebarSelectedSession$.getValue()?.sessionId || readStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
+}
+
+function readSidebarSelectedSession(): SidebarSelectedSession | null {
+  const sessionId = readStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
+  return sessionId ? { sessionId } : null;
 }
 
 export async function backendCall(context: PluginContext, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
@@ -231,11 +245,11 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
   }));
 
   disposables.add(state.channels.activeSessionId$.subscribe((id) => {
-    if (id && id !== state.store.activeSessionId && state.store.sessions.some((session) => session.id === id)) {
-      state.store.activeSessionId = id;
-      saveStore(state.store);
-      render(state, dom);
-    }
+    if (id) switchToSession(state, dom, id);
+  }));
+
+  disposables.add(state.channels.sidebarSelectedSession$.subscribe((selected) => {
+    if (selected?.sessionId) switchToSession(state, dom, selected.sessionId);
   }));
 }
 
@@ -491,6 +505,18 @@ function activeSession(store: ChatStore): ChatSession {
   return session;
 }
 
+function switchToSession(state: State, dom: ChatDom, sessionId: string): void {
+  if (!sessionId || state.store.activeSessionId === sessionId) return;
+  let session = state.store.sessions.find((item) => item.id === sessionId);
+  if (!session) {
+    session = createSession(sessionId);
+    state.store.sessions.unshift(session);
+  }
+  state.store.activeSessionId = session.id;
+  saveStore(state.store);
+  render(state, dom);
+}
+
 function createNewSession(state: State): void {
   const session = createSession();
   state.store.sessions.unshift(session);
@@ -506,8 +532,12 @@ function createSession(sessionId = id()): ChatSession {
 }
 
 function loadDraft(): string {
+  return readStoredString(DRAFT_KEY);
+}
+
+function readStoredString(key: string): string {
   try {
-    return localStorage.getItem(DRAFT_KEY) || "";
+    return localStorage.getItem(key) || "";
   } catch {
     return "";
   }
@@ -526,16 +556,20 @@ function clearDraft(): void {
   saveDraft("");
 }
 
-function loadStore(): ChatStore {
+function loadStore(preferredSessionId = ""): ChatStore {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
     if (parsed && typeof parsed.activeSessionId === "string" && Array.isArray(parsed.sessions)) {
-      return { activeSessionId: parsed.activeSessionId, sessions: parsed.sessions.filter(isSession) };
+      const sessions = parsed.sessions.filter(isSession);
+      if (preferredSessionId && !sessions.some((session) => session.id === preferredSessionId)) {
+        sessions.unshift(createSession(preferredSessionId));
+      }
+      return { activeSessionId: preferredSessionId || parsed.activeSessionId, sessions };
     }
   } catch {
     // Fall through to a fresh store.
   }
-  const session = createSession();
+  const session = createSession(preferredSessionId || undefined);
   return { activeSessionId: session.id, sessions: [session] };
 }
 
