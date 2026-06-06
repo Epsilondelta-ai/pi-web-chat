@@ -49,7 +49,7 @@ test("channels use pi-web standard names", () => {
   const channels = createChannels(pi);
   channels.input$.next("hello");
   assert.equal(channels.input$.getValue(), "hello");
-  assert.deepEqual(pi.listSubjects().sort(), ["chat.input", "chat.input.submitted", "session.activeId", "toast.requested"].sort());
+  assert.deepEqual(pi.listSubjects().sort(), ["chat.input", "chat.input.submitted", "plugin.pi-web-sidebar.selectedSession", "session.activeId", "toast.requested"].sort());
 });
 
 test("active workspace prefers sidebar, session, then dataset", () => {
@@ -79,6 +79,39 @@ test("backendCall wraps workspaceId and data", async () => {
   );
   assert.deepEqual(response, { ok: true });
   assert.deepEqual(calls, [{ method: "commands", input: { workspaceId: "workspace-1", data: { limit: 1 } } }]);
+});
+
+test("initializes from pi-web-sidebar selected session localStorage", async () => {
+  await withWindow(async ({ window }) => {
+    window.localStorage.setItem("plugin.pi-web-sidebar.activeSessionId", "sidebar-session");
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => (method === "commands" ? { commands: [] } : {}),
+    });
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "sidebar-session");
+    assert.equal(store.sessions[0].id, "sidebar-session");
+    cleanup();
+  });
+});
+
+test("loads sessions selected by pi-web-sidebar channel", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => (method === "commands" ? { commands: [] } : {}),
+    });
+
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null).next({ sessionId: "selected-by-sidebar", workspaceId: "workspace-1" });
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "selected-by-sidebar");
+    assert.ok(store.sessions.some((session) => session.id === "selected-by-sidebar"));
+    cleanup();
+  });
 });
 
 test("initial backend chat state adopts backend session id", async () => {
