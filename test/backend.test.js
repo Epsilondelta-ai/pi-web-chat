@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 
 const backend = new URL("../backend.js", import.meta.url).pathname;
 
-function runBackend(script, method, workspaceRoot, data = {}) {
+function runBackend(script, method, workspaceRoot, data = {}, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script, method, workspaceRoot], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [script, method, workspaceRoot], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -20,8 +20,8 @@ function runBackend(script, method, workspaceRoot, data = {}) {
   });
 }
 
-async function callBackend(method, workspaceRoot, data = {}) {
-  const result = await runBackend(backend, method, workspaceRoot, data);
+async function callBackend(method, workspaceRoot, data = {}, env = {}) {
+  const result = await runBackend(backend, method, workspaceRoot, data, env);
   assert.equal(result.code, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -65,6 +65,24 @@ test("search, read, and resolve workspace files", async () => {
   const context = await callBackend("resolveContext", root, { text: "use @README.md and `@ignored` @README.md", refs: ["src/app.js"] });
   assert.deepEqual(context.refs, ["src/app.js", "README.md"]);
   assert.equal(context.attachments.length, 2);
+});
+
+test("chatState parses pi JSONL session fixtures", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "session.jsonl"), [
+    JSON.stringify({ type: "session", id: "pi-session-1" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "hello" } }),
+    JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:06.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } }),
+    JSON.stringify({ type: "message", id: "t1", timestamp: "2026-01-02T03:04:07.000Z", message: { role: "toolResult", content: "done" } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, {}, { HOME: home });
+  assert.equal(result.activeSessionId, "pi-session-1");
+  assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["t1", "tool", "done"]]);
 });
 
 test("handle rejects unknown methods", async () => {

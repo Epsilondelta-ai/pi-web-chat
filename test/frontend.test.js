@@ -81,6 +81,59 @@ test("backendCall wraps workspaceId and data", async () => {
   assert.deepEqual(calls, [{ method: "commands", input: { workspaceId: "workspace-1", data: { limit: 1 } } }]);
 });
 
+test("initial backend chat state adopts backend session id", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState") return { activeSessionId: "pi-session", messages: [{ id: "backend-1", role: "assistant", text: "from backend", createdAt: 2 }] };
+        return {};
+      },
+    });
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "pi-session");
+    assert.equal(store.sessions[0].id, "pi-session");
+    assert.equal(store.sessions[0].messages[0].text, "from backend");
+    cleanup();
+  });
+});
+
+test("backend chat state reconciles without replacing local active messages", async () => {
+  await withWindow(async ({ window }) => {
+    let releaseChatState;
+    const chatStateReady = new Promise((resolve) => { releaseChatState = resolve; });
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState") {
+          await chatStateReady;
+          return { activeSessionId: "pi-session", messages: [{ id: "backend-1", role: "assistant", text: "from backend", createdAt: 2 }] };
+        }
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "local draft";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    releaseChatState();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.ok(store.sessions.some((session) => session.messages.some((message) => message.text === "local draft")));
+    assert.ok(store.sessions.some((session) => session.id === "pi-session" && session.messages.some((message) => message.text === "from backend")));
+    cleanup();
+  });
+});
+
 test("activate appends DOM hooks, publishes submits, and cleans up", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const cleanup = activate({
@@ -345,6 +398,7 @@ function tick() {
 
 async function withWindow(callback) {
   const window = new Window();
+  window.SyntaxError = SyntaxError;
   const previousDocument = globalThis.document;
   const previousLocalStorage = globalThis.localStorage;
   const previousPiWeb = globalThis.piWeb;

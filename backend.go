@@ -24,8 +24,10 @@ const (
 	maxFileBytes     = 256 * 1024
 	maxOutputBytes   = 512 * 1024
 	defaultTimeoutMs = 30000
-	maxSearchResults = 30
-	maxChatMessages  = 200
+	maxSearchResults          = 30
+	maxChatMessages           = 200
+	maxSkillDiscoveryDirs     = 4000
+	maxWorkspaceSearchEntries = 20000
 )
 
 var skipDirs = map[string]bool{
@@ -80,6 +82,11 @@ type refError struct {
 	Error string `json:"error"`
 }
 
+var (
+	skillCommandsOnce sync.Once
+	skillCommands     []commandInfo
+)
+
 var chatSlashCommands = []commandInfo{
 	{
 		Command:     "/chat-help",
@@ -125,6 +132,13 @@ func allSlashCommands() []commandInfo {
 }
 
 func discoverSkillCommands() []commandInfo {
+	skillCommandsOnce.Do(func() {
+		skillCommands = loadSkillCommands()
+	})
+	return append([]commandInfo(nil), skillCommands...)
+}
+
+func loadSkillCommands() []commandInfo {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -134,10 +148,15 @@ func discoverSkillCommands() []commandInfo {
 		filepath.Join(home, ".pi", "agent", "npm", "node_modules"),
 	}
 	out := []commandInfo{}
+	visited := 0
 	for _, root := range roots {
 		filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil || !d.IsDir() {
 				return nil
+			}
+			visited++
+			if visited > maxSkillDiscoveryDirs {
+				return filepath.SkipAll
 			}
 			if d.Name() == "node_modules" && path != roots[1] {
 				return filepath.SkipDir
@@ -531,9 +550,10 @@ func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, er
 	}
 	needle := strings.ToLower(query)
 	out := make([]fileRef, 0, limit)
+	visited := 0
 	var walk func(string)
 	walk = func(dir string) {
-		if len(out) >= limit {
+		if len(out) >= limit || visited >= maxWorkspaceSearchEntries {
 			return
 		}
 		entries, err := os.ReadDir(dir)
@@ -542,9 +562,10 @@ func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, er
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 		for _, entry := range entries {
-			if len(out) >= limit {
+			if len(out) >= limit || visited >= maxWorkspaceSearchEntries {
 				return
 			}
+			visited++
 			name := entry.Name()
 			if strings.HasPrefix(name, ".") && name != ".github" {
 				continue

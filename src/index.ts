@@ -403,10 +403,10 @@ async function refreshBackendChatState(state: State, dom: ChatDom): Promise<void
   try {
     const response = await backendCall(state.context, "chatState", {});
     if (Array.isArray(response.messages)) {
-      const messages = response.messages.filter(isRecord) as ChatMessage[];
+      const messages = response.messages.filter(isChatMessage);
       if (messages.length) {
-        const session = activeSession(state.store);
-        session.messages = messages.filter(isChatMessage).slice(-MAX_MESSAGES_PER_SESSION);
+        const session = sessionForBackendState(state.store, typeof response.activeSessionId === "string" ? response.activeSessionId : null);
+        session.messages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
         session.updatedAt = Date.now();
         saveStore(state.store);
         render(state, dom);
@@ -415,6 +415,30 @@ async function refreshBackendChatState(state: State, dom: ChatDom): Promise<void
   } catch {
     // pi session state is best-effort; local chat still works without it.
   }
+}
+
+function sessionForBackendState(store: ChatStore, backendSessionId: string | null): ChatSession {
+  if (!backendSessionId) return activeSession(store);
+  let session = store.sessions.find((item) => item.id === backendSessionId);
+  if (!session) {
+    const active = activeSession(store);
+    if (active.messages.length === 0) {
+      active.id = backendSessionId;
+      store.activeSessionId = backendSessionId;
+      session = active;
+    } else {
+      session = createSession(backendSessionId);
+      store.sessions.unshift(session);
+    }
+  }
+  return session;
+}
+
+function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMessage[]): ChatMessage[] {
+  const merged = new Map<string, ChatMessage>();
+  for (const message of localMessages) merged.set(message.id, message);
+  for (const message of backendMessages) merged.set(message.id, { ...merged.get(message.id), ...message });
+  return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
 function render(state: State, dom: ChatDom): void {
@@ -474,9 +498,9 @@ function createNewSession(state: State): void {
   saveStore(state.store);
 }
 
-function createSession(): ChatSession {
+function createSession(sessionId = id()): ChatSession {
   const now = Date.now();
-  return { id: id(), title: "New chat", createdAt: now, updatedAt: now, messages: [] };
+  return { id: sessionId, title: "New chat", createdAt: now, updatedAt: now, messages: [] };
 }
 
 function loadDraft(): string {
