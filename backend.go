@@ -21,13 +21,15 @@ import (
 )
 
 const (
-	maxFileBytes     = 256 * 1024
-	maxOutputBytes   = 512 * 1024
-	defaultTimeoutMs = 30000
-	maxSearchResults          = 30
-	maxChatMessages           = 200
-	maxSkillDiscoveryDirs     = 4000
-	maxWorkspaceSearchEntries = 20000
+	maxFileBytes                     = 256 * 1024
+	maxOutputBytes                   = 512 * 1024
+	defaultTimeoutMs                 = 30000
+	maxSearchResults                 = 30
+	maxChatMessages                  = 200
+	defaultMaxSkillDiscoveryDirs     = 4000
+	defaultMaxWorkspaceSearchEntries = 20000
+	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
+	envMaxWorkspaceSearchEntries     = "PI_WEB_CHAT_MAX_WORKSPACE_SEARCH_ENTRIES"
 )
 
 var skipDirs = map[string]bool{
@@ -155,7 +157,7 @@ func loadSkillCommands() []commandInfo {
 				return nil
 			}
 			visited++
-			if visited > maxSkillDiscoveryDirs {
+			if visited > configuredPositiveInt(envMaxSkillDiscoveryDirs, defaultMaxSkillDiscoveryDirs) {
 				return filepath.SkipAll
 			}
 			if d.Name() == "node_modules" && path != roots[1] {
@@ -246,8 +248,8 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 	case "chatState":
 		return readPiChatState(workspaceRoot)
 	case "searchFiles":
-		files, err := searchWorkspaceFiles(workspaceRoot, stringInput(input, "query"), intInput(input, "limit", maxSearchResults))
-		return map[string]any{"files": files}, err
+		files, truncated, err := searchWorkspaceFiles(workspaceRoot, stringInput(input, "query"), intInput(input, "limit", maxSearchResults))
+		return map[string]any{"files": files, "truncated": truncated}, err
 	case "readFile":
 		file, err := readWorkspaceTextFile(workspaceRoot, stringInput(input, "path"))
 		return map[string]any{"file": file}, err
@@ -277,6 +279,18 @@ func intInput(input request, key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func configuredPositiveInt(envName string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(envName))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func resolveRoot(root string) (string, error) {
@@ -537,10 +551,10 @@ func isLikelyText(data []byte, filePath string) bool {
 	return float64(suspicious)/float64(len(sample)) < 0.08
 }
 
-func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, error) {
+func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, bool, error) {
 	root, err := resolveRoot(workspaceRoot)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if limit <= 0 {
 		limit = maxSearchResults
@@ -551,9 +565,15 @@ func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, er
 	needle := strings.ToLower(query)
 	out := make([]fileRef, 0, limit)
 	visited := 0
+	entryLimit := configuredPositiveInt(envMaxWorkspaceSearchEntries, defaultMaxWorkspaceSearchEntries)
+	truncated := false
 	var walk func(string)
 	walk = func(dir string) {
-		if len(out) >= limit || visited >= maxWorkspaceSearchEntries {
+		if len(out) >= limit {
+			return
+		}
+		if visited >= entryLimit {
+			truncated = true
 			return
 		}
 		entries, err := os.ReadDir(dir)
@@ -562,7 +582,11 @@ func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, er
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 		for _, entry := range entries {
-			if len(out) >= limit || visited >= maxWorkspaceSearchEntries {
+			if len(out) >= limit {
+				return
+			}
+			if visited >= entryLimit {
+				truncated = true
 				return
 			}
 			visited++
@@ -589,7 +613,7 @@ func searchWorkspaceFiles(workspaceRoot, query string, limit int) ([]fileRef, er
 		}
 	}
 	walk(root)
-	return out, nil
+	return out, truncated, nil
 }
 
 func extractFileRefs(text string) []string {

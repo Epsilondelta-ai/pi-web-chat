@@ -85,6 +85,16 @@ test("chatState parses pi JSONL session fixtures", async () => {
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["t1", "tool", "done"]]);
 });
 
+test("searchFiles reports configurable traversal truncation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
+  await writeFile(join(root, "a.txt"), "a");
+  await writeFile(join(root, "b.txt"), "b");
+
+  const result = await callBackend("searchFiles", root, { query: "", limit: 10 }, { PI_WEB_CHAT_MAX_WORKSPACE_SEARCH_ENTRIES: "1" });
+  assert.equal(result.truncated, true);
+  assert.ok(result.files.length <= 1);
+});
+
 test("handle rejects unknown methods", async () => {
   await rejectBackend("missing", ".");
 });

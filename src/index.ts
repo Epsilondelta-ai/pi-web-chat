@@ -418,6 +418,8 @@ async function refreshBackendChatState(state: State, dom: ChatDom): Promise<void
 }
 
 function sessionForBackendState(store: ChatStore, backendSessionId: string | null): ChatSession {
+  // Adopt backend session state only when the visible local session is still empty.
+  // Once the user has local messages, backend history is stored by backend id without switching the active chat.
   if (!backendSessionId) return activeSession(store);
   let session = store.sessions.find((item) => item.id === backendSessionId);
   if (!session) {
