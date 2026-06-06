@@ -1,13 +1,22 @@
 # pi-web-chat
 
-Trusted local pi-web plugin that moves chat/composer trigger behavior into a plugin package.
+Trusted local pi-web chat feature plugin.
+
+This plugin follows the pi-web plugin standard: pi-web core supplies plugin lifecycle, stable DOM hooks, and the shared `piWeb` RxJS Subject registry. The plugin owns the chat surface, composer, local sessions, slash commands, file references, shell tool messages, and plugin settings UI.
 
 ## Features
 
-- `!` shell commands: uses the plugin backend `runShell` method and renders results as chat tool messages.
-- `/` slash commands: registers plugin commands and merges them with pi-web workspace commands.
-- `@` file references: searches workspace files through the plugin backend and attaches referenced text files before submit.
-- Chat/composer host integration: patches `<pi-app>` methods on activate and restores them on deactivate.
+- Chat/composer UI appended to `.main[data-main]`; no `<pi-app>` method patching.
+- Shared RxJS channels:
+  - `chat.input`
+  - `chat.input.submitted`
+  - `session.activeId`
+  - `toast.requested`
+- `/` slash commands loaded from the plugin backend and rendered by the plugin.
+- `@` file references searched and resolved through the plugin backend.
+- `!` shell commands executed through the Go backend and rendered as tool messages.
+- Local chat/session persistence in `localStorage`.
+- Toolbar and settings extensions through `[data-plugin-toolbar]` and `[data-plugin-settings-root]` when present.
 
 ## Install
 
@@ -23,22 +32,22 @@ In pi-web: **Settings → Plugins → local** and select this folder.
 }
 ```
 
-`entry` and `backend` both stay inside this plugin folder, matching the pi-web plugin contract.
+`entry` and `backend` both stay inside this plugin folder.
 
 ## Source layout
 
-- `src/` — TypeScript browser plugin source.
+- `src/index.ts` — browser plugin entry, lifecycle, channel binding, feature orchestration.
+- `src/dom.ts` — plugin-owned DOM, rendering, and styles.
+- `src/types.ts` — pi-web/RxJS declarations and plugin data contracts.
 - `index.js` — bundled browser entry generated from `src/index.ts`.
 - `backend.go` — Go backend for commands, file search/read/context resolution, and shell execution.
-- `backend.js` — Node wrapper that launches the prebuilt Go backend binary.
+- `backend.js` — Node launcher for the prebuilt Go backend binary.
 - `bin/<os>-<arch>/pi-web-chat-backend` — prebuilt backend binaries.
-- `test/` — Node test suite for backend behavior and frontend plugin patching.
+- `test/` — Node test suite for backend behavior and frontend plugin lifecycle/channel behavior.
 - `scripts/validate.js` — manifest/entry/backend validation.
 - `scripts/security-scan.js` — local static secret/shell-boundary scan.
 
 ## Build
-
-The browser entry is authored in TypeScript under `src/` and bundled to the manifest entry `index.js`.
 
 ```sh
 npm run build
@@ -73,6 +82,7 @@ Supported prebuilt targets:
 - Workspace-relative path resolution rejects traversal and NUL bytes.
 - Binary and oversized files are rejected.
 - Shell execution runs in the workspace root with timeout and output cap.
+- Frontend cleanup removes plugin-created DOM and unsubscribes RxJS subscriptions.
 - `npm run security:deps` runs `bun audit`.
 - `npm run security:static` runs the local static scan.
 
