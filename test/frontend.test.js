@@ -117,9 +117,11 @@ test("activate appends DOM hooks, publishes submits, and cleans up", async () =>
 
 test("slash commands and file refs are plugin-owned, not app patches", async () => {
   await withWindow(async ({ window }) => {
+    const backendCalls = [];
     const cleanup = activate({
       app: window.document.querySelector("pi-app"),
-      backend: async (method) => {
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
         if (method === "commands") return { commands: [{ command: "/fix", template: "fix it" }] };
         if (method === "searchFiles") return { files: [{ path: "README.md" }] };
         if (method === "resolveContext") return { attachments: [{ path: "README.md", name: "README.md", content: "docs", size: 4 }] };
@@ -145,6 +147,10 @@ test("slash commands and file refs are plugin-owned, not app patches", async () 
     assert.equal(root.querySelector("[data-refs-popover]").hidden, false);
     root.querySelector("[data-refs-list] button").click();
     assert.match(root.querySelector("[data-attachments]").textContent, /README.md/);
+    root.querySelector("[data-send]").click();
+    await tick();
+    const resolveCall = backendCalls.find((call) => call.method === "resolveContext");
+    assert.ok(resolveCall.input.data.refs.includes("README.md"));
 
     cleanup();
   });

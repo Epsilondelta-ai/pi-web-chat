@@ -232,7 +232,7 @@ function submitCurrentInput(state: State): void {
   const text = state.channels.input$.getValue().trim();
   if (!text) return;
   const attachments = [...state.selectedLocalAttachments];
-  clearPendingAttachments(state);
+  clearLocalAttachments(state);
   state.channels.submitted$.next({ text, attachments });
   state.channels.input$.next("");
 }
@@ -243,6 +243,7 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   renderAttachmentChips(dom.attachments, []);
 
   if (text.startsWith("!")) {
+    clearPendingAttachments(state);
     addMessage(state, { role: "user", text });
     render(state, dom);
     await runShell(state, dom, text.slice(1).trim());
@@ -363,6 +364,10 @@ function render(state: State, dom: ChatDom): void {
 
 function clearPendingAttachments(state: State): void {
   state.selectedRefs.clear();
+  clearLocalAttachments(state);
+}
+
+function clearLocalAttachments(state: State): void {
   state.selectedLocalAttachments = [];
   state.selectedAttachmentNames = [];
 }
