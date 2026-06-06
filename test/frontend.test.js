@@ -204,6 +204,43 @@ test("local session persistence is capped", async () => {
   });
 });
 
+test("shell submit clears pending local attachments", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "runShell") return { output: "ok\n", exitCode: 0, durationMs: 3 };
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const fileInput = root.querySelector("[data-file-input]");
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [new window.File(["secret"], "secret.txt", { type: "text/plain" })] });
+    fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await tick();
+    assert.match(root.querySelector("[data-attachments]").textContent, /secret.txt/);
+
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "!printf ok";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    await tick();
+    assert.equal(root.querySelector("[data-attachments]").textContent, "");
+
+    textarea.value = "normal message";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const normal = store.sessions[0].messages.find((message) => message.text === "normal message");
+    assert.equal(normal.attachments, undefined);
+    cleanup();
+  });
+});
+
 test("shell submit renders backend tool result", async () => {
   await withWindow(async ({ window }) => {
     const cleanup = activate({

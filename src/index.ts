@@ -231,13 +231,16 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
 function submitCurrentInput(state: State): void {
   const text = state.channels.input$.getValue().trim();
   if (!text) return;
-  state.channels.submitted$.next({ text, attachments: [...state.selectedLocalAttachments] });
+  const attachments = [...state.selectedLocalAttachments];
+  clearPendingAttachments(state);
+  state.channels.submitted$.next({ text, attachments });
   state.channels.input$.next("");
 }
 
 async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmitted): Promise<void> {
   const text = event.text.trim();
   if (!text) return;
+  renderAttachmentChips(dom.attachments, []);
 
   if (text.startsWith("!")) {
     addMessage(state, { role: "user", text });
@@ -248,10 +251,7 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
   addMessage(state, { role: "user", text, attachments });
-  state.selectedRefs.clear();
-  state.selectedLocalAttachments = [];
-  state.selectedAttachmentNames = [];
-  renderAttachmentChips(dom.attachments, []);
+  clearPendingAttachments(state);
   render(state, dom);
 }
 
@@ -361,6 +361,12 @@ function render(state: State, dom: ChatDom): void {
   renderMessages(dom.transcript, activeSession(state.store).messages);
 }
 
+function clearPendingAttachments(state: State): void {
+  state.selectedRefs.clear();
+  state.selectedLocalAttachments = [];
+  state.selectedAttachmentNames = [];
+}
+
 function addMessage(state: State, message: Omit<ChatMessage, "id" | "createdAt">): void {
   const session = activeSession(state.store);
   session.messages.push({ id: id(), createdAt: Date.now(), ...message, attachments: sanitizeAttachmentsForStorage(message.attachments) });
@@ -431,7 +437,11 @@ function saveStore(store: ChatStore): void {
       session.messages = session.messages.slice(-Math.floor(MAX_MESSAGES_PER_SESSION / 2));
     }
     pruneStore(store);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    } catch {
+      // Persistence is best effort; do not break chat submission on quota failure.
+    }
   }
 }
 
