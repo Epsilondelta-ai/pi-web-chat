@@ -1,206 +1,218 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Window } from "happy-dom";
-import { activate, commandName, createState, extractRefs, mergeCommands, backendCall, getActiveWorkspaceId, pluginStyleText } from "../index.js";
+import { AsyncSubject, BehaviorSubject, ReplaySubject, Subject } from "rxjs";
+import activate, { backendCall, commandName, createChannels, extractRefs, mergeCommands, pluginStyleText } from "../index.js";
 
-test("commandName normalizes command shapes", () => {
-  assert.equal(commandName({ command: "/x" }), "/x");
-  assert.equal(commandName({ cmd: "/y" }), "/y");
-  assert.equal(commandName({ name: "z" }), "/z");
-  assert.equal(commandName({}), "");
+function createPiWeb() {
+  const subjects = new Map();
+  const kinds = new Map();
+  function typed(name, kind, factory) {
+    if (subjects.has(name)) {
+      assert.equal(kinds.get(name), kind);
+      return subjects.get(name);
+    }
+    const subject = factory();
+    subjects.set(name, subject);
+    kinds.set(name, kind);
+    return subject;
+  }
+  return {
+    version: "test",
+    subject: (name) => typed(name, "subject", () => new Subject()),
+    behaviorSubject: (name, initial) => typed(name, "behavior", () => new BehaviorSubject(initial)),
+    replaySubject: (name, bufferSize = 1) => typed(name, "replay", () => new ReplaySubject(bufferSize)),
+    asyncSubject: (name) => typed(name, "async", () => new AsyncSubject()),
+    hasSubject: (name) => subjects.has(name),
+    deleteSubject: (name) => subjects.delete(name),
+    completeSubject: (name) => subjects.get(name)?.complete(),
+    listSubjects: () => [...subjects.keys()],
+  };
+}
+
+test("command utilities keep chat command behavior", () => {
+  assert.equal(commandName({ command: "/a" }), "/a");
+  assert.equal(commandName({ cmd: "/b" }), "/b");
+  assert.equal(commandName({ name: "c" }), "/c");
+  assert.deepEqual(mergeCommands([{ command: "/a" }], [{ command: "/a" }, { command: "/b" }]).map(commandName), ["/a", "/b"]);
+  assert.deepEqual(extractRefs("use @README.md and `@ignored` @src/app.ts @README.md"), ["README.md", "src/app.ts"]);
 });
 
-test("mergeCommands deduplicates core and plugin commands", () => {
-  const merged = mergeCommands([{ command: "/a" }, { command: "/b" }], [{ command: "/b" }, { command: "/c" }]);
-  assert.deepEqual(merged.map(commandName), ["/a", "/b", "/c"]);
-});
-
-test("extractRefs parses unique @ refs", () => {
-  assert.deepEqual(extractRefs("@a.ts then @dir/b.md and @a.ts"), ["a.ts", "dir/b.md"]);
-});
-
-test("plugin chat surface keeps grid placement on mobile", () => {
+test("plugin styles target plugin-owned DOM", () => {
   const styles = pluginStyleText();
-  assert.match(styles, /\.pi-web-chat-surface \{ display: flex; flex-direction: column; \}/);
-  assert.doesNotMatch(styles, /\.pi-web-chat-surface \{ display: contents; \}/);
+  assert.match(styles, /pi-web-chat-root/);
+  assert.match(styles, /pi-web-chat-transcript/);
+});
+
+test("channels use pi-web standard names", () => {
+  const pi = createPiWeb();
+  const channels = createChannels(pi);
+  channels.input$.next("hello");
+  assert.equal(channels.input$.getValue(), "hello");
+  assert.deepEqual(pi.listSubjects().sort(), ["chat.input", "chat.input.submitted", "session.activeId", "toast.requested"].sort());
 });
 
 test("backendCall wraps workspaceId and data", async () => {
   const calls = [];
-  const state = createState({
-    app: { dataset: { activeWorkspaceId: "w1" } },
-    backend(method, body) {
-      calls.push([method, body]);
-      return Promise.resolve({ ok: true });
+  const response = await backendCall(
+    {
+      app: { dataset: { activeWorkspaceId: "workspace-1" } },
+      backend: async (method, input) => {
+        calls.push({ method, input });
+        return { ok: true };
+      },
     },
-  });
-  assert.deepEqual(await backendCall(state, "commands", { reload: true }), { ok: true });
-  assert.deepEqual(calls, [["commands", { workspaceId: "w1", data: { reload: true } }]]);
-});
-
-test("active workspace prefers sidebar snapshot and falls back to session and dataset", () => {
-  assert.equal(
-    getActiveWorkspaceId(createState({
-      app: {
-        dataset: { activeWorkspaceId: "dataset-workspace" },
-        piWebSidebar: { getSnapshot: () => ({ activeWorkspaceId: "sidebar-workspace" }) },
-      },
-      session: { activeWorkspaceId: () => "session-workspace" },
-      backend() {
-        return Promise.resolve({});
-      },
-    })),
-    "sidebar-workspace",
+    "commands",
+    { limit: 1 },
   );
+  assert.deepEqual(response, { ok: true });
+  assert.deepEqual(calls, [{ method: "commands", input: { workspaceId: "workspace-1", data: { limit: 1 } } }]);
+});
 
-  assert.equal(
-    getActiveWorkspaceId(createState({
-      app: { dataset: { activeWorkspaceId: "dataset-workspace" } },
-      session: { activeWorkspaceId: () => "session-workspace" },
-      backend() {
-        return Promise.resolve({});
+test("activate appends DOM hooks, publishes submits, and cleans up", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "commands") return { commands: [{ command: "/hello", template: "hello" }] };
+        return {};
       },
-    })),
-    "session-workspace",
-  );
-
-  assert.equal(
-    getActiveWorkspaceId(createState({
-      app: { dataset: { activeWorkspaceId: "dataset-workspace" } },
-      backend() {
-        return Promise.resolve({});
-      },
-    })),
-    "dataset-workspace",
-  );
-});
-
-test("activate mounts surfaces and restores patched app methods", () => {
-  withPlugin(({ app, cleanup, cleanupCalls, mountCalls }) => {
-    app.renderSlashCommands = () => "core";
-    cleanup.activate();
-    assert.equal(app.classList.contains("pi-web-chat-enhanced"), true);
-    assert.deepEqual(mountCalls.map((call) => call[0]), ["chat", "composer"]);
-    assert.equal(typeof app.submitPrompt, "function");
-    cleanup.run();
-    assert.equal(app.classList.contains("pi-web-chat-enhanced"), false);
-    assert.equal(app.renderSlashCommands(), "core");
-    assert.equal("pickSlash" in app, false);
-    assert.deepEqual(cleanupCalls.sort(), ["chat", "composer"]);
-  });
-});
-
-test("patched file refs search and attach before submit", async () => {
-  await withPlugin(async ({ app, backendCalls, cleanup }) => {
-    const chips = [];
-    let renderedFiles = [];
-    let originalSubmitCalled = false;
-    app.prompt = document.createElement("textarea");
-    app.prompt.value = "check @README.md";
-    app.attachments = document.createElement("div");
-    app.currentPromptFileRef = () => ({ query: "REA" });
-    app.renderPromptFileRefs = (files) => {
-      renderedFiles = files;
-    };
-    app.addAttachmentChip = (name, size) => {
-      chips.push([name, size]);
-    };
-    app.submitPrompt = () => {
-      originalSubmitCalled = true;
-    };
-    cleanup.activate();
-    app.updatePromptFileRefs("@REA");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(renderedFiles, [{ path: "README.md" }]);
-    await app.submitPrompt();
-    assert.equal(originalSubmitCalled, true);
-    assert.deepEqual(chips, [["README.md", 5]]);
-    assert.deepEqual(backendCalls.map((call) => call[0]).filter((method) => method !== "commands"), ["searchFiles", "resolveContext"]);
-    cleanup.run();
-  });
-});
-
-test("patched shell command renders backend tool result", async () => {
-  await withPlugin(async ({ app, backendCalls, cleanup }) => {
-    const finishedTools = [];
-    const hookCalls = [];
-    app.apiConnected = true;
-    app.finishTool = (message) => {
-      finishedTools.push(message);
-    };
-    cleanup.activate();
-    await app.runPromptShellCommand("printf ok", {
-      onStart: () => hookCalls.push("start"),
-      onSuccess: () => hookCalls.push("success"),
-      onFinish: () => hookCalls.push("finish"),
     });
-    assert.deepEqual(hookCalls, ["start", "success", "finish"]);
-    assert.equal(finishedTools.at(-1).body, "ok");
-    assert.deepEqual(backendCalls.map((call) => call[0]).filter((method) => method !== "commands"), ["runShell"]);
-    cleanup.run();
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    assert.ok(root);
+    assert.ok(window.document.querySelector("[data-plugin-toolbar] .pi-web-chat-toolbar-button"));
+    assert.ok(window.document.querySelector("[data-plugin-settings-root] .pi-web-chat-settings"));
+
+    const submitted = [];
+    globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "hello world";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await Promise.resolve();
+
+    assert.equal(submitted[0].text, "hello world");
+    assert.match(root.querySelector("[data-chat-transcript]").textContent, /hello world/);
+    assert.ok(backendCalls.some((call) => call.method === "commands"));
+
+    cleanup();
+    assert.equal(window.document.querySelector(".pi-web-chat-root"), null);
+    assert.equal(window.document.querySelector("#pi-web-chat-style"), null);
   });
 });
 
-async function withPlugin(callback) {
-  const window = new Window();
-  const previousDocument = globalThis.document;
-  globalThis.document = window.document;
+test("slash commands and file refs are plugin-owned, not app patches", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [{ command: "/fix", template: "fix it" }] };
+        if (method === "searchFiles") return { files: [{ path: "README.md" }] };
+        if (method === "resolveContext") return { attachments: [{ path: "README.md", name: "README.md", content: "docs", size: 4 }] };
+        return {};
+      },
+    });
 
-  try {
-    const app = window.document.createElement("pi-app");
-    app.innerHTML = '<div data-prompt-meta></div>';
-    app.dataset.activeWorkspaceId = "w1";
-    const backendCalls = [];
-    const cleanupCalls = [];
-    const mountCalls = [];
-    let deactivate = () => {};
-    const cleanup = {
-      activate() {
-        deactivate = activate(createContext(app, backendCalls, mountCalls, cleanupCalls));
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+
+    textarea.value = "/";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    await tick();
+    assert.equal(root.querySelector("[data-slash-popover]").hidden, false);
+    root.querySelector("[data-slash-list] button").click();
+    assert.equal(textarea.value, "fix it");
+
+    textarea.value = "read @REA";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    await tick();
+    assert.equal(root.querySelector("[data-refs-popover]").hidden, false);
+    root.querySelector("[data-refs-list] button").click();
+    assert.match(root.querySelector("[data-attachments]").textContent, /README.md/);
+
+    cleanup();
+  });
+});
+
+test("local session persistence is capped", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => (method === "commands" ? { commands: [] } : {}),
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    for (let i = 0; i < 205; i += 1) {
+      textarea.value = `message ${i}`;
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      root.querySelector("[data-send]").click();
+    }
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.sessions.length, 1);
+    assert.equal(store.sessions[0].messages.length, 200);
+    assert.equal(store.sessions[0].messages[0].text, "message 5");
+    cleanup();
+  });
+});
+
+test("shell submit renders backend tool result", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "runShell") return { output: "ok\n", exitCode: 0, durationMs: 3 };
+        return {};
       },
-      run() {
-        deactivate();
-      },
-    };
-    await callback({ app, backendCalls, cleanup, cleanupCalls, mountCalls });
-  } finally {
-    globalThis.document = previousDocument;
-  }
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "!printf ok";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    await tick();
+
+    assert.match(root.querySelector("[data-chat-transcript]").textContent, /\$ printf ok/);
+    assert.match(root.querySelector("[data-chat-transcript]").textContent, /\[exit 0 · 3ms\]/);
+    cleanup();
+  });
+});
+
+function tick() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function createContext(app, backendCalls, mountCalls, cleanupCalls) {
-  return {
-    app,
-    backend(method, body) {
-      backendCalls.push([method, body]);
+async function withWindow(callback) {
+  const window = new Window();
+  const previousDocument = globalThis.document;
+  const previousLocalStorage = globalThis.localStorage;
+  const previousPiWeb = globalThis.piWeb;
+  const backendCalls = [];
+  globalThis.document = window.document;
+  globalThis.localStorage = window.localStorage;
+  globalThis.piWeb = createPiWeb();
 
-      if (method === "commands") {
-        return Promise.resolve({ commands: [] });
-      }
+  window.document.body.innerHTML = `
+    <pi-app data-active-workspace-id="workspace-1">
+      <header><div data-plugin-toolbar></div></header>
+      <main class="main" data-main></main>
+      <div data-plugin-settings-root></div>
+    </pi-app>`;
 
-      if (method === "searchFiles") {
-        return Promise.resolve({ files: [{ path: "README.md" }] });
-      }
-
-      if (method === "resolveContext") {
-        return Promise.resolve({ attachments: [{ name: "README.md", content: "hello" }] });
-      }
-
-      if (method === "runShell") {
-        return Promise.resolve({ exitCode: 0, output: "ok", durationMs: 3 });
-      }
-
-      return Promise.resolve({});
-    },
-    mount: {
-      chat(element, options) {
-        mountCalls.push(["chat", element.className, options]);
-        return () => cleanupCalls.push("chat");
-      },
-      composer(element, options) {
-        mountCalls.push(["composer", element.className, options]);
-        return () => cleanupCalls.push("composer");
-      },
-    },
-  };
+  try {
+    await callback({ window, backendCalls });
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.localStorage = previousLocalStorage;
+    globalThis.piWeb = previousPiWeb;
+  }
 }

@@ -1,92 +1,165 @@
-import { createChatSurface, createComposerSurface, installBadge, installStyles, pluginClass, pluginStyleText } from "./dom";
-import { runBackendShell } from "./shell";
+import type { BehaviorSubject, Subject } from "rxjs";
+import {
+  commandName,
+  createChatDom,
+  installSettingsSection,
+  installStyles,
+  installToolbarButton,
+  pluginClass,
+  pluginStyleText,
+  renderAttachmentChips,
+  renderFileRefs,
+  renderMessages,
+  renderSlashCommands,
+  type ChatDom,
+} from "./dom";
 import type {
-  AppElement,
-  AppMethodName,
-  AppMethods,
   BackendResponse,
+  ChatInputSubmitted,
+  ChatMessage,
+  ChatSession,
+  ChatStore,
   Cleanup,
+  Disposer,
   FileAttachment,
+  FileSearchResult,
   JsonRecord,
+  PiWebSubjects,
   PluginCommand,
   PluginContext,
-  PluginState,
-  ShellHooks,
+  Runtime,
+  ToastRequest,
 } from "./types";
 
-const PLUGIN_CLASS = pluginClass();
+const STORAGE_KEY = "pi-web-chat.sessions.v1";
 const FILE_REF_LIMIT = 12;
-const PATCHED_METHODS: AppMethodName[] = [
-  "renderSlashCommands",
-  "pickSlash",
-  "updatePromptFileRefs",
-  "pickPromptFileRef",
-  "submitPrompt",
-  "runPromptShellCommand",
-  "loadWorkspaceCommands",
-];
+const MAX_SESSIONS = 20;
+const MAX_MESSAGES_PER_SESSION = 200;
 
-type OriginalMethod = { exists: boolean; value: AppMethods[AppMethodName] };
+type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
 
-export { createChatSurface, createComposerSurface, pluginStyleText };
+type Channels = {
+  input$: BehaviorSubject<string>;
+  submitted$: Subject<ChatInputSubmitted>;
+  activeSessionId$: BehaviorSubject<string | null>;
+  toastRequested$: Subject<ToastRequest>;
+};
 
-export function activate(context: PluginContext): Cleanup {
-  const app: AppElement = context.app;
-  const state: PluginState = createState(context);
-  const style: HTMLStyleElement = installStyles();
-  const cleanupChat: Cleanup = context.mount.chat(createChatSurface(), { replace: true });
-  const cleanupComposer: Cleanup = context.mount.composer(createComposerSurface(), { replace: true });
-  const restoreMethods: Cleanup = patchAppMethods(app, state);
-  const badge: HTMLSpanElement = installBadge(app);
-  app.classList.add(PLUGIN_CLASS);
-  void refreshPluginCommands(app, state);
+type State = {
+  context: PluginContext;
+  channels: Channels;
+  store: ChatStore;
+  selectedRefs: Set<string>;
+  selectedAttachmentNames: string[];
+  commands: PluginCommand[];
+  fileSearchToken: number;
+};
+
+class Disposables {
+  #items: Disposer[] = [];
+
+  add<T extends Disposer | undefined>(item: T): T {
+    if (item) this.#items.push(item);
+    return item;
+  }
+
+  listen(target: EventTarget, type: string, listener: EventListenerOrEventListenerObject): void {
+    target.addEventListener(type, listener);
+    this.add({ remove: () => target.removeEventListener(type, listener) });
+  }
+
+  dispose(): void {
+    for (const item of this.#items.splice(0).reverse()) {
+      if (typeof item === "function") item();
+      else if ("unsubscribe" in item) item.unsubscribe();
+      else item.remove();
+    }
+  }
+}
+
+export { commandName, createChatDom, pluginClass, pluginStyleText };
+
+export default function activate(context: PluginContext = {}): Cleanup {
+  const disposables = new Disposables();
+  const app = context.app as AppWithRuntime | undefined;
+  app?.piWebChat?.dispose();
+
+  const pi = requirePiWeb();
+  const channels = createChannels(pi);
+  const state: State = {
+    context,
+    channels,
+    store: loadStore(),
+    selectedRefs: new Set(),
+    selectedAttachmentNames: [],
+    commands: [],
+    fileSearchToken: 0,
+  };
+
+  channels.activeSessionId$.next(state.store.activeSessionId);
+
+  const style = disposables.add(installStyles());
+  const dom = createChatDom();
+  const main = findMainSurface();
+  main.append(dom.root);
+  disposables.add(dom.root);
+  disposables.add(style);
+
+  disposables.add(installToolbarButton(() => {
+    createNewSession(state);
+    channels.input$.next("");
+    render(state, dom);
+  }));
+  disposables.add(installSettingsSection());
+
+  bindDom(disposables, state, dom);
+  bindChannels(disposables, state, dom);
+  render(state, dom);
+  void refreshCommands(state, dom);
+
+  const runtime = { dispose: () => disposables.dispose() };
+  if (app) app.piWebChat = runtime;
 
   return (): void => {
-    restoreMethods();
-    badge.remove();
-    cleanupComposer();
-    cleanupChat();
-    style.remove();
-    app.classList.remove(PLUGIN_CLASS);
+    disposables.dispose();
+    if (app?.piWebChat === runtime) delete app.piWebChat;
   };
 }
 
-export default activate;
-
-export function createState(context: PluginContext): PluginState {
-  return { context, commands: [], commandMap: new Map(), fileSearchToken: 0, selectedRefs: new Set() };
+export function createChannels(pi: PiWebSubjects): Channels {
+  return {
+    input$: pi.behaviorSubject<string>("chat.input", ""),
+    submitted$: pi.subject<ChatInputSubmitted>("chat.input.submitted"),
+    activeSessionId$: pi.behaviorSubject<string | null>("session.activeId", null),
+    toastRequested$: pi.subject<ToastRequest>("toast.requested"),
+  };
 }
 
-export function getActiveWorkspaceId(state: PluginState): string {
-  return (
-    state.context.app.piWebSidebar?.getSnapshot?.().activeWorkspaceId ||
-    state.context.session?.activeWorkspaceId?.() ||
-    state.context.app.dataset.activeWorkspaceId ||
-    ""
-  );
-}
+export function extractRefs(text: unknown): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  const pattern = /(^|[\s`])@([^\s@`]+)/g;
+  let match: RegExpExecArray | null = pattern.exec(String(text || ""));
 
-export async function backendCall(state: PluginState, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
-  const workspaceId: string = getActiveWorkspaceId(state);
-  const response: unknown = await state.context.backend(method, { workspaceId, data });
-  return isRecord(response) ? response : {};
-}
+  while (match !== null) {
+    const ref = match[2] || "";
+    if ((match[1] || "") !== "`" && ref && !seen.has(ref)) {
+      seen.add(ref);
+      refs.push(ref);
+    }
+    match = pattern.exec(String(text || ""));
+  }
 
-export function commandName(command: PluginCommand): string {
-  return command.command || command.cmd || (command.name ? `/${command.name}` : "");
+  return refs;
 }
 
 export function mergeCommands(coreCommands: PluginCommand[] = [], pluginCommands: PluginCommand[] = []): PluginCommand[] {
   const out: PluginCommand[] = [];
-  const seen: Set<string> = new Set();
+  const seen = new Set<string>();
 
   for (const command of [...coreCommands, ...pluginCommands]) {
-    const name: string = commandName(command);
-
-    if (!name || seen.has(name)) {
-      continue;
-    }
-
+    const name = commandName(command);
+    if (!name || seen.has(name)) continue;
     seen.add(name);
     out.push(command);
   }
@@ -94,193 +167,271 @@ export function mergeCommands(coreCommands: PluginCommand[] = [], pluginCommands
   return out;
 }
 
-export function extractRefs(text: unknown): string[] {
-  const refs: string[] = [];
-  const seen: Set<string> = new Set();
-  const pattern: RegExp = /(^|[\s`])@([^\s@`]+)/g;
-  let match: RegExpExecArray | null = pattern.exec(String(text || ""));
-
-  while (match !== null) {
-    const ref: string = match[2] || "";
-
-    if ((match[1] || "") !== "`" && ref && !seen.has(ref)) {
-      seen.add(ref);
-      refs.push(ref);
-    }
-
-    match = pattern.exec(String(text || ""));
-  }
-
-  return refs;
+export function getActiveWorkspaceId(context: PluginContext): string {
+  return context.app?.dataset.activeWorkspaceId || "";
 }
 
-function patchAppMethods(app: AppElement, state: PluginState): Cleanup {
-  const originals: Map<AppMethodName, OriginalMethod> = snapshotMethods(app);
+export async function backendCall(context: PluginContext, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
+  if (!context.backend) return {};
+  const workspaceId = getActiveWorkspaceId(context);
+  const response = await context.backend(method, { workspaceId, data });
+  return isRecord(response) ? response : {};
+}
 
-  app.renderSlashCommands = function renderSlashCommandsWithPlugin(
-    this: AppElement,
-    commands: PluginCommand[] = [],
-    diagnostics: unknown[] = [],
-  ): unknown {
-    return getOriginal(originals, "renderSlashCommands")?.call(this, mergeCommands(commands, state.commands), diagnostics);
-  };
-  app.pickSlash = function pickSlashWithPlugin(this: AppElement, command: string): unknown {
-    const pluginCommand: PluginCommand | undefined = state.commandMap.get(command);
+function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
+  disposables.listen(dom.textarea, "input", () => {
+    state.channels.input$.next(dom.textarea.value);
+    dom.sendButton.setAttribute("aria-disabled", dom.textarea.value.trim() ? "false" : "true");
+    void updateAssistPopovers(state, dom, dom.textarea.value);
+  });
 
-    if (pluginCommand?.template) {
-      state.context.composer?.setPrompt?.(pluginCommand.template);
-      this.slashPopover?.setAttribute("hidden", "");
-      return undefined;
+  disposables.listen(dom.textarea, "keydown", (event) => {
+    const keyEvent = event as KeyboardEvent;
+    if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) {
+      keyEvent.preventDefault();
+      submitCurrentInput(state);
     }
+  });
 
-    return getOriginal(originals, "pickSlash")?.call(this, command);
-  };
-  app.loadWorkspaceCommands = async function loadWorkspaceCommandsWithPlugin(
-    this: AppElement,
-    workspaceId: string,
-    options: JsonRecord = {},
-  ): Promise<unknown> {
-    await refreshPluginCommands(this, state);
-    return getOriginal(originals, "loadWorkspaceCommands")?.call(this, workspaceId, options);
-  };
-  app.updatePromptFileRefs = function updatePromptFileRefsWithBackend(this: AppElement, value: string = this.prompt?.value || ""): void {
-    updatePromptFileRefs(this, state, originals, value);
-  };
-  app.pickPromptFileRef = function pickPromptFileRefWithTracking(this: AppElement, path?: string): unknown {
-    if (path) {
+  disposables.listen(dom.sendButton, "click", () => submitCurrentInput(state));
+  disposables.listen(dom.attachButton, "click", () => dom.fileInput.click());
+  disposables.listen(dom.fileInput, "change", () => {
+    state.selectedAttachmentNames = Array.from(dom.fileInput.files || []).map((file) => file.name);
+    renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
+  });
+}
+
+function bindChannels(disposables: Disposables, state: State, dom: ChatDom): void {
+  disposables.add(state.channels.input$.subscribe((value) => {
+    if (dom.textarea.value !== value) dom.textarea.value = value;
+    dom.sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
+  }));
+
+  disposables.add(state.channels.submitted$.subscribe((event) => {
+    void handleSubmitted(state, dom, event);
+  }));
+
+  disposables.add(state.channels.activeSessionId$.subscribe((id) => {
+    if (id && id !== state.store.activeSessionId && state.store.sessions.some((session) => session.id === id)) {
+      state.store.activeSessionId = id;
+      saveStore(state.store);
+      render(state, dom);
+    }
+  }));
+}
+
+function submitCurrentInput(state: State): void {
+  const text = state.channels.input$.getValue().trim();
+  if (!text) return;
+  state.channels.submitted$.next({ text, attachments: [] });
+  state.channels.input$.next("");
+}
+
+async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmitted): Promise<void> {
+  const text = event.text.trim();
+  if (!text) return;
+
+  if (text.startsWith("!")) {
+    addMessage(state, { role: "user", text });
+    render(state, dom);
+    await runShell(state, dom, text.slice(1).trim());
+    return;
+  }
+
+  const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
+  addMessage(state, { role: "user", text, attachments });
+  state.selectedRefs.clear();
+  state.selectedAttachmentNames = [];
+  renderAttachmentChips(dom.attachments, []);
+  render(state, dom);
+}
+
+async function runShell(state: State, dom: ChatDom, command: string): Promise<void> {
+  if (!command) return;
+  addMessage(state, { role: "tool", text: `$ ${command}\n(running...)`, meta: { status: "running" } });
+  render(state, dom);
+
+  try {
+    const result = await backendCall(state.context, "runShell", { command });
+    const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
+    const durationMs = typeof result.durationMs === "number" ? result.durationMs : 0;
+    const output = typeof result.output === "string" ? result.output : "";
+    replaceLastRunningTool(state, `$ ${command}\n${output}${output.endsWith("\n") || !output ? "" : "\n"}[exit ${exitCode} · ${durationMs}ms${result.truncated ? " · truncated" : ""}]`, exitCode === 0 ? "ok" : "err");
+  } catch (error) {
+    replaceLastRunningTool(state, `$ ${command}\n${errorText(error)}`, "err");
+    state.channels.toastRequested$.next({ level: "error", message: `shell failed: ${errorText(error)}` });
+  }
+
+  render(state, dom);
+}
+
+async function resolveAttachments(state: State, text: string): Promise<FileAttachment[]> {
+  const refs = [...new Set([...state.selectedRefs, ...extractRefs(text)])];
+  if (!refs.length) return [];
+
+  try {
+    const response = await backendCall(state.context, "resolveContext", { text, refs });
+    return Array.isArray(response.attachments) ? response.attachments.filter(isRecord) as FileAttachment[] : [];
+  } catch (error) {
+    state.channels.toastRequested$.next({ level: "warning", message: `@ context failed: ${errorText(error)}` });
+    return [];
+  }
+}
+
+async function refreshCommands(state: State, dom: ChatDom): Promise<void> {
+  try {
+    const response = await backendCall(state.context, "commands", {});
+    state.commands = Array.isArray(response.commands) ? response.commands.filter(isRecord) as PluginCommand[] : [];
+    renderSlashCommands(dom.slashList, state.commands, (command) => {
+      const template = command.template || commandName(command);
+      state.channels.input$.next(template);
+      dom.slashPopover.hidden = true;
+      dom.textarea.focus();
+    });
+  } catch (error) {
+    state.channels.toastRequested$.next({ level: "warning", message: `commands unavailable: ${errorText(error)}` });
+  }
+}
+
+async function updateAssistPopovers(state: State, dom: ChatDom, value: string): Promise<void> {
+  if (value.startsWith("/")) {
+    if (!state.commands.length) await refreshCommands(state, dom);
+    dom.slashPopover.hidden = state.commands.length === 0;
+  } else {
+    dom.slashPopover.hidden = true;
+  }
+
+  const query = currentFileRefQuery(value);
+  if (!query) {
+    dom.refsPopover.hidden = true;
+    return;
+  }
+
+  const token = ++state.fileSearchToken;
+  try {
+    const response = await backendCall(state.context, "searchFiles", { query, limit: FILE_REF_LIMIT });
+    if (token !== state.fileSearchToken) return;
+    const files = Array.isArray(response.files) ? response.files.filter(isRecord) as FileSearchResult[] : [];
+    renderFileRefs(dom.refsList, files, (file) => {
+      const path = file.path || file.name || "";
+      if (!path) return;
       state.selectedRefs.add(path);
-    }
-
-    return getOriginal(originals, "pickPromptFileRef")?.call(this, path);
-  };
-  app.submitPrompt = async function submitPromptWithResolvedRefs(this: AppElement): Promise<unknown> {
-    await attachReferencedFiles(this, state);
-    return getOriginal(originals, "submitPrompt")?.call(this);
-  };
-  app.runPromptShellCommand = async function runPromptShellCommandWithBackend(
-    this: AppElement,
-    command: string,
-    hooks: ShellHooks = {},
-  ): Promise<void> {
-    await runBackendShell(this, state, command, hooks);
-  };
-
-  return (): void => restoreAppMethods(app, originals);
-}
-
-function snapshotMethods(app: AppElement): Map<AppMethodName, OriginalMethod> {
-  return new Map(PATCHED_METHODS.map((name: AppMethodName) => [name, { exists: name in app, value: app[name] }]));
-}
-
-function getOriginal<Name extends AppMethodName>(originals: Map<AppMethodName, OriginalMethod>, name: Name): AppMethods[Name] {
-  return originals.get(name)?.value as AppMethods[Name];
-}
-
-function restoreAppMethods(app: AppElement, originals: Map<AppMethodName, OriginalMethod>): void {
-  restoreMethod(app, originals, "renderSlashCommands");
-  restoreMethod(app, originals, "pickSlash");
-  restoreMethod(app, originals, "updatePromptFileRefs");
-  restoreMethod(app, originals, "pickPromptFileRef");
-  restoreMethod(app, originals, "submitPrompt");
-  restoreMethod(app, originals, "runPromptShellCommand");
-  restoreMethod(app, originals, "loadWorkspaceCommands");
-}
-
-function restoreMethod<Name extends AppMethodName>(app: AppElement, originals: Map<AppMethodName, OriginalMethod>, name: Name): void {
-  const original: OriginalMethod | undefined = originals.get(name);
-
-  if (original?.exists) {
-    setMethod(app, name, original.value as AppMethods[Name]);
-    return;
+      renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
+      dom.refsPopover.hidden = true;
+      dom.textarea.focus();
+    });
+    dom.refsPopover.hidden = files.length === 0;
+  } catch {
+    dom.refsPopover.hidden = true;
   }
-
-  delete app[name];
 }
 
-function setMethod<Name extends AppMethodName>(app: AppElement, name: Name, value: AppMethods[Name]): void {
-  Object.assign(app, { [name]: value });
+function currentFileRefQuery(value: string): string {
+  const match = /(?:^|\s)@([^\s@`]*)$/.exec(value);
+  return match?.[1] || "";
 }
 
-function updatePromptFileRefs(app: AppElement, state: PluginState, originals: Map<AppMethodName, OriginalMethod>, value: string): void {
-  const ref = app.currentPromptFileRef?.(value);
+function render(state: State, dom: ChatDom): void {
+  renderMessages(dom.transcript, activeSession(state.store).messages);
+}
 
-  if (!ref?.query) {
-    app.hidePromptFileRefs?.();
-    return;
+function addMessage(state: State, message: Omit<ChatMessage, "id" | "createdAt">): void {
+  const session = activeSession(state.store);
+  session.messages.push({ id: id(), createdAt: Date.now(), ...message });
+  if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
+    session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
   }
-
-  const token: number = ++state.fileSearchToken;
-  void backendCall(state, "searchFiles", { query: ref.query, limit: FILE_REF_LIMIT })
-    .then((response: BackendResponse): void => {
-      const files: JsonRecord[] = Array.isArray(response.files) ? response.files.filter(isRecord) : [];
-
-      if (token !== state.fileSearchToken || !files.length) {
-        app.hidePromptFileRefs?.();
-        return;
-      }
-
-      app.renderPromptFileRefs?.(files);
-    })
-    .catch((): unknown => getOriginal(originals, "updatePromptFileRefs")?.call(app, value));
+  if (session.title === "New chat" && message.role === "user") session.title = message.text.slice(0, 48) || session.title;
+  session.updatedAt = Date.now();
+  pruneStore(state.store);
+  saveStore(state.store);
 }
 
-async function refreshPluginCommands(app: AppElement, state: PluginState): Promise<void> {
+function replaceLastRunningTool(state: State, text: string, status: "ok" | "err"): void {
+  const session = activeSession(state.store);
+  const message = [...session.messages].reverse().find((item) => item.role === "tool" && item.meta?.status === "running");
+  if (message) {
+    message.text = text;
+    message.meta = { status };
+    session.updatedAt = Date.now();
+    saveStore(state.store);
+  }
+}
+
+function activeSession(store: ChatStore): ChatSession {
+  let session = store.sessions.find((item) => item.id === store.activeSessionId);
+  if (!session) {
+    session = createSession();
+    store.sessions.unshift(session);
+    store.activeSessionId = session.id;
+    saveStore(store);
+  }
+  return session;
+}
+
+function createNewSession(state: State): void {
+  const session = createSession();
+  state.store.sessions.unshift(session);
+  state.store.activeSessionId = session.id;
+  state.channels.activeSessionId$.next(session.id);
+  pruneStore(state.store);
+  saveStore(state.store);
+}
+
+function createSession(): ChatSession {
+  const now = Date.now();
+  return { id: id(), title: "New chat", createdAt: now, updatedAt: now, messages: [] };
+}
+
+function loadStore(): ChatStore {
   try {
-    const response: BackendResponse = await backendCall(state, "commands", {});
-    state.commands = Array.isArray(response.commands) ? response.commands.filter(isPluginCommand) : [];
-    state.commandMap = new Map(state.commands.map((command: PluginCommand) => [commandName(command), command]));
-
-    if (app.querySelector(".slash-list")) {
-      app.renderSlashCommands?.([], []);
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
+    if (parsed && typeof parsed.activeSessionId === "string" && Array.isArray(parsed.sessions)) {
+      return { activeSessionId: parsed.activeSessionId, sessions: parsed.sessions.filter(isSession) };
     }
-  } catch (error: unknown) {
-    console.warn("pi-web-chat commands unavailable", error);
+  } catch {
+    // Fall through to a fresh store.
+  }
+  const session = createSession();
+  return { activeSessionId: session.id, sessions: [session] };
+}
+
+function saveStore(store: ChatStore): void {
+  pruneStore(store);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function pruneStore(store: ChatStore): void {
+  store.sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  const active = store.sessions.find((session) => session.id === store.activeSessionId);
+  const rest = store.sessions.filter((session) => session.id !== store.activeSessionId).slice(0, Math.max(0, MAX_SESSIONS - 1));
+  store.sessions = active ? [active, ...rest] : store.sessions.slice(0, MAX_SESSIONS);
+  for (const session of store.sessions) {
+    if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
+      session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
+    }
   }
 }
 
-async function attachReferencedFiles(app: AppElement, state: PluginState): Promise<void> {
-  if (!app.prompt || app.promptShellMode) {
-    return;
-  }
+function findMainSurface(): HTMLElement {
+  return document.querySelector<HTMLElement>(".main[data-main]") || document.querySelector<HTMLElement>("[data-main]") || document.body;
+}
 
-  const text: string = state.context.composer?.getPrompt?.() || app.prompt.value || "";
-  const refs: string[] = [...new Set([...state.selectedRefs, ...extractRefs(text)])];
+function requirePiWeb(): PiWebSubjects {
+  if (typeof piWeb === "undefined" || !piWeb) throw new Error("pi-web-chat requires the piWeb Subject registry");
+  return piWeb;
+}
 
-  if (!refs.length) {
-    return;
-  }
-
-  try {
-    const response: BackendResponse = await backendCall(state, "resolveContext", { text, refs });
-    const attachments: FileAttachment[] = Array.isArray(response.attachments) ? response.attachments.filter(isFileAttachment) : [];
-
-    for (const file of attachments) {
-      app.attachmentContents ??= [];
-      app.attachmentContents.push(file);
-      app.addAttachmentChip?.(file.name || file.path, file.size || file.content?.length || 0, null, "");
-    }
-
-    if (attachments.length && app.attachments) {
-      app.attachments.hidden = !app.attachments.children.length;
-      app.updatePrompt?.();
-    }
-  } catch (error: unknown) {
-    state.context.chat?.appendMessage?.({ kind: "banner", text: `@ context failed: ${errorText(error)}` });
-  } finally {
-    state.selectedRefs.clear();
-  }
+function isSession(value: unknown): value is ChatSession {
+  return isRecord(value) && typeof value.id === "string" && Array.isArray(value.messages);
 }
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null;
 }
 
-function isPluginCommand(value: unknown): value is PluginCommand {
-  return isRecord(value);
-}
-
-function isFileAttachment(value: unknown): value is FileAttachment {
-  return isRecord(value);
+function id(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function errorText(error: unknown): string {
