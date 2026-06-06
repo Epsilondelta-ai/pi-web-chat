@@ -363,7 +363,7 @@ function render(state: State, dom: ChatDom): void {
 
 function addMessage(state: State, message: Omit<ChatMessage, "id" | "createdAt">): void {
   const session = activeSession(state.store);
-  session.messages.push({ id: id(), createdAt: Date.now(), ...message });
+  session.messages.push({ id: id(), createdAt: Date.now(), ...message, attachments: sanitizeAttachmentsForStorage(message.attachments) });
   if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
     session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
   }
@@ -424,7 +424,20 @@ function loadStore(): ChatStore {
 
 function saveStore(store: ChatStore): void {
   pruneStore(store);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    for (const session of store.sessions) {
+      session.messages = session.messages.slice(-Math.floor(MAX_MESSAGES_PER_SESSION / 2));
+    }
+    pruneStore(store);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  }
+}
+
+function sanitizeAttachmentsForStorage(attachments: FileAttachment[] | undefined): FileAttachment[] | undefined {
+  if (!attachments?.length) return undefined;
+  return attachments.map(({ content: _content, ...attachment }) => attachment);
 }
 
 function pruneStore(store: ChatStore): void {

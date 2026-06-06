@@ -173,6 +173,9 @@ test("local file attachments are included on submit", async () => {
 
     assert.equal(submitted[0].attachments[0].name, "note.txt");
     assert.equal(submitted[0].attachments[0].content, "hello");
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.sessions[0].messages[0].attachments[0].name, "note.txt");
+    assert.equal("content" in store.sessions[0].messages[0].attachments[0], false);
     cleanup();
   });
 });
