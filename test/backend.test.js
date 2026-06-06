@@ -32,9 +32,13 @@ async function rejectBackend(method, workspaceRoot, data = {}) {
   assert.ok(result.stderr.trim());
 }
 
-test("commands returns chat slash commands", async () => {
+test("commands returns chat and discovered slash commands", async () => {
   const result = await callBackend("commands", ".");
-  assert.deepEqual(result.commands.map((item) => item.command), ["/chat-help", "/chat-context", "/chat-review"]);
+  const names = result.commands.map((item) => item.command);
+  assert.ok(names.includes("/chat-help"));
+  assert.ok(names.includes("/chat-context"));
+  assert.ok(names.includes("/chat-review"));
+  assert.equal(new Set(names).size, names.length);
 });
 
 test("readFile rejects path traversal", async () => {
@@ -73,7 +77,7 @@ test("backend wrapper works through symlinked plugin installs", async () => {
   await symlink(backend, link);
   const result = await runBackend(link, "commands", ".");
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).commands[0].command, "/chat-help");
+  assert.ok(JSON.parse(result.stdout).commands.some((item) => item.command === "/chat-help"));
 });
 
 test("runShell captures output and exit code", async () => {

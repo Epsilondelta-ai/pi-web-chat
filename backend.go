@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ const (
 	maxOutputBytes   = 512 * 1024
 	defaultTimeoutMs = 30000
 	maxSearchResults = 30
+	maxChatMessages  = 200
 )
 
 var skipDirs = map[string]bool{
@@ -54,6 +56,14 @@ type fileRef struct {
 	Type string `json:"type"`
 	Name string `json:"name"`
 	Path string `json:"path"`
+}
+
+type chatMessage struct {
+	ID        string         `json:"id"`
+	Role      string         `json:"role"`
+	Text      string         `json:"text"`
+	CreatedAt int64          `json:"createdAt"`
+	Meta      map[string]any `json:"meta,omitempty"`
 }
 
 type textFile struct {
@@ -92,6 +102,75 @@ var chatSlashCommands = []commandInfo{
 		Source:      "pi-web-chat",
 		Template:    "Review the referenced files and list concrete risks, fixes, and verification steps:\n\n",
 	},
+}
+
+func allSlashCommands() []commandInfo {
+	out := make([]commandInfo, 0, len(chatSlashCommands)+64)
+	seen := map[string]bool{}
+	add := func(command commandInfo) {
+		if command.Command == "" || seen[command.Command] {
+			return
+		}
+		seen[command.Command] = true
+		out = append(out, command)
+	}
+	for _, command := range chatSlashCommands {
+		add(command)
+	}
+	for _, command := range discoverSkillCommands() {
+		add(command)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Command < out[j].Command })
+	return out
+}
+
+func discoverSkillCommands() []commandInfo {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	roots := []string{
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".pi", "agent", "npm", "node_modules"),
+	}
+	out := []commandInfo{}
+	for _, root := range roots {
+		filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || !d.IsDir() {
+				return nil
+			}
+			if d.Name() == "node_modules" && path != roots[1] {
+				return filepath.SkipDir
+			}
+			skillPath := filepath.Join(path, "SKILL.md")
+			if _, err := os.Stat(skillPath); err != nil {
+				return nil
+			}
+			name := filepath.Base(path)
+			description := readSkillDescription(skillPath)
+			commandName := "/" + name
+			if strings.Contains(path, filepath.Join("context-mode", "skills")) {
+				commandName = "/context-mode:" + name
+			}
+			out = append(out, commandInfo{Command: commandName, Description: description, Scope: "pi", Source: "skill", Template: commandName + " "})
+			return filepath.SkipDir
+		})
+	}
+	return out
+}
+
+func readSkillDescription(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "description:") {
+			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "description:")), "\"")
+		}
+	}
+	return ""
 }
 
 func main() {
@@ -144,7 +223,9 @@ func readInput(reader io.Reader) (request, error) {
 func handle(method, workspaceRoot string, input request) (any, error) {
 	switch method {
 	case "commands":
-		return map[string]any{"commands": chatSlashCommands}, nil
+		return map[string]any{"commands": allSlashCommands()}, nil
+	case "chatState":
+		return readPiChatState(workspaceRoot)
 	case "searchFiles":
 		files, err := searchWorkspaceFiles(workspaceRoot, stringInput(input, "query"), intInput(input, "limit", maxSearchResults))
 		return map[string]any{"files": files}, err
@@ -184,6 +265,170 @@ func resolveRoot(root string) (string, error) {
 		root = "."
 	}
 	return filepath.Abs(root)
+}
+
+func readPiChatState(workspaceRoot string) (any, error) {
+	root, err := resolveRoot(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	sessionFile, err := mostRecentPiSessionFile(root)
+	if err != nil || sessionFile == "" {
+		return map[string]any{"messages": []chatMessage{}, "isStreaming": false}, err
+	}
+	messages, sessionID, err := readPiSessionMessages(sessionFile)
+	if err != nil {
+		return nil, err
+	}
+	info, _ := os.Stat(sessionFile)
+	isStreaming := false
+	if len(messages) > 0 && time.Since(info.ModTime()) < 3*time.Second {
+		last := messages[len(messages)-1]
+		isStreaming = last.Role == "assistant" && strings.TrimSpace(last.Text) == ""
+	}
+	return map[string]any{"activeSessionId": sessionID, "messages": messages, "isStreaming": isStreaming}, nil
+}
+
+func mostRecentPiSessionFile(workspaceRoot string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	safe := "--" + strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.TrimLeft(workspaceRoot, string(filepath.Separator))) + "--"
+	dir := filepath.Join(home, ".pi", "agent", "sessions", safe)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var newest string
+	var newestTime time.Time
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestTime) {
+			newest = path
+			newestTime = info.ModTime()
+		}
+	}
+	return newest, nil
+}
+
+func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		return nil, "", err
+	}
+	messages := []chatMessage{}
+	sessionID := ""
+	lines := bytes.Split(data, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+		if entry["type"] == "session" {
+			if id, ok := entry["id"].(string); ok {
+				sessionID = id
+			}
+			continue
+		}
+		if entry["type"] != "message" {
+			continue
+		}
+		msg, ok := entry["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		mappedRole := mapPiRole(role)
+		if mappedRole == "" {
+			continue
+		}
+		text := piMessageText(msg["content"])
+		if strings.TrimSpace(text) == "" && mappedRole != "assistant" {
+			continue
+		}
+		createdAt := unixMillis(entry["timestamp"])
+		if t := unixMillis(msg["timestamp"]); t > 0 {
+			createdAt = t
+		}
+		id, _ := entry["id"].(string)
+		if id == "" {
+			id = strconv.Itoa(len(messages) + 1)
+		}
+		messages = append(messages, chatMessage{ID: id, Role: mappedRole, Text: text, CreatedAt: createdAt, Meta: map[string]any{"piRole": role}})
+	}
+	if len(messages) > maxChatMessages {
+		messages = messages[len(messages)-maxChatMessages:]
+	}
+	return messages, sessionID, nil
+}
+
+func mapPiRole(role string) string {
+	switch role {
+	case "user", "assistant", "system":
+		return role
+	case "toolResult":
+		return "tool"
+	default:
+		return ""
+	}
+}
+
+func piMessageText(content any) string {
+	switch value := content.(type) {
+	case string:
+		return value
+	case []any:
+		parts := []string{}
+		for _, raw := range value {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			typeName, _ := block["type"].(string)
+			switch typeName {
+			case "text":
+				if text, ok := block["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			case "toolCall":
+				name, _ := block["name"].(string)
+				if name != "" {
+					parts = append(parts, "[tool call: "+name+"]")
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func unixMillis(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case string:
+		parsed, err := time.Parse(time.RFC3339Nano, v)
+		if err == nil {
+			return parsed.UnixMilli()
+		}
+	}
+	return time.Now().UnixMilli()
 }
 
 func isPathInside(root, target string) bool {

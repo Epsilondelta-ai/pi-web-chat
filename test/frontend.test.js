@@ -156,6 +156,73 @@ test("slash commands and file refs are plugin-owned, not app patches", async () 
   });
 });
 
+test("draft, slash visibility, and trigger modes are restored", async () => {
+  await withWindow(async ({ window }) => {
+    window.localStorage.setItem("pi-web-chat.draft.v1", "saved prompt");
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => (method === "commands" ? { commands: [{ command: "/fix" }, { command: "/review" }] } : {}),
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    assert.equal(textarea.value, "saved prompt");
+
+    textarea.value = "/fi";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    assert.equal(root.querySelector("[data-slash-popover]").hidden, false);
+    assert.equal(root.querySelector("[data-slash-list]").textContent, "/fix");
+
+    textarea.value = "/fix now";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    assert.equal(root.querySelector("[data-slash-popover]").hidden, true);
+
+    textarea.value = "!ls";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    assert.equal(root.dataset.composerMode, "shell");
+    assert.match(root.querySelector("[data-attach]").innerHTML, /terminal/);
+    assert.ok(window.localStorage.getItem("pi-web-chat.draft.v1"));
+
+    root.querySelector("[data-send]").click();
+    await tick();
+    assert.equal(window.localStorage.getItem("pi-web-chat.draft.v1"), null);
+    cleanup();
+  });
+});
+
+test("file reference popover ignores stale backend results", async () => {
+  await withWindow(async ({ window }) => {
+    let resolveSearch;
+    const searchDone = new Promise((resolve) => { resolveSearch = resolve; });
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "searchFiles") {
+          await searchDone;
+          return { files: [{ path: "README.md" }] };
+        }
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "read @REA";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    textarea.value = "read ";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    resolveSearch();
+    await tick();
+    await tick();
+    assert.equal(root.querySelector("[data-refs-popover]").hidden, true);
+    cleanup();
+  });
+});
+
 test("local file attachments are included on submit", async () => {
   await withWindow(async ({ window }) => {
     const cleanup = activate({
