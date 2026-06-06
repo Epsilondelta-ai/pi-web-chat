@@ -9,10 +9,17 @@ export type BackendRequest = {
 };
 
 export type BackendCall = (method: string, input?: BackendRequest) => Promise<unknown>;
+export type SidebarSnapshot = { activeWorkspaceId?: string };
+export type SidebarApi = { getSnapshot?: () => SidebarSnapshot };
+
+export type PluginAppElement = HTMLElement & {
+  piWebSidebar?: SidebarApi;
+};
 
 export type PluginContext = {
-  app?: HTMLElement;
+  app?: PluginAppElement;
   backend?: BackendCall;
+  session?: { activeWorkspaceId?: () => string };
 };
 
 export type PiWebSubjects = {

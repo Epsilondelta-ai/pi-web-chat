@@ -35,6 +35,8 @@ const STORAGE_KEY = "pi-web-chat.sessions.v1";
 const FILE_REF_LIMIT = 12;
 const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
+const MAX_LOCAL_ATTACHMENTS = 8;
+const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
 
@@ -50,6 +52,7 @@ type State = {
   channels: Channels;
   store: ChatStore;
   selectedRefs: Set<string>;
+  selectedLocalAttachments: FileAttachment[];
   selectedAttachmentNames: string[];
   commands: PluginCommand[];
   fileSearchToken: number;
@@ -91,6 +94,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
     channels,
     store: loadStore(),
     selectedRefs: new Set(),
+    selectedLocalAttachments: [],
     selectedAttachmentNames: [],
     commands: [],
     fileSearchToken: 0,
@@ -168,7 +172,12 @@ export function mergeCommands(coreCommands: PluginCommand[] = [], pluginCommands
 }
 
 export function getActiveWorkspaceId(context: PluginContext): string {
-  return context.app?.dataset.activeWorkspaceId || "";
+  return (
+    context.app?.piWebSidebar?.getSnapshot?.().activeWorkspaceId ||
+    context.session?.activeWorkspaceId?.() ||
+    context.app?.dataset.activeWorkspaceId ||
+    ""
+  );
 }
 
 export async function backendCall(context: PluginContext, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
@@ -196,8 +205,7 @@ function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
   disposables.listen(dom.sendButton, "click", () => submitCurrentInput(state));
   disposables.listen(dom.attachButton, "click", () => dom.fileInput.click());
   disposables.listen(dom.fileInput, "change", () => {
-    state.selectedAttachmentNames = Array.from(dom.fileInput.files || []).map((file) => file.name);
-    renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
+    void loadLocalAttachments(state, dom);
   });
 }
 
@@ -223,7 +231,7 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
 function submitCurrentInput(state: State): void {
   const text = state.channels.input$.getValue().trim();
   if (!text) return;
-  state.channels.submitted$.next({ text, attachments: [] });
+  state.channels.submitted$.next({ text, attachments: [...state.selectedLocalAttachments] });
   state.channels.input$.next("");
 }
 
@@ -241,6 +249,7 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
   addMessage(state, { role: "user", text, attachments });
   state.selectedRefs.clear();
+  state.selectedLocalAttachments = [];
   state.selectedAttachmentNames = [];
   renderAttachmentChips(dom.attachments, []);
   render(state, dom);
@@ -263,6 +272,23 @@ async function runShell(state: State, dom: ChatDom, command: string): Promise<vo
   }
 
   render(state, dom);
+}
+
+async function loadLocalAttachments(state: State, dom: ChatDom): Promise<void> {
+  const files = Array.from(dom.fileInput.files || []).slice(0, MAX_LOCAL_ATTACHMENTS);
+  const attachments: FileAttachment[] = [];
+
+  for (const file of files) {
+    if (file.size > MAX_LOCAL_ATTACHMENT_BYTES) {
+      state.channels.toastRequested$.next({ level: "warning", message: `${file.name} is too large to attach` });
+      continue;
+    }
+    attachments.push({ name: file.name, size: file.size, content: await file.text(), mimeType: file.type || undefined });
+  }
+
+  state.selectedLocalAttachments = attachments;
+  state.selectedAttachmentNames = attachments.map((file) => file.name || "attachment");
+  renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
 }
 
 async function resolveAttachments(state: State, text: string): Promise<FileAttachment[]> {

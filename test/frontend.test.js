@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Window } from "happy-dom";
 import { AsyncSubject, BehaviorSubject, ReplaySubject, Subject } from "rxjs";
-import activate, { backendCall, commandName, createChannels, extractRefs, mergeCommands, pluginStyleText } from "../index.js";
+import activate, { backendCall, commandName, createChannels, extractRefs, getActiveWorkspaceId, mergeCommands, pluginStyleText } from "../index.js";
 
 function createPiWeb() {
   const subjects = new Map();
@@ -50,6 +50,18 @@ test("channels use pi-web standard names", () => {
   channels.input$.next("hello");
   assert.equal(channels.input$.getValue(), "hello");
   assert.deepEqual(pi.listSubjects().sort(), ["chat.input", "chat.input.submitted", "session.activeId", "toast.requested"].sort());
+});
+
+test("active workspace prefers sidebar, session, then dataset", () => {
+  assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } } }), "dataset");
+  assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } }, session: { activeWorkspaceId: () => "session" } }), "session");
+  assert.equal(
+    getActiveWorkspaceId({
+      app: { dataset: { activeWorkspaceId: "dataset" }, piWebSidebar: { getSnapshot: () => ({ activeWorkspaceId: "sidebar" }) } },
+      session: { activeWorkspaceId: () => "session" },
+    }),
+    "sidebar",
+  );
 });
 
 test("backendCall wraps workspaceId and data", async () => {
@@ -134,6 +146,33 @@ test("slash commands and file refs are plugin-owned, not app patches", async () 
     root.querySelector("[data-refs-list] button").click();
     assert.match(root.querySelector("[data-attachments]").textContent, /README.md/);
 
+    cleanup();
+  });
+});
+
+test("local file attachments are included on submit", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => (method === "commands" ? { commands: [] } : {}),
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const submitted = [];
+    globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
+    const fileInput = root.querySelector("[data-file-input]");
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [new window.File(["hello"], "note.txt", { type: "text/plain" })] });
+    fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await tick();
+
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "attach this";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+
+    assert.equal(submitted[0].attachments[0].name, "note.txt");
+    assert.equal(submitted[0].attachments[0].content, "hello");
     cleanup();
   });
 });

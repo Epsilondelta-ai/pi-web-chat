@@ -5,3 +5,5 @@ coverage/
 .pi/npm
 .pi/settings.json
 .pi/extensions/
+.pi/pi-web.json
+.pi/tasks
