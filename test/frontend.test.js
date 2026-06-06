@@ -167,6 +167,103 @@ test("backend chat state reconciles without replacing local active messages", as
   });
 });
 
+test("mounted pi-web integration uses legacy surfaces without requiring subject registry", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    let submittedPrompt = "";
+    const submitted = [];
+    globalThis.piWeb = undefined;
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+      composer: {
+        setPrompt: (value) => { submittedPrompt = value; },
+        submitPrompt: async () => { submitted.push(submittedPrompt); },
+      },
+    });
+
+    assert.ok(window.document.querySelector(".pi-web-chat-surface .term-inner"));
+    assert.ok(window.document.querySelector(".prompt-region.pi-web-chat-composer .prompt-bar"));
+    assert.ok(app.classList.contains("pi-web-chat-enhanced"));
+    assert.equal(window.document.querySelector(".pi-web-chat-root"), null);
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "send to pi";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    assert.deepEqual(submitted, ["send to pi"]);
+    assert.equal(submittedPrompt, "");
+    assert.equal(textarea.value, "");
+    assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
+
+    cleanup();
+    assert.equal(window.document.querySelector(".pi-web-chat-surface"), null);
+    assert.equal(window.document.querySelector(".prompt-region.pi-web-chat-composer"), null);
+    assert.equal(app.classList.contains("pi-web-chat-enhanced"), false);
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration submits through app API when composer submit is unavailable", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    const hostPrompt = window.document.createElement("textarea");
+    const submitted = [];
+    let composerPrompt = "";
+    globalThis.piWeb = undefined;
+    app.prompt = hostPrompt;
+    app.submitPrompt = async function submitPrompt() { submitted.push(this.prompt.value); };
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+      composer: {
+        setPrompt: (value) => { composerPrompt = value; },
+      },
+    });
+
+    assert.ok(window.document.querySelector(".pi-web-chat-surface .term-inner"));
+    assert.equal(window.document.querySelector(".pi-web-chat-root"), null);
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "send via app";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(composerPrompt, "");
+    assert.equal(hostPrompt.value, "");
+    assert.equal(textarea.value, "");
+    assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
+    assert.deepEqual(submitted, ["send via app"]);
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
 test("activate appends DOM hooks, publishes submits, and cleans up", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const cleanup = activate({

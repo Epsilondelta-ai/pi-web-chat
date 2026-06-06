@@ -2,6 +2,9 @@ import type { BehaviorSubject, Subject } from "rxjs";
 import {
   commandName,
   createChatDom,
+  createChatSurface,
+  createComposerSurface,
+  installBadge,
   installSettingsSection,
   installStyles,
   installToolbarButton,
@@ -85,12 +88,17 @@ class Disposables {
   }
 }
 
-export { commandName, createChatDom, pluginClass, pluginStyleText };
+export { commandName, createChatDom, createChatSurface, createComposerSurface, pluginClass, pluginStyleText };
 
 export default function activate(context: PluginContext = {}): Cleanup {
-  const disposables = new Disposables();
   const app = context.app as AppWithRuntime | undefined;
   app?.piWebChat?.dispose();
+
+  if (typeof context.mount?.chat === "function" && typeof context.mount?.composer === "function") {
+    return activateMountedPiWeb(context, app);
+  }
+
+  const disposables = new Disposables();
 
   const pi = requirePiWeb();
   const channels = createChannels(pi);
@@ -138,6 +146,59 @@ export default function activate(context: PluginContext = {}): Cleanup {
     disposables.dispose();
     if (app?.piWebChat === runtime) delete app.piWebChat;
   };
+}
+
+function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | undefined): Cleanup {
+  const disposables = new Disposables();
+  const style = disposables.add(installStyles());
+  const chatSurface = createChatSurface();
+  const composerSurface = createComposerSurface();
+  const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
+  const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
+  if (cleanupChat) disposables.add(cleanupChat);
+  if (cleanupComposer) disposables.add(cleanupComposer);
+  bindMountedComposer(disposables, context, composerSurface);
+  const badge = app ? disposables.add(installBadge(app)) : undefined;
+  app?.classList.add(pluginClass());
+
+  const runtime = { dispose: () => disposables.dispose() };
+  if (app) app.piWebChat = runtime;
+
+  return (): void => {
+    disposables.dispose();
+    badge?.remove();
+    style.remove();
+    app?.classList.remove(pluginClass());
+    if (app?.piWebChat === runtime) delete app.piWebChat;
+  };
+}
+
+function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement): void {
+  const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
+  const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
+  if (!textarea || !sendButton) return;
+
+  const sync = (): void => {
+    const value = textarea.value;
+    setPiWebPrompt(context, value);
+    sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
+  };
+  const submit = async (event?: Event): Promise<void> => {
+    event?.preventDefault();
+    event?.stopImmediatePropagation();
+    sync();
+    if (!textarea.value.trim()) return;
+    await submitPiWebPrompt(context);
+    textarea.value = "";
+    sync();
+  };
+
+  disposables.listen(textarea, "input", sync);
+  disposables.listen(textarea, "keydown", (event) => {
+    const keyEvent = event as KeyboardEvent;
+    if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) void submit(keyEvent);
+  });
+  disposables.listen(sendButton, "click", (event) => { void submit(event); });
 }
 
 export function createChannels(pi: PiWebSubjects): Channels {
@@ -277,9 +338,56 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   }
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
+  if (canForwardPromptToPiWeb(state.context)) {
+    if (await forwardPromptToPiWeb(state, text, attachments)) {
+      clearPendingAttachments(state);
+      return;
+    }
+  }
   addMessage(state, { role: "user", text, attachments });
   clearPendingAttachments(state);
   render(state, dom);
+}
+
+async function forwardPromptToPiWeb(state: State, text: string, attachments: FileAttachment[]): Promise<boolean> {
+  if (!canForwardPromptToPiWeb(state.context)) return false;
+
+  const app = state.context.app;
+  if (app && attachments.length) {
+    app.attachmentContents ??= [];
+    for (const file of attachments) {
+      app.attachmentContents.push(file);
+      app.addAttachmentChip?.(file.name || file.path, file.size || file.content?.length || 0, null, "");
+    }
+    if (app.attachments) app.attachments.hidden = !app.attachments.children.length;
+  }
+
+  setPiWebPrompt(state.context, text);
+  await submitPiWebPrompt(state.context);
+  return true;
+}
+
+function canForwardPromptToPiWeb(context: PluginContext): boolean {
+  return Boolean(context.composer?.submitPrompt || context.app?.submitPrompt);
+}
+
+function setPiWebPrompt(context: PluginContext, value: string): void {
+  context.composer?.setPrompt?.(value);
+
+  const app = context.app;
+  if (app?.prompt && app.prompt.value !== value) {
+    app.prompt.value = value;
+    app.updatePrompt?.();
+  }
+}
+
+async function submitPiWebPrompt(context: PluginContext): Promise<void> {
+  if (context.composer?.submitPrompt) {
+    await context.composer.submitPrompt();
+    return;
+  }
+
+  await context.app?.submitPrompt?.call(context.app);
 }
 
 async function runShell(state: State, dom: ChatDom, command: string): Promise<void> {
