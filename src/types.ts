@@ -74,6 +74,9 @@ export type BackendResponse = {
   commands?: PluginCommand[];
   files?: FileSearchResult[];
   attachments?: FileAttachment[];
+  messages?: ChatMessage[];
+  activeSessionId?: string;
+  isStreaming?: boolean;
   errors?: unknown[];
   exitCode?: number;
   durationMs?: number;

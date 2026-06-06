@@ -4,13 +4,15 @@ const PLUGIN_ID = "pi-web-chat";
 const STYLE_ID = `${PLUGIN_ID}-style`;
 const ROOT_CLASS = "pi-web-chat-root";
 
-const MATERIAL_PATHS: Record<"attachFile" | "stop" | "send", string> = {
+const MATERIAL_PATHS: Record<"attachFile" | "stop" | "send" | "terminal" | "file", string> = {
   attachFile: [
     "M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5",
     "a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z",
   ].join(""),
   stop: "M6 6h12v12H6V6Z",
   send: "M2 21 23 12 2 3v7l15 2-15 2v7Z",
+  terminal: "M3 4h18v16H3V4Zm2 2v12h14V6H5Zm2 3 1.1-1.1L12.2 12l-4.1 4.1L7 15l3-3-3-3Zm6 6h5v1.5h-5V15Z",
+  file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 2.5L17.5 8H14V4.5ZM8 13h8v1.5H8V13Zm0 3h8v1.5H8V16Z",
 };
 
 function materialIcon(name: string, path: string): string {
@@ -120,11 +122,32 @@ export function renderFileRefs(list: HTMLElement, files: FileSearchResult[], onP
   list.replaceChildren(...files.map((file) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "pi-web-chat-popover-item";
-    button.textContent = file.path || file.name || "unknown";
+    button.className = "pi-web-chat-popover-item pi-web-chat-popover-item-file";
+    button.innerHTML = `${materialIcon("file", MATERIAL_PATHS.file)}<span></span>`;
+    const label = button.querySelector("span");
+    if (label) label.textContent = file.path || file.name || "unknown";
     button.addEventListener("click", () => onPick(file));
     return button;
   }));
+}
+
+export function setComposerMode(dom: Pick<ChatDom, "root" | "attachButton">, mode: "normal" | "shell" | "file-ref"): void {
+  dom.root.dataset.composerMode = mode;
+  if (mode === "shell") {
+    dom.attachButton.innerHTML = materialIcon("terminal", MATERIAL_PATHS.terminal);
+    dom.attachButton.title = "shell command mode";
+    dom.attachButton.setAttribute("aria-label", "shell command mode");
+    return;
+  }
+  if (mode === "file-ref") {
+    dom.attachButton.innerHTML = materialIcon("file", MATERIAL_PATHS.file);
+    dom.attachButton.title = "file reference mode";
+    dom.attachButton.setAttribute("aria-label", "file reference mode");
+    return;
+  }
+  dom.attachButton.innerHTML = materialIcon("attach_file", MATERIAL_PATHS.attachFile);
+  dom.attachButton.title = "attach files";
+  dom.attachButton.setAttribute("aria-label", "attach files");
 }
 
 export function renderAttachmentChips(container: HTMLElement, names: string[]): void {
@@ -169,6 +192,10 @@ export function pluginStyleText(): string {
     .pi-web-chat-message-meta { margin-top: 6px; color: var(--muted, #8a8f98); font-size: 12px; }
     .pi-web-chat-composer { position: relative; padding: 10px; border-top: 1px solid var(--border, #30363d); }
     .pi-web-chat-prompt-bar { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--border, #30363d); border-radius: 12px; padding: 8px; background: var(--surface, #0f1117); }
+    .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-prompt-bar { border-color: var(--warning, #facc15); box-shadow: 0 0 0 1px rgba(250,204,21,.35); }
+    .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-icon-btn { color: var(--warning, #facc15); border-color: var(--warning, #facc15); }
+    .${ROOT_CLASS}[data-composer-mode="file-ref"] .pi-web-chat-prompt-bar { border-color: var(--accent, #60a5fa); }
+    .${ROOT_CLASS}[data-composer-mode="file-ref"] .pi-web-chat-icon-btn { color: var(--accent, #60a5fa); border-color: var(--accent, #60a5fa); }
     .pi-web-chat-textarea { flex: 1; min-height: 38px; max-height: 180px; resize: vertical; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; }
     .pi-web-chat-icon-btn, .pi-web-chat-send, .pi-web-chat-toolbar-button, .pi-web-chat-popover-item { cursor: pointer; }
     .pi-web-chat-icon-btn, .pi-web-chat-send { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border, #30363d); background: transparent; color: inherit; }
@@ -178,6 +205,7 @@ export function pluginStyleText(): string {
     .pi-web-chat-popover-head { padding: 6px 10px; color: var(--muted, #8a8f98); font-size: 11px; text-transform: uppercase; }
     .pi-web-chat-popover-list { display: flex; flex-direction: column; }
     .pi-web-chat-popover-item { text-align: left; border: 0; border-top: 1px solid var(--border, #30363d); background: transparent; color: inherit; padding: 8px 10px; }
+    .pi-web-chat-popover-item-file { display: flex; align-items: center; gap: 8px; }
     .pi-web-chat-popover-item:hover { background: rgba(255,255,255,.06); }
     .pi-web-chat-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
     .pi-web-chat-attachment-chip { border: 1px solid var(--border, #30363d); border-radius: 999px; padding: 3px 8px; color: var(--muted, #8a8f98); font-size: 12px; }

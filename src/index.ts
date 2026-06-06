@@ -11,6 +11,7 @@ import {
   renderFileRefs,
   renderMessages,
   renderSlashCommands,
+  setComposerMode,
   type ChatDom,
 } from "./dom";
 import type {
@@ -32,6 +33,7 @@ import type {
 } from "./types";
 
 const STORAGE_KEY = "pi-web-chat.sessions.v1";
+const DRAFT_KEY = "pi-web-chat.draft.v1";
 const FILE_REF_LIMIT = 12;
 const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
@@ -89,6 +91,8 @@ export default function activate(context: PluginContext = {}): Cleanup {
 
   const pi = requirePiWeb();
   const channels = createChannels(pi);
+  const draft = loadDraft();
+  if (draft) channels.input$.next(draft);
   const state: State = {
     context,
     channels,
@@ -119,7 +123,9 @@ export default function activate(context: PluginContext = {}): Cleanup {
   bindDom(disposables, state, dom);
   bindChannels(disposables, state, dom);
   render(state, dom);
+  updateComposerMode(dom, channels.input$.getValue());
   void refreshCommands(state, dom);
+  void refreshBackendChatState(state, dom);
 
   const runtime = { dispose: () => disposables.dispose() };
   if (app) app.piWebChat = runtime;
@@ -191,6 +197,8 @@ function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
   disposables.listen(dom.textarea, "input", () => {
     state.channels.input$.next(dom.textarea.value);
     dom.sendButton.setAttribute("aria-disabled", dom.textarea.value.trim() ? "false" : "true");
+    saveDraft(dom.textarea.value);
+    updateComposerMode(dom, dom.textarea.value);
     void updateAssistPopovers(state, dom, dom.textarea.value);
   });
 
@@ -213,6 +221,9 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
   disposables.add(state.channels.input$.subscribe((value) => {
     if (dom.textarea.value !== value) dom.textarea.value = value;
     dom.sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
+    saveDraft(value);
+    updateComposerMode(dom, value);
+    void updateAssistPopovers(state, dom, value);
   }));
 
   disposables.add(state.channels.submitted$.subscribe((event) => {
@@ -234,6 +245,7 @@ function submitCurrentInput(state: State): void {
   const attachments = [...state.selectedLocalAttachments];
   clearLocalAttachments(state);
   state.channels.submitted$.next({ text, attachments });
+  clearDraft();
   state.channels.input$.next("");
 }
 
@@ -321,15 +333,17 @@ async function refreshCommands(state: State, dom: ChatDom): Promise<void> {
 }
 
 async function updateAssistPopovers(state: State, dom: ChatDom, value: string): Promise<void> {
-  if (value.startsWith("/")) {
+  if (currentSlashQuery(value) !== null) {
     if (!state.commands.length) await refreshCommands(state, dom);
-    dom.slashPopover.hidden = state.commands.length === 0;
+    if (dom.textarea.value !== value) return;
+    renderFilteredSlashCommands(state, dom, value);
   } else {
     dom.slashPopover.hidden = true;
   }
 
   const query = currentFileRefQuery(value);
-  if (!query) {
+  if (query === null) {
+    state.fileSearchToken += 1;
     dom.refsPopover.hidden = true;
     return;
   }
@@ -337,7 +351,7 @@ async function updateAssistPopovers(state: State, dom: ChatDom, value: string): 
   const token = ++state.fileSearchToken;
   try {
     const response = await backendCall(state.context, "searchFiles", { query, limit: FILE_REF_LIMIT });
-    if (token !== state.fileSearchToken) return;
+    if (token !== state.fileSearchToken || dom.textarea.value !== value) return;
     const files = Array.isArray(response.files) ? response.files.filter(isRecord) as FileSearchResult[] : [];
     renderFileRefs(dom.refsList, files, (file) => {
       const path = file.path || file.name || "";
@@ -353,9 +367,80 @@ async function updateAssistPopovers(state: State, dom: ChatDom, value: string): 
   }
 }
 
-function currentFileRefQuery(value: string): string {
+function currentSlashQuery(value: string): string | null {
+  const match = /^\/([^\s/]*)$/.exec(value);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function renderFilteredSlashCommands(state: State, dom: ChatDom, value: string): void {
+  const query = currentSlashQuery(value);
+  if (query === null) {
+    dom.slashPopover.hidden = true;
+    return;
+  }
+  const commands = state.commands.filter((command) => commandName(command).slice(1).toLowerCase().includes(query));
+  renderSlashCommands(dom.slashList, commands, (command) => {
+    const template = command.template || commandName(command);
+    state.channels.input$.next(template);
+    dom.slashPopover.hidden = true;
+    dom.textarea.focus();
+  });
+  dom.slashPopover.hidden = commands.length === 0;
+}
+
+function currentFileRefQuery(value: string): string | null {
   const match = /(?:^|\s)@([^\s@`]*)$/.exec(value);
-  return match?.[1] || "";
+  return match ? match[1] : null;
+}
+
+function updateComposerMode(dom: ChatDom, value: string): void {
+  if (value.startsWith("!")) setComposerMode(dom, "shell");
+  else if (currentFileRefQuery(value) !== null) setComposerMode(dom, "file-ref");
+  else setComposerMode(dom, "normal");
+}
+
+async function refreshBackendChatState(state: State, dom: ChatDom): Promise<void> {
+  try {
+    const response = await backendCall(state.context, "chatState", {});
+    if (Array.isArray(response.messages)) {
+      const messages = response.messages.filter(isChatMessage);
+      if (messages.length) {
+        const session = sessionForBackendState(state.store, typeof response.activeSessionId === "string" ? response.activeSessionId : null);
+        session.messages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
+        session.updatedAt = Date.now();
+        saveStore(state.store);
+        render(state, dom);
+      }
+    }
+  } catch {
+    // pi session state is best-effort; local chat still works without it.
+  }
+}
+
+function sessionForBackendState(store: ChatStore, backendSessionId: string | null): ChatSession {
+  // Adopt backend session state only when the visible local session is still empty.
+  // Once the user has local messages, backend history is stored by backend id without switching the active chat.
+  if (!backendSessionId) return activeSession(store);
+  let session = store.sessions.find((item) => item.id === backendSessionId);
+  if (!session) {
+    const active = activeSession(store);
+    if (active.messages.length === 0) {
+      active.id = backendSessionId;
+      store.activeSessionId = backendSessionId;
+      session = active;
+    } else {
+      session = createSession(backendSessionId);
+      store.sessions.unshift(session);
+    }
+  }
+  return session;
+}
+
+function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMessage[]): ChatMessage[] {
+  const merged = new Map<string, ChatMessage>();
+  for (const message of localMessages) merged.set(message.id, message);
+  for (const message of backendMessages) merged.set(message.id, { ...merged.get(message.id), ...message });
+  return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
 }
 
 function render(state: State, dom: ChatDom): void {
@@ -415,9 +500,30 @@ function createNewSession(state: State): void {
   saveStore(state.store);
 }
 
-function createSession(): ChatSession {
+function createSession(sessionId = id()): ChatSession {
   const now = Date.now();
-  return { id: id(), title: "New chat", createdAt: now, updatedAt: now, messages: [] };
+  return { id: sessionId, title: "New chat", createdAt: now, updatedAt: now, messages: [] };
+}
+
+function loadDraft(): string {
+  try {
+    return localStorage.getItem(DRAFT_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveDraft(value: string): void {
+  try {
+    if (value) localStorage.setItem(DRAFT_KEY, value);
+    else localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // Draft persistence is best effort.
+  }
+}
+
+function clearDraft(): void {
+  saveDraft("");
 }
 
 function loadStore(): ChatStore {
@@ -478,6 +584,11 @@ function requirePiWeb(): PiWebSubjects {
 
 function isSession(value: unknown): value is ChatSession {
   return isRecord(value) && typeof value.id === "string" && Array.isArray(value.messages);
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  return isRecord(value) && typeof value.id === "string" && typeof value.text === "string" && typeof value.createdAt === "number"
+    && (value.role === "user" || value.role === "assistant" || value.role === "tool" || value.role === "system");
 }
 
 function isRecord(value: unknown): value is JsonRecord {

@@ -81,6 +81,59 @@ test("backendCall wraps workspaceId and data", async () => {
   assert.deepEqual(calls, [{ method: "commands", input: { workspaceId: "workspace-1", data: { limit: 1 } } }]);
 });
 
+test("initial backend chat state adopts backend session id", async () => {
+  await withWindow(async ({ window }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState") return { activeSessionId: "pi-session", messages: [{ id: "backend-1", role: "assistant", text: "from backend", createdAt: 2 }] };
+        return {};
+      },
+    });
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "pi-session");
+    assert.equal(store.sessions[0].id, "pi-session");
+    assert.equal(store.sessions[0].messages[0].text, "from backend");
+    cleanup();
+  });
+});
+
+test("backend chat state reconciles without replacing local active messages", async () => {
+  await withWindow(async ({ window }) => {
+    let releaseChatState;
+    const chatStateReady = new Promise((resolve) => { releaseChatState = resolve; });
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState") {
+          await chatStateReady;
+          return { activeSessionId: "pi-session", messages: [{ id: "backend-1", role: "assistant", text: "from backend", createdAt: 2 }] };
+        }
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "local draft";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    releaseChatState();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.ok(store.sessions.some((session) => session.messages.some((message) => message.text === "local draft")));
+    assert.ok(store.sessions.some((session) => session.id === "pi-session" && session.messages.some((message) => message.text === "from backend")));
+    cleanup();
+  });
+});
+
 test("activate appends DOM hooks, publishes submits, and cleans up", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const cleanup = activate({
@@ -152,6 +205,73 @@ test("slash commands and file refs are plugin-owned, not app patches", async () 
     const resolveCall = backendCalls.find((call) => call.method === "resolveContext");
     assert.ok(resolveCall.input.data.refs.includes("README.md"));
 
+    cleanup();
+  });
+});
+
+test("draft, slash visibility, and trigger modes are restored", async () => {
+  await withWindow(async ({ window }) => {
+    window.localStorage.setItem("pi-web-chat.draft.v1", "saved prompt");
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => (method === "commands" ? { commands: [{ command: "/fix" }, { command: "/review" }] } : {}),
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    assert.equal(textarea.value, "saved prompt");
+
+    textarea.value = "/fi";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    assert.equal(root.querySelector("[data-slash-popover]").hidden, false);
+    assert.equal(root.querySelector("[data-slash-list]").textContent, "/fix");
+
+    textarea.value = "/fix now";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    assert.equal(root.querySelector("[data-slash-popover]").hidden, true);
+
+    textarea.value = "!ls";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    assert.equal(root.dataset.composerMode, "shell");
+    assert.match(root.querySelector("[data-attach]").innerHTML, /terminal/);
+    assert.ok(window.localStorage.getItem("pi-web-chat.draft.v1"));
+
+    root.querySelector("[data-send]").click();
+    await tick();
+    assert.equal(window.localStorage.getItem("pi-web-chat.draft.v1"), null);
+    cleanup();
+  });
+});
+
+test("file reference popover ignores stale backend results", async () => {
+  await withWindow(async ({ window }) => {
+    let resolveSearch;
+    const searchDone = new Promise((resolve) => { resolveSearch = resolve; });
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "searchFiles") {
+          await searchDone;
+          return { files: [{ path: "README.md" }] };
+        }
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "read @REA";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    textarea.value = "read ";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    resolveSearch();
+    await tick();
+    await tick();
+    assert.equal(root.querySelector("[data-refs-popover]").hidden, true);
     cleanup();
   });
 });
@@ -278,6 +398,7 @@ function tick() {
 
 async function withWindow(callback) {
   const window = new Window();
+  window.SyntaxError = SyntaxError;
   const previousDocument = globalThis.document;
   const previousLocalStorage = globalThis.localStorage;
   const previousPiWeb = globalThis.piWeb;
