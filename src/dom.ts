@@ -139,6 +139,42 @@ function renderMessage(message: ChatMessage): HTMLElement {
 
   item.append(role, body);
 
+  if (message.thinking) {
+    const thinking = document.createElement("details");
+    thinking.className = "pi-web-chat-thinking";
+    thinking.open = Boolean(message.streaming);
+    const summary = document.createElement("summary");
+    summary.textContent = "thinking";
+    const content = document.createElement("pre");
+    content.textContent = message.thinking;
+    thinking.append(summary, content);
+    item.append(thinking);
+  }
+
+  if (message.toolCalls?.length) {
+    const tools = document.createElement("div");
+    tools.className = "pi-web-chat-tools";
+    for (const tool of message.toolCalls) {
+      const block = document.createElement("details");
+      block.className = `pi-web-chat-tool pi-web-chat-tool-${tool.status}`;
+      block.open = tool.status === "running";
+      const summary = document.createElement("summary");
+      summary.textContent = `${tool.name} · ${tool.status}`;
+      const content = document.createElement("pre");
+      content.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
+      block.append(summary, content);
+      tools.append(block);
+    }
+    item.append(tools);
+  }
+
+  if (message.streaming) {
+    const meta = document.createElement("div");
+    meta.className = "pi-web-chat-message-meta";
+    meta.textContent = "streaming...";
+    item.append(meta);
+  }
+
   if (message.attachments?.length) {
     const meta = document.createElement("div");
     meta.className = "pi-web-chat-message-meta";

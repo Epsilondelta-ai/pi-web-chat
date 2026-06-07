@@ -97,6 +97,44 @@ process.stdin.on('end', () => {
   assert.match(content, /attached context/);
 });
 
+test("streaming methods capture pi rpc text thinking and tool events", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think' } }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } }));
+  console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pwd' } }));
+  console.log(JSON.stringify({ type: 'tool_execution_update', toolCallId: 't1', toolName: 'bash', partialResult: { content: [{ type: 'text', text: 'out' }] } }));
+  console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));
+  console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const start = await callBackend("startPrompt", root, { text: "hello pi" }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
+  assert.equal(start.accepted, true);
+  let stream = { events: [], cursor: 0, isStreaming: true };
+  const events = [];
+  for (let index = 0; index < 20 && stream.isStreaming; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stream = await callBackend("streamEvents", root, { runId: start.runId, cursor: stream.cursor }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
+    events.push(...stream.events);
+  }
+  const types = events.map((event) => event.type);
+  assert.ok(types.includes("thinking.delta"));
+  assert.ok(types.includes("text.delta"));
+  assert.ok(types.includes("tool.start"));
+  assert.ok(types.includes("tool.delta"));
+  assert.ok(types.includes("tool.end"));
+  assert.equal(stream.isStreaming, false);
+  assert.equal(events.some((event) => event.type === "run.end"), true);
+});
+
 test("chatState parses pi JSONL session fixtures", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Window } from "happy-dom";
 import { AsyncSubject, BehaviorSubject, ReplaySubject, Subject } from "rxjs";
-import activate, { backendCall, commandName, createChannels, extractRefs, getActiveWorkspaceId, mergeCommands, pluginStyleText } from "../index.js";
+import activate, { backendCall, chatEventsToAgUiLikeEvents, commandName, createAgUiLikeRunInput, createChannels, extractRefs, getActiveWorkspaceId, mergeCommands, pluginStyleText, promptFromAgUiLikeRunInput } from "../index.js";
 
 function createPiWeb() {
   const subjects = new Map();
@@ -29,6 +29,20 @@ function createPiWeb() {
     listSubjects: () => [...subjects.keys()],
   };
 }
+
+test("AG-UI-like adapter maps internal chat events without runtime dependency", () => {
+  const run = createAgUiLikeRunInput("thread-1", "run-1", [{ id: "m1", role: "user", text: "hello", createdAt: 1 }]);
+  const prompt = promptFromAgUiLikeRunInput(run);
+  const events = chatEventsToAgUiLikeEvents([
+    { type: "text.delta", delta: "hi" },
+    { type: "thinking.delta", delta: "reason" },
+    { type: "tool.start", toolCallId: "t1", toolName: "bash", args: { command: "pwd" } },
+  ], "thread-1", "run-1");
+
+  assert.equal(prompt.text, "hello");
+  assert.deepEqual(events.map((event) => event.type), ["TEXT_MESSAGE_CONTENT", "THINKING_MESSAGE_CONTENT", "TOOL_CALL_START"]);
+  assert.equal(events[2].toolCallId, "t1");
+});
 
 test("command utilities keep chat command behavior", () => {
   assert.equal(commandName({ command: "/a" }), "/a");
