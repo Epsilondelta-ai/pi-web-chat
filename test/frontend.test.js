@@ -120,19 +120,64 @@ test("initializes from pi-web-sidebar selected session localStorage", async () =
   });
 });
 
-test("loads sessions selected by pi-web-sidebar channel", async () => {
-  await withWindow(async ({ window }) => {
+test("loads and renders sessions selected by pi-web-sidebar channel", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
     const cleanup = activate({
-      app: window.document.querySelector("pi-app"),
-      backend: async (method) => (method === "commands" ? { commands: [] } : {}),
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState" && input.data.sessionId === "selected-by-sidebar") {
+          return { activeSessionId: "selected-by-sidebar", messages: [{ id: "m1", role: "assistant", text: "selected transcript", createdAt: 1 }] };
+        }
+        return {};
+      },
     });
 
     globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null).next({ sessionId: "selected-by-sidebar", workspaceId: "workspace-1" });
     await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(app.dataset.activeWorkspaceId, "workspace-1");
+    assert.equal(store.activeSessionId, "selected-by-sidebar");
+    assert.ok(store.sessions.some((session) => session.id === "selected-by-sidebar"));
+    assert.match(window.document.querySelector("[data-chat-transcript]").textContent, /selected transcript/);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.sessionId === "selected-by-sidebar"));
+    cleanup();
+  });
+});
+
+test("stale initial chatState does not overwrite sidebar selected session", async () => {
+  await withWindow(async ({ window }) => {
+    let releaseInitial;
+    const initialReady = new Promise((resolve) => { releaseInitial = resolve; });
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method, input) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState" && input.data.sessionId === "selected-by-sidebar") {
+          return { activeSessionId: "selected-by-sidebar", messages: [{ id: "m1", role: "assistant", text: "selected transcript", createdAt: 2 }] };
+        }
+        if (method === "chatState") {
+          await initialReady;
+          return { activeSessionId: "old-session", messages: [{ id: "old", role: "assistant", text: "old transcript", createdAt: 1 }] };
+        }
+        return {};
+      },
+    });
+
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null).next({ sessionId: "selected-by-sidebar", workspaceId: "workspace-1" });
+    await tick();
+    releaseInitial();
+    await tick();
+    await tick();
 
     const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
     assert.equal(store.activeSessionId, "selected-by-sidebar");
-    assert.ok(store.sessions.some((session) => session.id === "selected-by-sidebar"));
+    assert.match(window.document.querySelector("[data-chat-transcript]").textContent, /selected transcript/);
+    assert.doesNotMatch(window.document.querySelector("[data-chat-transcript]").textContent, /old transcript/);
     cleanup();
   });
 });

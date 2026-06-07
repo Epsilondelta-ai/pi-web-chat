@@ -191,16 +191,24 @@ test("chatState parses pi JSONL session fixtures", async () => {
   const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
   const sessionDir = join(home, ".pi", "agent", "sessions", safe);
   await mkdir(sessionDir, { recursive: true });
-  await writeFile(join(sessionDir, "session.jsonl"), [
+  await writeFile(join(sessionDir, "newer_pi-session-1.jsonl"), [
     JSON.stringify({ type: "session", id: "pi-session-1" }),
     JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "hello" } }),
     JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:06.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } }),
     JSON.stringify({ type: "message", id: "t1", timestamp: "2026-01-02T03:04:07.000Z", message: { role: "toolResult", content: "done" } }),
   ].join("\n"));
+  await writeFile(join(sessionDir, "older_pi-session-2.jsonl"), [
+    JSON.stringify({ type: "session", id: "pi-session-2" }),
+    JSON.stringify({ type: "message", id: "u2", timestamp: "2026-01-02T03:04:08.000Z", message: { role: "user", content: "selected" } }),
+  ].join("\n"));
 
-  const result = await callBackend("chatState", root, {}, { HOME: home });
+  const result = await callBackend("chatState", root, { sessionId: "pi-session-1" }, { HOME: home });
   assert.equal(result.activeSessionId, "pi-session-1");
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["t1", "tool", "done"]]);
+
+  const selected = await callBackend("chatState", root, { sessionId: "pi-session-2" }, { HOME: home });
+  assert.equal(selected.activeSessionId, "pi-session-2");
+  assert.deepEqual(selected.messages.map((message) => [message.id, message.role, message.text]), [["u2", "user", "selected"]]);
 });
 
 test("searchFiles reports configurable traversal truncation", async () => {

@@ -248,7 +248,7 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 	case "commands":
 		return map[string]any{"commands": allSlashCommands()}, nil
 	case "chatState":
-		return readPiChatState(workspaceRoot)
+		return readPiChatState(workspaceRoot, input)
 	case "submitPrompt":
 		return submitPiPrompt(workspaceRoot, input)
 	case "searchFiles":
@@ -467,14 +467,23 @@ func limitString(value string, max int) string {
 	return value[:max]
 }
 
-func readPiChatState(workspaceRoot string) (any, error) {
+func readPiChatState(workspaceRoot string, input request) (any, error) {
 	root, err := resolveRoot(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	sessionFile, err := mostRecentPiSessionFile(root)
+	sessionFile := ""
+	requestedSessionID := strings.TrimSpace(stringInput(input, "sessionId"))
+	if requestedSessionID != "" {
+		if path, ok := piSessionFileByID(root, requestedSessionID); ok {
+			sessionFile = path
+		}
+	}
+	if sessionFile == "" {
+		sessionFile, err = mostRecentPiSessionFile(root)
+	}
 	if err != nil || sessionFile == "" {
-		return map[string]any{"messages": []chatMessage{}, "isStreaming": false}, err
+		return map[string]any{"activeSessionId": requestedSessionID, "messages": []chatMessage{}, "isStreaming": false}, err
 	}
 	messages, sessionID, err := readPiSessionMessages(sessionFile)
 	if err != nil {

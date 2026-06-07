@@ -67,6 +67,7 @@ type State = {
   selectedAttachmentNames: string[];
   commands: PluginCommand[];
   fileSearchToken: number;
+  backendChatToken: number;
 };
 
 class Disposables {
@@ -117,6 +118,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
     selectedAttachmentNames: [],
     commands: [],
     fileSearchToken: 0,
+    backendChatToken: 0,
   };
 
   saveStore(state.store);
@@ -333,7 +335,14 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
   }));
 
   disposables.add(state.channels.sidebarSelectedSession$.subscribe((selected) => {
-    if (selected?.sessionId) switchToSession(state, dom, selected.sessionId);
+    if (selected?.workspaceId && state.context.app) {
+      state.context.app.dataset.activeWorkspaceId = selected.workspaceId;
+    }
+
+    if (selected?.sessionId) {
+      switchToSession(state, dom, selected.sessionId);
+      void refreshBackendChatState(state, dom, selected.sessionId);
+    }
   }));
 }
 
@@ -670,9 +679,13 @@ function updateComposerMode(dom: ChatDom, value: string): void {
   else setComposerMode(dom, "normal");
 }
 
-async function refreshBackendChatState(state: State, dom: ChatDom): Promise<void> {
+async function refreshBackendChatState(state: State, dom: ChatDom, sessionId = ""): Promise<void> {
+  const token = ++state.backendChatToken;
+
   try {
-    const response = await backendCall(state.context, "chatState", {});
+    const response = await backendCall(state.context, "chatState", sessionId ? { sessionId } : {});
+    if (token !== state.backendChatToken) return;
+
     if (Array.isArray(response.messages)) {
       const messages = response.messages.filter(isChatMessage);
       if (messages.length) {
