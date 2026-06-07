@@ -231,6 +231,46 @@ export function pluginStyleText(): string {
     .pi-web-chat-surface { display: flex; flex-direction: column; }
     .pi-web-chat-composer { display: block; }
     .pi-web-chat-composer .material-icon { display: block; width: 16px; height: 16px; pointer-events: none; }
+    .${LEGACY_PLUGIN_CLASS} .app-body:has(.sidebar-wrap) > [data-plugin-chat-root],
+    .${LEGACY_PLUGIN_CLASS} .app-body:has(.sidebar-wrap) > [data-plugin-composer-root] { grid-column: 2; }
+    .${LEGACY_PLUGIN_CLASS} .slash-pop {
+      position: absolute;
+      left: var(--space-3, 12px);
+      right: 120px;
+      bottom: calc(100% + 4px);
+      max-width: 640px;
+      background: var(--bg-2, #161b22);
+      border: 1px solid var(--border-hi, var(--border, #30363d));
+      box-shadow: var(--shadow-modal, 0 18px 48px rgba(0,0,0,.35));
+      z-index: 30;
+    }
+    .${LEGACY_PLUGIN_CLASS} .slash-head {
+      padding: 6px var(--space-3, 12px);
+      border-bottom: 1px solid var(--border-dim, var(--border, #30363d));
+      font-size: var(--text-xs, 12px);
+      color: var(--fg-3, var(--muted, #8a8f98));
+      letter-spacing: var(--tracking-wide, .04em);
+      text-transform: uppercase;
+      background: var(--bg-1, #0f1117);
+    }
+    .${LEGACY_PLUGIN_CLASS} .slash-list { max-height: 240px; overflow-y: auto; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item {
+      display: grid;
+      grid-template-columns: minmax(120px, .8fr) auto minmax(0, 1.4fr);
+      gap: 10px;
+      padding: 6px var(--space-3, 12px);
+      cursor: pointer;
+      font-size: var(--text-sm, 13px);
+      align-items: baseline;
+    }
+    .${LEGACY_PLUGIN_CLASS} .slash-item.selected { background: var(--bg-4, rgba(255,255,255,.08)); }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-cmd { color: var(--accent, #00ff88); font-family: var(--font-mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-tags { display: inline-flex; gap: 4px; align-items: center; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-scope,
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-source { border: 1px solid var(--border, #30363d); color: var(--fg-3, #8a8f98); font-size: 10px; padding: 1px 5px; text-transform: uppercase; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-scope { color: var(--tool-call, #79c0ff); }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-desc { color: var(--fg-2, #c9d1d9); font-size: var(--text-xs, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .${LEGACY_PLUGIN_CLASS} .slash-empty { padding: 10px var(--space-3, 12px); color: var(--fg-3, #8a8f98); font-size: var(--text-sm, 13px); }
     .${LEGACY_PLUGIN_CLASS} .prompt-file-ref-pop::before,
     .${LEGACY_PLUGIN_CLASS} .slash-pop::before {
       content: "pi-web-chat";

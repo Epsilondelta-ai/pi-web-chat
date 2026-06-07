@@ -44,6 +44,15 @@ test("plugin styles target plugin-owned DOM", () => {
   assert.match(styles, /pi-web-chat-transcript/);
 });
 
+test("plugin styles restore legacy mounted slash popover", () => {
+  const styles = pluginStyleText();
+  assert.match(styles, /\.pi-web-chat-enhanced \.slash-pop \{/);
+  assert.match(styles, /bottom: calc\(100% \+ 4px\)/);
+  assert.match(styles, /\.pi-web-chat-enhanced \.slash-item \{/);
+  assert.match(styles, /grid-template-columns: minmax\(120px, \.8fr\) auto minmax\(0, 1\.4fr\)/);
+  assert.match(styles, /\.app-body:has\(\.sidebar-wrap\) > \[data-plugin-composer-root\]/);
+});
+
 test("channels use pi-web standard names", () => {
   const pi = createPiWeb();
   const channels = createChannels(pi);
