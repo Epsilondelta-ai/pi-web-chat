@@ -3,6 +3,7 @@ import type { ChatMessage, FileSearchResult, PluginCommand } from "./types";
 const PLUGIN_ID = "pi-web-chat";
 const STYLE_ID = `${PLUGIN_ID}-style`;
 const ROOT_CLASS = "pi-web-chat-root";
+const LEGACY_PLUGIN_CLASS = "pi-web-chat-enhanced";
 
 const MATERIAL_PATHS: Record<"attachFile" | "stop" | "send" | "terminal" | "file", string> = {
   attachFile: [
@@ -13,6 +14,12 @@ const MATERIAL_PATHS: Record<"attachFile" | "stop" | "send" | "terminal" | "file
   send: "M2 21 23 12 2 3v7l15 2-15 2v7Z",
   terminal: "M3 4h18v16H3V4Zm2 2v12h14V6H5Zm2 3 1.1-1.1L12.2 12l-4.1 4.1L7 15l3-3-3-3Zm6 6h5v1.5h-5V15Z",
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 2.5L17.5 8H14V4.5ZM8 13h8v1.5H8V13Zm0 3h8v1.5H8V16Z",
+};
+
+const MATERIAL_ICONS: Record<"attachFile" | "stop" | "send", string> = {
+  attachFile: materialIcon("attach_file", MATERIAL_PATHS.attachFile),
+  stop: materialIcon("stop", MATERIAL_PATHS.stop),
+  send: materialIcon("send", MATERIAL_PATHS.send),
 };
 
 function materialIcon(name: string, path: string): string {
@@ -34,7 +41,43 @@ export type ChatDom = {
 };
 
 export function pluginClass(): string {
-  return ROOT_CLASS;
+  return LEGACY_PLUGIN_CLASS;
+}
+
+export function createChatSurface(): HTMLElement {
+  const surface = document.createElement("main");
+  surface.className = "main pi-web-chat-surface";
+  surface.dataset.main = "session";
+  surface.innerHTML = `<div class="term"><div class="term-inner"></div></div><button type="button" class="scroll-bottom-btn" data-action="scroll-bottom" aria-label="scroll to bottom" title="scroll to bottom" hidden>↓</button>`;
+  return surface;
+}
+
+export function createComposerSurface(): HTMLElement {
+  const surface = document.createElement("section");
+  surface.className = "prompt-region pi-web-chat-composer";
+  surface.innerHTML = `
+    <div class="slash-pop" hidden><div class="slash-head">slash commands · type to filter</div><div class="slash-list"></div></div>
+    <div class="prompt-bar">
+      <button class="attach-btn" type="button" aria-label="attach files" title="attach files">${MATERIAL_ICONS.attachFile}</button>
+      <input type="file" multiple hidden data-file-input />
+      <div class="prompt-input-col"><div class="attach-chips" hidden></div><textarea class="prompt-textarea" placeholder="ask pi to do something…" rows="1"></textarea></div>
+      <div class="prompt-actions">
+        <button class="stop-btn" type="button" aria-label="stop" title="stop" hidden>${MATERIAL_ICONS.stop}</button>
+        <button class="mic-btn" type="button" data-action="toggle-speech-input" aria-label="start voice input" title="voice input" hidden>🎙</button>
+        <button class="send-btn" type="button" aria-label="send" title="send" aria-disabled="true">${MATERIAL_ICONS.send}</button>
+      </div>
+      <div class="drop-overlay" hidden><span>drop to attach</span></div>
+    </div>
+    <div class="prompt-meta" data-prompt-meta>— | <span class="prompt-meta-item prompt-meta-branch"><span>—</span></span></div>`;
+  return surface;
+}
+
+export function installBadge(app: HTMLElement): HTMLSpanElement {
+  const badge = document.createElement("span");
+  badge.className = "prompt-meta-item pi-web-chat-badge";
+  badge.textContent = "chat plugin";
+  app.querySelector("[data-prompt-meta]")?.append(badge);
+  return badge;
 }
 
 export function createChatDom(): ChatDom {
@@ -95,6 +138,42 @@ function renderMessage(message: ChatMessage): HTMLElement {
   body.textContent = message.text;
 
   item.append(role, body);
+
+  if (message.thinking) {
+    const thinking = document.createElement("details");
+    thinking.className = "pi-web-chat-thinking";
+    thinking.open = Boolean(message.streaming);
+    const summary = document.createElement("summary");
+    summary.textContent = "thinking";
+    const content = document.createElement("pre");
+    content.textContent = message.thinking;
+    thinking.append(summary, content);
+    item.append(thinking);
+  }
+
+  if (message.toolCalls?.length) {
+    const tools = document.createElement("div");
+    tools.className = "pi-web-chat-tools";
+    for (const tool of message.toolCalls) {
+      const block = document.createElement("details");
+      block.className = `pi-web-chat-tool pi-web-chat-tool-${tool.status}`;
+      block.open = tool.status === "running";
+      const summary = document.createElement("summary");
+      summary.textContent = `${tool.name} · ${tool.status}`;
+      const content = document.createElement("pre");
+      content.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
+      block.append(summary, content);
+      tools.append(block);
+    }
+    item.append(tools);
+  }
+
+  if (message.streaming) {
+    const meta = document.createElement("div");
+    meta.className = "pi-web-chat-message-meta";
+    meta.textContent = "streaming...";
+    item.append(meta);
+  }
 
   if (message.attachments?.length) {
     const meta = document.createElement("div");
@@ -184,13 +263,67 @@ export function installSettingsSection(): HTMLElement | undefined {
 
 export function pluginStyleText(): string {
   return `
+    .pi-web-chat-badge { color: var(--muted, #8a8f98); }
+    .pi-web-chat-surface { display: flex; flex-direction: column; }
+    .pi-web-chat-composer { display: block; }
+    .pi-web-chat-composer .material-icon { display: block; width: 16px; height: 16px; pointer-events: none; }
+    .${LEGACY_PLUGIN_CLASS} .app-body:has(.sidebar-wrap) > [data-plugin-chat-root],
+    .${LEGACY_PLUGIN_CLASS} .app-body:has(.sidebar-wrap) > [data-plugin-composer-root] { grid-column: 2; }
+    .${LEGACY_PLUGIN_CLASS} .slash-pop {
+      position: absolute;
+      left: var(--space-3, 12px);
+      right: 120px;
+      bottom: calc(100% + 4px);
+      max-width: 640px;
+      background: var(--bg-2, #161b22);
+      border: 1px solid var(--border-hi, var(--border, #30363d));
+      box-shadow: var(--shadow-modal, 0 18px 48px rgba(0,0,0,.35));
+      z-index: 30;
+    }
+    .${LEGACY_PLUGIN_CLASS} .slash-head {
+      padding: 6px var(--space-3, 12px);
+      border-bottom: 1px solid var(--border-dim, var(--border, #30363d));
+      font-size: var(--text-xs, 12px);
+      color: var(--fg-3, var(--muted, #8a8f98));
+      letter-spacing: var(--tracking-wide, .04em);
+      text-transform: uppercase;
+      background: var(--bg-1, #0f1117);
+    }
+    .${LEGACY_PLUGIN_CLASS} .slash-list { max-height: 240px; overflow-y: auto; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item {
+      display: grid;
+      grid-template-columns: minmax(120px, .8fr) auto minmax(0, 1.4fr);
+      gap: 10px;
+      padding: 6px var(--space-3, 12px);
+      cursor: pointer;
+      font-size: var(--text-sm, 13px);
+      align-items: baseline;
+    }
+    .${LEGACY_PLUGIN_CLASS} .slash-item.selected { background: var(--bg-4, rgba(255,255,255,.08)); }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-cmd { color: var(--accent, #00ff88); font-family: var(--font-mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-tags { display: inline-flex; gap: 4px; align-items: center; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-scope,
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-source { border: 1px solid var(--border, #30363d); color: var(--fg-3, #8a8f98); font-size: 10px; padding: 1px 5px; text-transform: uppercase; }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-scope { color: var(--tool-call, #79c0ff); }
+    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-desc { color: var(--fg-2, #c9d1d9); font-size: var(--text-xs, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .${LEGACY_PLUGIN_CLASS} .slash-empty { padding: 10px var(--space-3, 12px); color: var(--fg-3, #8a8f98); font-size: var(--text-sm, 13px); }
+    .${LEGACY_PLUGIN_CLASS} .prompt-file-ref-pop::before,
+    .${LEGACY_PLUGIN_CLASS} .slash-pop::before {
+      content: "pi-web-chat";
+      display: block;
+      padding: 4px 8px 2px;
+      color: var(--muted, #8a8f98);
+      font-size: 11px;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
     .${ROOT_CLASS} { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
     .pi-web-chat-transcript { flex: 1; min-height: 160px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; }
     .pi-web-chat-message { border: 1px solid var(--border, #30363d); border-radius: 10px; padding: 10px; background: var(--panel, rgba(255,255,255,.03)); }
     .pi-web-chat-message-role { color: var(--muted, #8a8f98); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
     .pi-web-chat-message-body { margin: 0; white-space: pre-wrap; word-break: break-word; font: inherit; }
     .pi-web-chat-message-meta { margin-top: 6px; color: var(--muted, #8a8f98); font-size: 12px; }
-    .pi-web-chat-composer { position: relative; padding: 10px; border-top: 1px solid var(--border, #30363d); }
+    .${ROOT_CLASS} .pi-web-chat-composer { position: relative; padding: 10px; border-top: 1px solid var(--border, #30363d); }
     .pi-web-chat-prompt-bar { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--border, #30363d); border-radius: 12px; padding: 8px; background: var(--surface, #0f1117); }
     .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-prompt-bar { border-color: var(--warning, #facc15); box-shadow: 0 0 0 1px rgba(250,204,21,.35); }
     .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-icon-btn { color: var(--warning, #facc15); border-color: var(--warning, #facc15); }

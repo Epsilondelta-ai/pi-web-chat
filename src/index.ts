@@ -2,6 +2,9 @@ import type { BehaviorSubject, Subject } from "rxjs";
 import {
   commandName,
   createChatDom,
+  createChatSurface,
+  createComposerSurface,
+  installBadge,
   installSettingsSection,
   installStyles,
   installToolbarButton,
@@ -16,9 +19,11 @@ import {
 } from "./dom";
 import type {
   BackendResponse,
+  ChatEvent,
   ChatInputSubmitted,
   ChatMessage,
   ChatSession,
+  ChatToolCall,
   ChatStore,
   Cleanup,
   Disposer,
@@ -41,6 +46,7 @@ const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
+const MOUNTED_CHAT_POLL_MS = 250;
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
 
@@ -61,6 +67,7 @@ type State = {
   selectedAttachmentNames: string[];
   commands: PluginCommand[];
   fileSearchToken: number;
+  backendChatToken: number;
 };
 
 class Disposables {
@@ -85,12 +92,18 @@ class Disposables {
   }
 }
 
-export { commandName, createChatDom, pluginClass, pluginStyleText };
+export { commandName, createChatDom, createChatSurface, createComposerSurface, pluginClass, pluginStyleText };
+export { chatEventsToAgUiLikeEvents, createAgUiLikeRunInput, promptFromAgUiLikeRunInput } from "./ag-ui";
 
 export default function activate(context: PluginContext = {}): Cleanup {
-  const disposables = new Disposables();
   const app = context.app as AppWithRuntime | undefined;
   app?.piWebChat?.dispose();
+
+  if (typeof context.mount?.chat === "function" && typeof context.mount?.composer === "function") {
+    return activateMountedPiWeb(context, app);
+  }
+
+  const disposables = new Disposables();
 
   const pi = requirePiWeb();
   const channels = createChannels(pi);
@@ -105,6 +118,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
     selectedAttachmentNames: [],
     commands: [],
     fileSearchToken: 0,
+    backendChatToken: 0,
   };
 
   saveStore(state.store);
@@ -138,6 +152,79 @@ export default function activate(context: PluginContext = {}): Cleanup {
     disposables.dispose();
     if (app?.piWebChat === runtime) delete app.piWebChat;
   };
+}
+
+function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | undefined): Cleanup {
+  const disposables = new Disposables();
+  const style = disposables.add(installStyles());
+  const chatSurface = createChatSurface();
+  const composerSurface = createComposerSurface();
+  const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
+  const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
+  if (cleanupChat) disposables.add(cleanupChat);
+  if (cleanupComposer) disposables.add(cleanupComposer);
+  const mountedStore = loadStore();
+  renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages);
+  void refreshMountedBackendChatState(context, chatSurface, mountedStore);
+  bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore);
+  const badge = app ? disposables.add(installBadge(app)) : undefined;
+  app?.classList.add(pluginClass());
+
+  const runtime = { dispose: () => disposables.dispose() };
+  if (app) app.piWebChat = runtime;
+
+  return (): void => {
+    disposables.dispose();
+    badge?.remove();
+    style.remove();
+    app?.classList.remove(pluginClass());
+    if (app?.piWebChat === runtime) delete app.piWebChat;
+  };
+}
+
+function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement, chatSurface: HTMLElement, store: ChatStore): void {
+  const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
+  const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
+  if (!textarea || !sendButton) return;
+
+  const sync = (): void => {
+    const value = textarea.value;
+    sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
+  };
+  let activePoll: ReturnType<typeof globalThis.setInterval> | undefined;
+  disposables.add({ remove: () => { if (activePoll) globalThis.clearInterval(activePoll); } });
+
+  const submit = async (event?: Event): Promise<void> => {
+    event?.preventDefault();
+    event?.stopImmediatePropagation();
+    const text = textarea.value.trim();
+    sync();
+    if (!text) return;
+    sendButton.disabled = true;
+    activePoll = globalThis.setInterval(() => {
+      void refreshMountedBackendChatState(context, chatSurface, store);
+    }, MOUNTED_CHAT_POLL_MS);
+    try {
+      const response = await submitPromptToPluginBackend(context, text, [], store.activeSessionId);
+      const messages = applyBackendResponseToMountedStore(store, response);
+      renderMountedBackendMessages(chatSurface, messages);
+      textarea.value = "";
+    } catch (error) {
+      renderMountedBackendMessages(chatSurface, [{ id: id(), role: "system", text: `prompt failed: ${errorText(error)}`, createdAt: Date.now() }]);
+    } finally {
+      if (activePoll) globalThis.clearInterval(activePoll);
+      activePoll = undefined;
+      sendButton.disabled = false;
+      sync();
+    }
+  };
+
+  disposables.listen(textarea, "input", sync);
+  disposables.listen(textarea, "keydown", (event) => {
+    const keyEvent = event as KeyboardEvent;
+    if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) void submit(keyEvent);
+  });
+  disposables.listen(sendButton, "click", (event) => { void submit(event); });
 }
 
 export function createChannels(pi: PiWebSubjects): Channels {
@@ -185,7 +272,6 @@ export function mergeCommands(coreCommands: PluginCommand[] = [], pluginCommands
 export function getActiveWorkspaceId(context: PluginContext): string {
   return (
     context.app?.piWebSidebar?.getSnapshot?.().activeWorkspaceId ||
-    context.session?.activeWorkspaceId?.() ||
     context.app?.dataset.activeWorkspaceId ||
     ""
   );
@@ -249,7 +335,14 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
   }));
 
   disposables.add(state.channels.sidebarSelectedSession$.subscribe((selected) => {
-    if (selected?.sessionId) switchToSession(state, dom, selected.sessionId);
+    if (selected?.workspaceId && state.context.app) {
+      state.context.app.dataset.activeWorkspaceId = selected.workspaceId;
+    }
+
+    if (selected?.sessionId) {
+      switchToSession(state, dom, selected.sessionId);
+      void refreshBackendChatState(state, dom, selected.sessionId);
+    }
   }));
 }
 
@@ -278,8 +371,181 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
   addMessage(state, { role: "user", text, attachments });
-  clearPendingAttachments(state);
   render(state, dom);
+  try {
+    await submitPromptWithStreaming(state, dom, text, attachments);
+  } catch (error) {
+    state.channels.toastRequested$.next({ level: "error", message: `prompt failed: ${errorText(error)}` });
+  }
+  clearPendingAttachments(state);
+}
+
+async function submitPromptWithStreaming(state: State, dom: ChatDom, text: string, attachments: FileAttachment[]): Promise<void> {
+  const start = await startStreamingPrompt(state.context, text, attachments, state.store.activeSessionId);
+  if (typeof start.runId !== "string" || !start.runId) {
+    const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
+    applyBackendResponseToStore(state.store, response);
+    render(state, dom);
+    return;
+  }
+
+  if (typeof start.activeSessionId === "string" && start.activeSessionId) {
+    state.store.activeSessionId = start.activeSessionId;
+  }
+
+  const assistant = ensureStreamingAssistant(state.store);
+  let cursor = 0;
+  let streaming = true;
+  render(state, dom);
+
+  try {
+    while (streaming) {
+      await delay(120);
+      const response = await backendCall(state.context, "streamEvents", { runId: start.runId, cursor });
+      const events = Array.isArray(response.events) ? response.events.filter(isChatEvent) : [];
+      cursor = typeof response.cursor === "number" ? response.cursor : cursor;
+      streaming = response.isStreaming === true;
+      applyChatEvents(assistant, events);
+      assistant.streaming = streaming;
+      activeSession(state.store).updatedAt = Date.now();
+      saveStore(state.store);
+      render(state, dom);
+    }
+  } finally {
+    assistant.streaming = false;
+    saveStore(state.store);
+    render(state, dom);
+  }
+
+  await refreshBackendChatState(state, dom);
+}
+
+async function startStreamingPrompt(context: PluginContext, text: string, attachments: FileAttachment[], sessionId: string): Promise<BackendResponse> {
+  try {
+    return await backendCall(context, "startPrompt", { text, attachments, sessionId });
+  } catch (error) {
+    if (isUnsupportedStreamingBackend(error)) return {};
+    throw error;
+  }
+}
+
+function isUnsupportedStreamingBackend(error: unknown): boolean {
+  return /unknown method: startPrompt|unsupported method: startPrompt|startPrompt unsupported/i.test(errorText(error));
+}
+
+async function submitPromptToPluginBackend(context: PluginContext, text: string, attachments: FileAttachment[], sessionId = ""): Promise<BackendResponse> {
+  const response = await backendCall(context, "submitPrompt", { text, attachments, sessionId });
+  return response;
+}
+
+function applyBackendResponseToStore(store: ChatStore, response: BackendResponse): void {
+  if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+    store.activeSessionId = response.activeSessionId;
+  }
+  if (Array.isArray(response.messages)) {
+    activeSession(store).messages = response.messages.filter(isChatMessage).slice(-MAX_MESSAGES_PER_SESSION);
+    activeSession(store).updatedAt = Date.now();
+    saveStore(store);
+  }
+}
+
+function ensureStreamingAssistant(store: ChatStore): ChatMessage {
+  const session = activeSession(store);
+  const existing = [...session.messages].reverse().find((message) => message.role === "assistant" && message.streaming);
+  if (existing) return existing;
+  const message: ChatMessage = { id: id(), role: "assistant", text: "", createdAt: Date.now(), streaming: true };
+  session.messages.push(message);
+  return message;
+}
+
+function applyChatEvents(message: ChatMessage, events: ChatEvent[]): void {
+  for (const event of events) {
+    if (event.type === "text.delta" && typeof event.delta === "string") {
+      message.text += event.delta;
+    } else if (event.type === "thinking.delta" && typeof event.delta === "string") {
+      message.thinking = `${message.thinking || ""}${event.delta}`;
+    } else if (event.type === "tool.start") {
+      upsertToolCall(message, event, "running");
+    } else if (event.type === "tool.delta" && typeof event.delta === "string") {
+      const tool = upsertToolCall(message, event, "running");
+      tool.text = event.delta;
+    } else if (event.type === "tool.end") {
+      const tool = upsertToolCall(message, event, event.isError ? "err" : "ok");
+      if (typeof event.result === "string" && event.result) tool.text = event.result;
+    } else if (event.type === "error" && typeof event.message === "string") {
+      message.text += `${message.text ? "\n" : ""}${event.message}`;
+    }
+  }
+}
+
+function upsertToolCall(message: ChatMessage, event: ChatEvent, status: "running" | "ok" | "err"): ChatToolCall {
+  const idValue = event.toolCallId || event.toolName || "tool";
+  message.toolCalls ||= [];
+  let tool = message.toolCalls.find((item) => item.id === idValue);
+  if (!tool) {
+    tool = { id: idValue, name: event.toolName || "tool", args: event.args, text: "", status };
+    message.toolCalls.push(tool);
+  }
+  tool.status = status;
+  if (event.args) tool.args = event.args;
+  return tool;
+}
+
+function isChatEvent(value: unknown): value is ChatEvent {
+  return isRecord(value) && typeof value.type === "string";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+async function refreshMountedBackendChatState(context: PluginContext, chatSurface: HTMLElement, store: ChatStore): Promise<void> {
+  try {
+    const response = await backendCall(context, "chatState", {});
+    const messages = applyBackendResponseToMountedStore(store, response);
+    if (messages.length) renderMountedBackendMessages(chatSurface, messages);
+  } catch {
+    // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
+  }
+}
+
+function applyBackendResponseToMountedStore(store: ChatStore, response: BackendResponse): ChatMessage[] {
+  const responseMessages = Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : [];
+  if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+    let session = store.sessions.find((item) => item.id === response.activeSessionId);
+    if (!session) {
+      session = createSession(response.activeSessionId);
+      store.sessions.unshift(session);
+    }
+    store.activeSessionId = session.id;
+  }
+  const session = activeSession(store);
+  if (responseMessages.length) {
+    session.messages = responseMessages.slice(-MAX_MESSAGES_PER_SESSION);
+    if (session.title === "New chat") {
+      const firstUser = responseMessages.find((message) => message.role === "user");
+      if (firstUser) session.title = firstUser.text.slice(0, 48) || session.title;
+    }
+    session.updatedAt = Date.now();
+  }
+  saveStore(store);
+  return session.messages;
+}
+
+function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[]): void {
+  const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
+  container.replaceChildren(...messages.map((message) => {
+    const item = document.createElement("article");
+    item.className = `transcript-item pi-web-chat-message pi-web-chat-message-${message.role}`;
+    const role = document.createElement("div");
+    role.className = "pi-web-chat-message-role";
+    role.textContent = message.role;
+    const body = document.createElement("pre");
+    body.className = "pi-web-chat-message-body";
+    body.textContent = message.text;
+    item.append(role, body);
+    return item;
+  }));
 }
 
 async function runShell(state: State, dom: ChatDom, command: string): Promise<void> {
@@ -413,9 +679,13 @@ function updateComposerMode(dom: ChatDom, value: string): void {
   else setComposerMode(dom, "normal");
 }
 
-async function refreshBackendChatState(state: State, dom: ChatDom): Promise<void> {
+async function refreshBackendChatState(state: State, dom: ChatDom, sessionId = ""): Promise<void> {
+  const token = ++state.backendChatToken;
+
   try {
-    const response = await backendCall(state.context, "chatState", {});
+    const response = await backendCall(state.context, "chatState", sessionId ? { sessionId } : {});
+    if (token !== state.backendChatToken) return;
+
     if (Array.isArray(response.messages)) {
       const messages = response.messages.filter(isChatMessage);
       if (messages.length) {

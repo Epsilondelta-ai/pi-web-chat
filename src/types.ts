@@ -20,7 +20,10 @@ export type PluginAppElement = HTMLElement & {
 export type PluginContext = {
   app?: PluginAppElement;
   backend?: BackendCall;
-  session?: { activeWorkspaceId?: () => string };
+  mount?: {
+    chat(element: HTMLElement, options?: { replace?: boolean }): Cleanup;
+    composer(element: HTMLElement, options?: { replace?: boolean }): Cleanup;
+  };
 };
 
 export type PiWebSubjects = {
@@ -77,6 +80,11 @@ export type BackendResponse = {
   attachments?: FileAttachment[];
   messages?: ChatMessage[];
   activeSessionId?: string;
+  runId?: string;
+  events?: ChatEvent[];
+  cursor?: number;
+  accepted?: boolean;
+  aborted?: boolean;
   isStreaming?: boolean;
   errors?: unknown[];
   exitCode?: number;
@@ -85,13 +93,36 @@ export type BackendResponse = {
   truncated?: boolean;
 };
 
+export type ChatEvent = {
+  seq?: number;
+  type: string;
+  delta?: string;
+  toolCallId?: string;
+  toolName?: string;
+  args?: JsonRecord;
+  result?: string;
+  isError?: boolean;
+  message?: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "tool" | "system";
   text: string;
   createdAt: number;
   attachments?: FileAttachment[];
+  thinking?: string;
+  toolCalls?: ChatToolCall[];
+  streaming?: boolean;
   meta?: JsonRecord;
+};
+
+export type ChatToolCall = {
+  id: string;
+  name: string;
+  args?: JsonRecord;
+  text: string;
+  status: "running" | "ok" | "err";
 };
 
 export type ChatSession = {

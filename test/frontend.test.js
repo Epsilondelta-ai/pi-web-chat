@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Window } from "happy-dom";
 import { AsyncSubject, BehaviorSubject, ReplaySubject, Subject } from "rxjs";
-import activate, { backendCall, commandName, createChannels, extractRefs, getActiveWorkspaceId, mergeCommands, pluginStyleText } from "../index.js";
+import activate, { backendCall, chatEventsToAgUiLikeEvents, commandName, createAgUiLikeRunInput, createChannels, extractRefs, getActiveWorkspaceId, mergeCommands, pluginStyleText, promptFromAgUiLikeRunInput } from "../index.js";
 
 function createPiWeb() {
   const subjects = new Map();
@@ -30,6 +30,20 @@ function createPiWeb() {
   };
 }
 
+test("AG-UI-like adapter maps internal chat events without runtime dependency", () => {
+  const run = createAgUiLikeRunInput("thread-1", "run-1", [{ id: "m1", role: "user", text: "hello", createdAt: 1 }]);
+  const prompt = promptFromAgUiLikeRunInput(run);
+  const events = chatEventsToAgUiLikeEvents([
+    { type: "text.delta", delta: "hi" },
+    { type: "thinking.delta", delta: "reason" },
+    { type: "tool.start", toolCallId: "t1", toolName: "bash", args: { command: "pwd" } },
+  ], "thread-1", "run-1");
+
+  assert.equal(prompt.text, "hello");
+  assert.deepEqual(events.map((event) => event.type), ["TEXT_MESSAGE_CONTENT", "THINKING_MESSAGE_CONTENT", "TOOL_CALL_START"]);
+  assert.equal(events[2].toolCallId, "t1");
+});
+
 test("command utilities keep chat command behavior", () => {
   assert.equal(commandName({ command: "/a" }), "/a");
   assert.equal(commandName({ cmd: "/b" }), "/b");
@@ -44,6 +58,15 @@ test("plugin styles target plugin-owned DOM", () => {
   assert.match(styles, /pi-web-chat-transcript/);
 });
 
+test("plugin styles restore legacy mounted slash popover", () => {
+  const styles = pluginStyleText();
+  assert.match(styles, /\.pi-web-chat-enhanced \.slash-pop \{/);
+  assert.match(styles, /bottom: calc\(100% \+ 4px\)/);
+  assert.match(styles, /\.pi-web-chat-enhanced \.slash-item \{/);
+  assert.match(styles, /grid-template-columns: minmax\(120px, \.8fr\) auto minmax\(0, 1\.4fr\)/);
+  assert.match(styles, /\.app-body:has\(\.sidebar-wrap\) > \[data-plugin-composer-root\]/);
+});
+
 test("channels use pi-web standard names", () => {
   const pi = createPiWeb();
   const channels = createChannels(pi);
@@ -52,9 +75,9 @@ test("channels use pi-web standard names", () => {
   assert.deepEqual(pi.listSubjects().sort(), ["chat.input", "chat.input.submitted", "plugin.pi-web-sidebar.selectedSession", "session.activeId", "toast.requested"].sort());
 });
 
-test("active workspace prefers sidebar, session, then dataset", () => {
+test("active workspace prefers sidebar then dataset", () => {
   assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } } }), "dataset");
-  assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } }, session: { activeWorkspaceId: () => "session" } }), "session");
+  assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } }, session: { activeWorkspaceId: () => "session" } }), "dataset");
   assert.equal(
     getActiveWorkspaceId({
       app: { dataset: { activeWorkspaceId: "dataset" }, piWebSidebar: { getSnapshot: () => ({ activeWorkspaceId: "sidebar" }) } },
@@ -97,19 +120,64 @@ test("initializes from pi-web-sidebar selected session localStorage", async () =
   });
 });
 
-test("loads sessions selected by pi-web-sidebar channel", async () => {
-  await withWindow(async ({ window }) => {
+test("loads and renders sessions selected by pi-web-sidebar channel", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
     const cleanup = activate({
-      app: window.document.querySelector("pi-app"),
-      backend: async (method) => (method === "commands" ? { commands: [] } : {}),
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState" && input.data.sessionId === "selected-by-sidebar") {
+          return { activeSessionId: "selected-by-sidebar", messages: [{ id: "m1", role: "assistant", text: "selected transcript", createdAt: 1 }] };
+        }
+        return {};
+      },
     });
 
     globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null).next({ sessionId: "selected-by-sidebar", workspaceId: "workspace-1" });
     await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(app.dataset.activeWorkspaceId, "workspace-1");
+    assert.equal(store.activeSessionId, "selected-by-sidebar");
+    assert.ok(store.sessions.some((session) => session.id === "selected-by-sidebar"));
+    assert.match(window.document.querySelector("[data-chat-transcript]").textContent, /selected transcript/);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.sessionId === "selected-by-sidebar"));
+    cleanup();
+  });
+});
+
+test("stale initial chatState does not overwrite sidebar selected session", async () => {
+  await withWindow(async ({ window }) => {
+    let releaseInitial;
+    const initialReady = new Promise((resolve) => { releaseInitial = resolve; });
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method, input) => {
+        if (method === "commands") return { commands: [] };
+        if (method === "chatState" && input.data.sessionId === "selected-by-sidebar") {
+          return { activeSessionId: "selected-by-sidebar", messages: [{ id: "m1", role: "assistant", text: "selected transcript", createdAt: 2 }] };
+        }
+        if (method === "chatState") {
+          await initialReady;
+          return { activeSessionId: "old-session", messages: [{ id: "old", role: "assistant", text: "old transcript", createdAt: 1 }] };
+        }
+        return {};
+      },
+    });
+
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null).next({ sessionId: "selected-by-sidebar", workspaceId: "workspace-1" });
+    await tick();
+    releaseInitial();
+    await tick();
+    await tick();
 
     const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
     assert.equal(store.activeSessionId, "selected-by-sidebar");
-    assert.ok(store.sessions.some((session) => session.id === "selected-by-sidebar"));
+    assert.match(window.document.querySelector("[data-chat-transcript]").textContent, /selected transcript/);
+    assert.doesNotMatch(window.document.querySelector("[data-chat-transcript]").textContent, /old transcript/);
     cleanup();
   });
 });
@@ -167,6 +235,225 @@ test("backend chat state reconciles without replacing local active messages", as
   });
 });
 
+test("mounted pi-web integration uses legacy surfaces without requiring subject registry", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    const backendCalls = [];
+    globalThis.piWeb = undefined;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "submitPrompt") return { activeSessionId: "plugin-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+      composer: {
+        setPrompt: () => { throw new Error("pi-web composer API must not be used"); },
+        submitPrompt: async () => { throw new Error("pi-web composer API must not be used"); },
+      },
+    });
+
+    assert.ok(window.document.querySelector(".pi-web-chat-surface .term-inner"));
+    assert.ok(window.document.querySelector(".prompt-region.pi-web-chat-composer .prompt-bar"));
+    assert.ok(app.classList.contains("pi-web-chat-enhanced"));
+    assert.equal(window.document.querySelector(".pi-web-chat-root"), null);
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "send to pi";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    assert.deepEqual(backendCalls.map((call) => call.method), ["chatState", "submitPrompt"]);
+    assert.equal(backendCalls[1].input.data.text, "send to pi");
+    assert.match(window.document.querySelector(".term-inner").textContent, /send to pi/);
+    assert.equal(textarea.value, "");
+    assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
+
+    cleanup();
+    assert.equal(window.document.querySelector(".pi-web-chat-surface"), null);
+    assert.equal(window.document.querySelector(".prompt-region.pi-web-chat-composer"), null);
+    assert.equal(app.classList.contains("pi-web-chat-enhanced"), false);
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration restores localStorage-backed messages on first load", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    globalThis.piWeb = undefined;
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{ id: "stored-session", title: "Stored", createdAt: 1, updatedAt: 2, messages: [{ id: "m1", role: "assistant", text: "stored history", createdAt: 2 }] }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+    });
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /stored history/);
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration persists plugin backend session responses", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    globalThis.piWeb = undefined;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "submitPrompt") return { activeSessionId: "persisted-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "persist me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "persisted-session");
+    assert.equal(store.sessions[0].messages[0].text, "persist me");
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration polls backend chat state while prompt is running", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    let submitStarted = false;
+    let releaseSubmit;
+    const submitDone = new Promise((resolve) => { releaseSubmit = resolve; });
+    globalThis.piWeb = undefined;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState") {
+          return submitStarted ? { activeSessionId: "poll-session", messages: [{ id: "r1", role: "assistant", text: "running update", createdAt: 1 }] } : {};
+        }
+        if (method === "submitPrompt") {
+          submitStarted = true;
+          await submitDone;
+          return { activeSessionId: "poll-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }, { id: "a1", role: "assistant", text: "final update", createdAt: 2 }] };
+        }
+        return {};
+      },
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "poll me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.match(window.document.querySelector(".term-inner").textContent, /running update/);
+    releaseSubmit();
+    await tick();
+    assert.match(window.document.querySelector(".term-inner").textContent, /final update/);
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration uses plugin backend when composer submit is unavailable", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    const hostPrompt = window.document.createElement("textarea");
+    const backendCalls = [];
+    globalThis.piWeb = undefined;
+    app.prompt = hostPrompt;
+    app.submitPrompt = async function submitPrompt() { throw new Error("pi-web app API must not be used"); };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "submitPrompt") return { activeSessionId: "plugin-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+      composer: {
+        setPrompt: () => { throw new Error("pi-web composer API must not be used"); },
+      },
+    });
+
+    assert.ok(window.document.querySelector(".pi-web-chat-surface .term-inner"));
+    assert.equal(window.document.querySelector(".pi-web-chat-root"), null);
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "send via app";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.deepEqual(backendCalls.map((call) => call.method), ["chatState", "submitPrompt"]);
+    assert.equal(backendCalls[1].input.data.text, "send via app");
+    assert.equal(hostPrompt.value, "");
+    assert.equal(textarea.value, "");
+    assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
 test("activate appends DOM hooks, publishes submits, and cleans up", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const cleanup = activate({
@@ -198,6 +485,57 @@ test("activate appends DOM hooks, publishes submits, and cleans up", async () =>
     cleanup();
     assert.equal(window.document.querySelector(".pi-web-chat-root"), null);
     assert.equal(window.document.querySelector("#pi-web-chat-style"), null);
+  });
+});
+
+test("legacy backend submitPrompt is used when startPrompt is unsupported", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "startPrompt") throw new Error("unknown method: startPrompt");
+        if (method === "submitPrompt") return { activeSessionId: "legacy-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "legacy backend";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    await tick();
+
+    assert.deepEqual(backendCalls.filter((call) => call.method === "startPrompt" || call.method === "submitPrompt").map((call) => call.method), ["startPrompt", "submitPrompt"]);
+    assert.match(root.querySelector("[data-chat-transcript]").textContent, /legacy backend/);
+    cleanup();
+  });
+});
+
+test("startPrompt runtime failures are not hidden by legacy fallback", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        backendCalls.push({ method });
+        if (method === "startPrompt") throw new Error("stream runner failed");
+        if (method === "submitPrompt") throw new Error("submitPrompt must not be called");
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "stream fail";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    await tick();
+
+    assert.deepEqual(backendCalls.filter((call) => call.method === "startPrompt" || call.method === "submitPrompt").map((call) => call.method), ["startPrompt"]);
+    cleanup();
   });
 });
 
