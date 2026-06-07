@@ -215,8 +215,8 @@ test("mounted pi-web integration uses legacy surfaces without requiring subject 
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
     await tick();
-    assert.deepEqual(backendCalls.map((call) => call.method), ["submitPrompt"]);
-    assert.equal(backendCalls[0].input.data.text, "send to pi");
+    assert.deepEqual(backendCalls.map((call) => call.method), ["chatState", "submitPrompt"]);
+    assert.equal(backendCalls[1].input.data.text, "send to pi");
     assert.match(window.document.querySelector(".term-inner").textContent, /send to pi/);
     assert.equal(textarea.value, "");
     assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
@@ -225,6 +225,74 @@ test("mounted pi-web integration uses legacy surfaces without requiring subject 
     assert.equal(window.document.querySelector(".pi-web-chat-surface"), null);
     assert.equal(window.document.querySelector(".prompt-region.pi-web-chat-composer"), null);
     assert.equal(app.classList.contains("pi-web-chat-enhanced"), false);
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration restores localStorage-backed messages on first load", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    globalThis.piWeb = undefined;
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{ id: "stored-session", title: "Stored", createdAt: 1, updatedAt: 2, messages: [{ id: "m1", role: "assistant", text: "stored history", createdAt: 2 }] }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+    });
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /stored history/);
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
+test("mounted pi-web integration persists plugin backend session responses", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    globalThis.piWeb = undefined;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "submitPrompt") return { activeSessionId: "persisted-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "persist me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "persisted-session");
+    assert.equal(store.sessions[0].messages[0].text, "persist me");
+    cleanup();
     globalThis.piWeb = previousPiWeb;
   });
 });
@@ -270,8 +338,8 @@ test("mounted pi-web integration uses plugin backend when composer submit is una
     window.document.querySelector(".send-btn").click();
     await tick();
 
-    assert.deepEqual(backendCalls.map((call) => call.method), ["submitPrompt"]);
-    assert.equal(backendCalls[0].input.data.text, "send via app");
+    assert.deepEqual(backendCalls.map((call) => call.method), ["chatState", "submitPrompt"]);
+    assert.equal(backendCalls[1].input.data.text, "send via app");
     assert.equal(hostPrompt.value, "");
     assert.equal(textarea.value, "");
     assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");

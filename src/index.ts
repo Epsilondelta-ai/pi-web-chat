@@ -157,7 +157,10 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
   if (cleanupChat) disposables.add(cleanupChat);
   if (cleanupComposer) disposables.add(cleanupComposer);
-  bindMountedComposer(disposables, context, composerSurface, chatSurface);
+  const mountedStore = loadStore();
+  renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages);
+  void refreshMountedBackendChatState(context, chatSurface, mountedStore);
+  bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore);
   const badge = app ? disposables.add(installBadge(app)) : undefined;
   app?.classList.add(pluginClass());
 
@@ -173,7 +176,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   };
 }
 
-function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement, chatSurface: HTMLElement): void {
+function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement, chatSurface: HTMLElement, store: ChatStore): void {
   const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
   const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
   if (!textarea || !sendButton) return;
@@ -190,8 +193,9 @@ function bindMountedComposer(disposables: Disposables, context: PluginContext, c
     if (!text) return;
     sendButton.disabled = true;
     try {
-      const response = await submitPromptToPluginBackend(context, text, []);
-      renderMountedBackendMessages(chatSurface, Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : []);
+      const response = await submitPromptToPluginBackend(context, text, [], store.activeSessionId);
+      const messages = applyBackendResponseToMountedStore(store, response);
+      renderMountedBackendMessages(chatSurface, messages);
       textarea.value = "";
     } catch (error) {
       renderMountedBackendMessages(chatSurface, [{ id: id(), role: "system", text: `prompt failed: ${errorText(error)}`, createdAt: Date.now() }]);
@@ -367,6 +371,39 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
 async function submitPromptToPluginBackend(context: PluginContext, text: string, attachments: FileAttachment[], sessionId = ""): Promise<BackendResponse> {
   const response = await backendCall(context, "submitPrompt", { text, attachments, sessionId });
   return response;
+}
+
+async function refreshMountedBackendChatState(context: PluginContext, chatSurface: HTMLElement, store: ChatStore): Promise<void> {
+  try {
+    const response = await backendCall(context, "chatState", {});
+    const messages = applyBackendResponseToMountedStore(store, response);
+    if (messages.length) renderMountedBackendMessages(chatSurface, messages);
+  } catch {
+    // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
+  }
+}
+
+function applyBackendResponseToMountedStore(store: ChatStore, response: BackendResponse): ChatMessage[] {
+  const responseMessages = Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : [];
+  if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+    let session = store.sessions.find((item) => item.id === response.activeSessionId);
+    if (!session) {
+      session = createSession(response.activeSessionId);
+      store.sessions.unshift(session);
+    }
+    store.activeSessionId = session.id;
+  }
+  const session = activeSession(store);
+  if (responseMessages.length) {
+    session.messages = responseMessages.slice(-MAX_MESSAGES_PER_SESSION);
+    if (session.title === "New chat") {
+      const firstUser = responseMessages.find((message) => message.role === "user");
+      if (firstUser) session.title = firstUser.text.slice(0, 48) || session.title;
+    }
+    session.updatedAt = Date.now();
+  }
+  saveStore(store);
+  return session.messages;
 }
 
 function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[]): void {
