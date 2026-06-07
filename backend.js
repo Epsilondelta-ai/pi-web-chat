@@ -143,11 +143,22 @@ function streamEvents(data) {
 
 function abortPrompt(data) {
   const state = readRunState(String(data.runId || ""));
+  if (state.childPid) {
+    try {
+      process.kill(Number(state.childPid), "SIGTERM");
+    } catch {
+      // Child already exited.
+    }
+  }
   if (state.pid) {
     try {
-      process.kill(Number(state.pid), "SIGTERM");
+      process.kill(-Number(state.pid), "SIGTERM");
     } catch {
-      // Process already exited.
+      try {
+        process.kill(Number(state.pid), "SIGTERM");
+      } catch {
+        // Process already exited.
+      }
     }
   }
   removeFile(runPromptPath(state.runId));
@@ -166,14 +177,29 @@ function runStreamRunnerProcess(args, resolve) {
     seq += 1;
     appendFileSync(eventsPath, `${JSON.stringify({ seq, time: Date.now(), ...event })}\n`);
     const current = safeReadJson(statePath) || {};
-    const status = event.type === "run.end" ? "complete" : current.status || "running";
+    const ended = event.type === "run.end";
+    const status = current.status === "aborted" ? "aborted" : ended ? "complete" : current.status || "running";
     writeJsonAtomic(statePath, { ...current, cursor: seq, status, updatedAt: Date.now() });
   };
 
   const prompt = readFileSync(promptPath, "utf8");
   removeFile(promptPath);
   const proc = spawn("pi", ["--session", sessionFile, "--mode", "rpc"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] });
+  writeJsonAtomic(statePath, { ...(safeReadJson(statePath) || {}), childPid: proc.pid, updatedAt: Date.now() });
   let buffer = "";
+  let aborted = false;
+  const abort = () => {
+    aborted = true;
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      // Child already exited.
+    }
+    const current = safeReadJson(statePath) || {};
+    writeJsonAtomic(statePath, { ...current, status: "aborted", updatedAt: Date.now(), completedAt: Date.now() });
+  };
+  process.once("SIGTERM", abort);
+  process.once("SIGINT", abort);
 
   emit({ type: "run.start", runId });
   proc.stdout.on("data", (chunk) => {
@@ -188,9 +214,12 @@ function runStreamRunnerProcess(args, resolve) {
   });
   proc.stderr.on("data", (chunk) => emit({ type: "error", message: chunk.toString("utf8") }));
   proc.on("close", (code) => {
+    process.removeListener("SIGTERM", abort);
+    process.removeListener("SIGINT", abort);
     emit({ type: "run.end", runId, exitCode: code ?? 0 });
     const current = safeReadJson(statePath) || {};
-    writeJsonAtomic(statePath, { ...current, status: "complete", updatedAt: Date.now(), completedAt: Date.now() });
+    const status = aborted || current.status === "aborted" ? "aborted" : "complete";
+    writeJsonAtomic(statePath, { ...current, status, updatedAt: Date.now(), completedAt: Date.now() });
     resolve(undefined);
   });
   proc.stdin.end(`${JSON.stringify({ id: runId, type: "prompt", message: prompt })}\n`);

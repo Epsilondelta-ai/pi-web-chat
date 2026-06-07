@@ -135,6 +135,50 @@ process.stdin.on('end', () => {
   assert.equal(events.some((event) => event.type === "run.end"), true);
 });
 
+test("abortPrompt terminates the spawned pi child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const marker = join(home, "pi-aborted.txt");
+  const ready = join(home, "pi-ready.txt");
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+process.on('SIGTERM', () => {
+  fs.writeFileSync(process.env.PI_ABORT_MARKER, 'aborted');
+  process.exit(0);
+});
+fs.writeFileSync(process.env.PI_READY_MARKER, 'ready');
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_ABORT_MARKER: marker, PI_READY_MARKER: ready };
+  const start = await callBackend("startPrompt", root, { text: "abort me" }, env);
+  for (let index = 0; index < 20; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const stream = await callBackend("streamEvents", root, { runId: start.runId, cursor: 0 }, env);
+    if (stream.events.some((event) => event.type === "run.start")) break;
+  }
+  let readyText = "";
+  for (let index = 0; index < 20 && readyText !== "ready"; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    readyText = await readFile(ready, "utf8").catch(() => "");
+  }
+  assert.equal(readyText, "ready");
+
+  const abort = await callBackend("abortPrompt", root, { runId: start.runId }, env);
+  assert.equal(abort.aborted, true);
+
+  let markerText = "";
+  for (let index = 0; index < 20 && markerText !== "aborted"; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    markerText = await readFile(marker, "utf8").catch(() => "");
+  }
+  assert.equal(markerText, "aborted");
+});
+
 test("streaming methods reject path-like run ids", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   await rejectBackend("streamEvents", root, { runId: "../../escape", cursor: 0 });
