@@ -61,9 +61,9 @@ test("channels use pi-web standard names", () => {
   assert.deepEqual(pi.listSubjects().sort(), ["chat.input", "chat.input.submitted", "plugin.pi-web-sidebar.selectedSession", "session.activeId", "toast.requested"].sort());
 });
 
-test("active workspace prefers sidebar, session, then dataset", () => {
+test("active workspace prefers sidebar then dataset", () => {
   assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } } }), "dataset");
-  assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } }, session: { activeWorkspaceId: () => "session" } }), "session");
+  assert.equal(getActiveWorkspaceId({ app: { dataset: { activeWorkspaceId: "dataset" } }, session: { activeWorkspaceId: () => "session" } }), "dataset");
   assert.equal(
     getActiveWorkspaceId({
       app: { dataset: { activeWorkspaceId: "dataset" }, piWebSidebar: { getSnapshot: () => ({ activeWorkspaceId: "sidebar" }) } },
@@ -180,12 +180,15 @@ test("mounted pi-web integration uses legacy surfaces without requiring subject 
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     const previousPiWeb = globalThis.piWeb;
-    let submittedPrompt = "";
-    const submitted = [];
+    const backendCalls = [];
     globalThis.piWeb = undefined;
     const cleanup = activate({
       app,
-      backend: async () => ({}),
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "submitPrompt") return { activeSessionId: "plugin-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
       mount: {
         chat: (element) => {
           window.document.querySelector("[data-main]").replaceWith(element);
@@ -197,8 +200,8 @@ test("mounted pi-web integration uses legacy surfaces without requiring subject 
         },
       },
       composer: {
-        setPrompt: (value) => { submittedPrompt = value; },
-        submitPrompt: async () => { submitted.push(submittedPrompt); },
+        setPrompt: () => { throw new Error("pi-web composer API must not be used"); },
+        submitPrompt: async () => { throw new Error("pi-web composer API must not be used"); },
       },
     });
 
@@ -212,8 +215,9 @@ test("mounted pi-web integration uses legacy surfaces without requiring subject 
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
     await tick();
-    assert.deepEqual(submitted, ["send to pi"]);
-    assert.equal(submittedPrompt, "");
+    assert.deepEqual(backendCalls.map((call) => call.method), ["submitPrompt"]);
+    assert.equal(backendCalls[0].input.data.text, "send to pi");
+    assert.match(window.document.querySelector(".term-inner").textContent, /send to pi/);
     assert.equal(textarea.value, "");
     assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
 
@@ -225,20 +229,23 @@ test("mounted pi-web integration uses legacy surfaces without requiring subject 
   });
 });
 
-test("mounted pi-web integration submits through app API when composer submit is unavailable", async () => {
+test("mounted pi-web integration uses plugin backend when composer submit is unavailable", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     const previousPiWeb = globalThis.piWeb;
     const hostPrompt = window.document.createElement("textarea");
-    const submitted = [];
-    let composerPrompt = "";
+    const backendCalls = [];
     globalThis.piWeb = undefined;
     app.prompt = hostPrompt;
-    app.submitPrompt = async function submitPrompt() { submitted.push(this.prompt.value); };
+    app.submitPrompt = async function submitPrompt() { throw new Error("pi-web app API must not be used"); };
 
     const cleanup = activate({
       app,
-      backend: async () => ({}),
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "submitPrompt") return { activeSessionId: "plugin-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
       mount: {
         chat: (element) => {
           window.document.querySelector("[data-main]").replaceWith(element);
@@ -250,7 +257,7 @@ test("mounted pi-web integration submits through app API when composer submit is
         },
       },
       composer: {
-        setPrompt: (value) => { composerPrompt = value; },
+        setPrompt: () => { throw new Error("pi-web composer API must not be used"); },
       },
     });
 
@@ -263,11 +270,11 @@ test("mounted pi-web integration submits through app API when composer submit is
     window.document.querySelector(".send-btn").click();
     await tick();
 
-    assert.equal(composerPrompt, "");
+    assert.deepEqual(backendCalls.map((call) => call.method), ["submitPrompt"]);
+    assert.equal(backendCalls[0].input.data.text, "send via app");
     assert.equal(hostPrompt.value, "");
     assert.equal(textarea.value, "");
     assert.equal(window.document.querySelector(".send-btn").getAttribute("aria-disabled"), "true");
-    assert.deepEqual(submitted, ["send via app"]);
     cleanup();
     globalThis.piWeb = previousPiWeb;
   });

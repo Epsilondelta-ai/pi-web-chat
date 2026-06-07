@@ -20,7 +20,10 @@ export type PluginAppElement = HTMLElement & {
 export type PluginContext = {
   app?: PluginAppElement;
   backend?: BackendCall;
-  session?: { activeWorkspaceId?: () => string };
+  mount?: {
+    chat(element: HTMLElement, options?: { replace?: boolean }): Cleanup;
+    composer(element: HTMLElement, options?: { replace?: boolean }): Cleanup;
+  };
 };
 
 export type PiWebSubjects = {

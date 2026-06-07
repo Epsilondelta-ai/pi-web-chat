@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, mkdir, symlink } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, writeFile, mkdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -65,6 +65,36 @@ test("search, read, and resolve workspace files", async () => {
   const context = await callBackend("resolveContext", root, { text: "use @README.md and `@ignored` @README.md", refs: ["src/app.js"] });
   assert.deepEqual(context.refs, ["src/app.js", "README.md"]);
   assert.equal(context.attachments.length, 2);
+});
+
+test("submitPrompt creates a resumable pi session through plugin backend", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+const session = process.argv[process.argv.indexOf('--session') + 1];
+let input = '';
+process.stdin.on('data', chunk => input += chunk);
+process.stdin.on('end', () => {
+  const prompt = JSON.parse(input.trim()).message;
+  fs.appendFileSync(session, JSON.stringify({ type: 'message', id: 'u1', timestamp: '2026-01-02T03:04:05.000Z', message: { role: 'user', content: prompt } }) + '\\n');
+  fs.appendFileSync(session, JSON.stringify({ type: 'message', id: 'a1', timestamp: '2026-01-02T03:04:06.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } }) + '\\n');
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend("submitPrompt", root, { text: "hello pi", attachments: [{ name: "note.txt", content: "attached context" }] }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
+  assert.equal(result.accepted, true);
+  assert.equal(result.messages.at(-1).text, "answer");
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const files = await readdir(join(home, ".pi", "agent", "sessions", safe));
+  assert.equal(files.length, 1);
+  const content = await readFile(join(home, ".pi", "agent", "sessions", safe, files[0]), "utf8");
+  assert.match(content, /"cwd":"/);
+  assert.match(content, /hello pi/);
+  assert.match(content, /attached context/);
 });
 
 test("chatState parses pi JSONL session fixtures", async () => {

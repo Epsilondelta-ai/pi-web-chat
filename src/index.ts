@@ -157,7 +157,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
   if (cleanupChat) disposables.add(cleanupChat);
   if (cleanupComposer) disposables.add(cleanupComposer);
-  bindMountedComposer(disposables, context, composerSurface);
+  bindMountedComposer(disposables, context, composerSurface, chatSurface);
   const badge = app ? disposables.add(installBadge(app)) : undefined;
   app?.classList.add(pluginClass());
 
@@ -173,24 +173,32 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   };
 }
 
-function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement): void {
+function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement, chatSurface: HTMLElement): void {
   const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
   const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
   if (!textarea || !sendButton) return;
 
   const sync = (): void => {
     const value = textarea.value;
-    setPiWebPrompt(context, value);
     sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
   };
   const submit = async (event?: Event): Promise<void> => {
     event?.preventDefault();
     event?.stopImmediatePropagation();
+    const text = textarea.value.trim();
     sync();
-    if (!textarea.value.trim()) return;
-    await submitPiWebPrompt(context);
-    textarea.value = "";
-    sync();
+    if (!text) return;
+    sendButton.disabled = true;
+    try {
+      const response = await submitPromptToPluginBackend(context, text, []);
+      renderMountedBackendMessages(chatSurface, Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : []);
+      textarea.value = "";
+    } catch (error) {
+      renderMountedBackendMessages(chatSurface, [{ id: id(), role: "system", text: `prompt failed: ${errorText(error)}`, createdAt: Date.now() }]);
+    } finally {
+      sendButton.disabled = false;
+      sync();
+    }
   };
 
   disposables.listen(textarea, "input", sync);
@@ -246,7 +254,6 @@ export function mergeCommands(coreCommands: PluginCommand[] = [], pluginCommands
 export function getActiveWorkspaceId(context: PluginContext): string {
   return (
     context.app?.piWebSidebar?.getSnapshot?.().activeWorkspaceId ||
-    context.session?.activeWorkspaceId?.() ||
     context.app?.dataset.activeWorkspaceId ||
     ""
   );
@@ -338,56 +345,44 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   }
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
-  if (canForwardPromptToPiWeb(state.context)) {
-    if (await forwardPromptToPiWeb(state, text, attachments)) {
-      clearPendingAttachments(state);
-      return;
-    }
-  }
   addMessage(state, { role: "user", text, attachments });
-  clearPendingAttachments(state);
   render(state, dom);
-}
-
-async function forwardPromptToPiWeb(state: State, text: string, attachments: FileAttachment[]): Promise<boolean> {
-  if (!canForwardPromptToPiWeb(state.context)) return false;
-
-  const app = state.context.app;
-  if (app && attachments.length) {
-    app.attachmentContents ??= [];
-    for (const file of attachments) {
-      app.attachmentContents.push(file);
-      app.addAttachmentChip?.(file.name || file.path, file.size || file.content?.length || 0, null, "");
+  try {
+    const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
+    if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+      state.store.activeSessionId = response.activeSessionId;
     }
-    if (app.attachments) app.attachments.hidden = !app.attachments.children.length;
+    if (Array.isArray(response.messages)) {
+      activeSession(state.store).messages = response.messages.filter(isChatMessage).slice(-MAX_MESSAGES_PER_SESSION);
+      activeSession(state.store).updatedAt = Date.now();
+      saveStore(state.store);
+      render(state, dom);
+    }
+  } catch (error) {
+    state.channels.toastRequested$.next({ level: "error", message: `prompt failed: ${errorText(error)}` });
   }
-
-  setPiWebPrompt(state.context, text);
-  await submitPiWebPrompt(state.context);
-  return true;
+  clearPendingAttachments(state);
 }
 
-function canForwardPromptToPiWeb(context: PluginContext): boolean {
-  return Boolean(context.composer?.submitPrompt || context.app?.submitPrompt);
+async function submitPromptToPluginBackend(context: PluginContext, text: string, attachments: FileAttachment[], sessionId = ""): Promise<BackendResponse> {
+  const response = await backendCall(context, "submitPrompt", { text, attachments, sessionId });
+  return response;
 }
 
-function setPiWebPrompt(context: PluginContext, value: string): void {
-  context.composer?.setPrompt?.(value);
-
-  const app = context.app;
-  if (app?.prompt && app.prompt.value !== value) {
-    app.prompt.value = value;
-    app.updatePrompt?.();
-  }
-}
-
-async function submitPiWebPrompt(context: PluginContext): Promise<void> {
-  if (context.composer?.submitPrompt) {
-    await context.composer.submitPrompt();
-    return;
-  }
-
-  await context.app?.submitPrompt?.call(context.app);
+function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[]): void {
+  const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
+  container.replaceChildren(...messages.map((message) => {
+    const item = document.createElement("article");
+    item.className = `transcript-item pi-web-chat-message pi-web-chat-message-${message.role}`;
+    const role = document.createElement("div");
+    role.className = "pi-web-chat-message-role";
+    role.textContent = message.role;
+    const body = document.createElement("pre");
+    body.className = "pi-web-chat-message-body";
+    body.textContent = message.text;
+    item.append(role, body);
+    return item;
+  }));
 }
 
 async function runShell(state: State, dom: ChatDom, command: string): Promise<void> {

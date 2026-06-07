@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -247,6 +249,8 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 		return map[string]any{"commands": allSlashCommands()}, nil
 	case "chatState":
 		return readPiChatState(workspaceRoot)
+	case "submitPrompt":
+		return submitPiPrompt(workspaceRoot, input)
 	case "searchFiles":
 		files, truncated, err := searchWorkspaceFiles(workspaceRoot, stringInput(input, "query"), intInput(input, "limit", maxSearchResults))
 		return map[string]any{"files": files, "truncated": truncated}, err
@@ -298,6 +302,169 @@ func resolveRoot(root string) (string, error) {
 		root = "."
 	}
 	return filepath.Abs(root)
+}
+
+func submitPiPrompt(workspaceRoot string, input request) (any, error) {
+	root, err := resolveRoot(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	text := mergePromptAttachments(stringInput(input, "text"), input["attachments"])
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("text is required")
+	}
+	sessionID := strings.TrimSpace(stringInput(input, "sessionId"))
+	sessionFile := ""
+	if sessionID != "" {
+		if path, ok := piSessionFileByID(root, sessionID); ok {
+			sessionFile = path
+		} else {
+			sessionID = ""
+		}
+	}
+	if sessionFile == "" {
+		var createErr error
+		sessionID, sessionFile, createErr = createPiSessionFile(root)
+		if createErr != nil {
+			return nil, createErr
+		}
+	}
+	if err := runPiRPCPrompt(root, sessionFile, text); err != nil {
+		return nil, err
+	}
+	messages, parsedID, err := readPiSessionMessages(sessionFile)
+	if err != nil {
+		return nil, err
+	}
+	if parsedID != "" {
+		sessionID = parsedID
+	}
+	return map[string]any{"accepted": true, "activeSessionId": sessionID, "messages": messages, "isStreaming": false}, nil
+}
+
+func mergePromptAttachments(text string, raw any) string {
+	attachments, _ := raw.([]any)
+	if len(attachments) == 0 {
+		return text
+	}
+	var builder strings.Builder
+	builder.WriteString(text)
+	for index, item := range attachments {
+		attachment, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := attachment["content"].(string)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		name, _ := attachment["name"].(string)
+		if name == "" {
+			name, _ = attachment["path"].(string)
+		}
+		builder.WriteString("\n\n<attachment index=\"")
+		builder.WriteString(strconv.Itoa(index + 1))
+		builder.WriteString("\">\n")
+		if strings.TrimSpace(name) != "" {
+			builder.WriteString("File: ")
+			builder.WriteString(name)
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString(content)
+		builder.WriteString("\n</attachment>")
+	}
+	return builder.String()
+}
+
+func createPiSessionFile(workspaceRoot string) (string, string, error) {
+	sessionID := createSessionID()
+	now := time.Now().UTC()
+	dir := piSessionDir(workspaceRoot)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", err
+	}
+	stamp := strings.NewReplacer(":", "-", ".", "-").Replace(now.Format(time.RFC3339Nano))
+	path := filepath.Join(dir, fmt.Sprintf("%s_%s.jsonl", stamp, sessionID))
+	header := map[string]any{"type": "session", "version": 3, "id": sessionID, "timestamp": now.Format(time.RFC3339Nano), "cwd": workspaceRoot}
+	line, err := json.Marshal(header)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		return "", "", err
+	}
+	return sessionID, path, nil
+}
+
+func createSessionID() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err == nil {
+		return fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(bytes[0:4]), hex.EncodeToString(bytes[4:6]), hex.EncodeToString(bytes[6:8]), hex.EncodeToString(bytes[8:10]), hex.EncodeToString(bytes[10:16]))
+	}
+	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+}
+
+func piSessionFileByID(workspaceRoot, sessionID string) (string, bool) {
+	entries, err := os.ReadDir(piSessionDir(workspaceRoot))
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") || !strings.Contains(entry.Name(), sessionID) {
+			continue
+		}
+		return filepath.Join(piSessionDir(workspaceRoot), entry.Name()), true
+	}
+	return "", false
+}
+
+func piSessionDir(workspaceRoot string) string {
+	home, _ := os.UserHomeDir()
+	safe := "--" + strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.TrimLeft(workspaceRoot, string(filepath.Separator))) + "--"
+	return filepath.Join(home, ".pi", "agent", "sessions", safe)
+}
+
+func runPiRPCPrompt(workspaceRoot, sessionFile, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(defaultTimeoutMs)*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pi", "--session", sessionFile, "--mode", "rpc")
+	cmd.Dir = workspaceRoot
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{"type": "prompt", "message": text})
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+	_, writeErr := stdin.Write(append(payload, '\n'))
+	_ = stdin.Close()
+	if writeErr != nil {
+		_ = cmd.Process.Kill()
+		return writeErr
+	}
+	err = cmd.Wait()
+	if ctx.Err() != nil {
+		return fmt.Errorf("pi prompt timed out after %dms", defaultTimeoutMs)
+	}
+	if err != nil {
+		return fmt.Errorf("pi prompt failed: %w: %s", err, strings.TrimSpace(limitString(output.String(), 4000)))
+	}
+	return nil
+}
+
+func limitString(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
 }
 
 func readPiChatState(workspaceRoot string) (any, error) {
