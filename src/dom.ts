@@ -75,7 +75,7 @@ export function createComposerSurface(): HTMLElement {
 export function installBadge(app: HTMLElement): HTMLSpanElement {
   const badge = document.createElement("span");
   badge.className = "prompt-meta-item pi-web-chat-badge";
-  badge.textContent = "chat plugin · ! / @";
+  badge.textContent = "chat plugin";
   app.querySelector("[data-prompt-meta]")?.append(badge);
   return badge;
 }

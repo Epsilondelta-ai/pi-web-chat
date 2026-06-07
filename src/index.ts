@@ -44,6 +44,7 @@ const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
+const MOUNTED_CHAT_POLL_MS = 250;
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
 
@@ -185,6 +186,9 @@ function bindMountedComposer(disposables: Disposables, context: PluginContext, c
     const value = textarea.value;
     sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
   };
+  let activePoll: ReturnType<typeof globalThis.setInterval> | undefined;
+  disposables.add({ remove: () => { if (activePoll) globalThis.clearInterval(activePoll); } });
+
   const submit = async (event?: Event): Promise<void> => {
     event?.preventDefault();
     event?.stopImmediatePropagation();
@@ -192,6 +196,9 @@ function bindMountedComposer(disposables: Disposables, context: PluginContext, c
     sync();
     if (!text) return;
     sendButton.disabled = true;
+    activePoll = globalThis.setInterval(() => {
+      void refreshMountedBackendChatState(context, chatSurface, store);
+    }, MOUNTED_CHAT_POLL_MS);
     try {
       const response = await submitPromptToPluginBackend(context, text, [], store.activeSessionId);
       const messages = applyBackendResponseToMountedStore(store, response);
@@ -200,6 +207,8 @@ function bindMountedComposer(disposables: Disposables, context: PluginContext, c
     } catch (error) {
       renderMountedBackendMessages(chatSurface, [{ id: id(), role: "system", text: `prompt failed: ${errorText(error)}`, createdAt: Date.now() }]);
     } finally {
+      if (activePoll) globalThis.clearInterval(activePoll);
+      activePoll = undefined;
       sendButton.disabled = false;
       sync();
     }

@@ -297,6 +297,53 @@ test("mounted pi-web integration persists plugin backend session responses", asy
   });
 });
 
+test("mounted pi-web integration polls backend chat state while prompt is running", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const previousPiWeb = globalThis.piWeb;
+    let submitStarted = false;
+    let releaseSubmit;
+    const submitDone = new Promise((resolve) => { releaseSubmit = resolve; });
+    globalThis.piWeb = undefined;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState") {
+          return submitStarted ? { activeSessionId: "poll-session", messages: [{ id: "r1", role: "assistant", text: "running update", createdAt: 1 }] } : {};
+        }
+        if (method === "submitPrompt") {
+          submitStarted = true;
+          await submitDone;
+          return { activeSessionId: "poll-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }, { id: "a1", role: "assistant", text: "final update", createdAt: 2 }] };
+        }
+        return {};
+      },
+      mount: {
+        chat: (element) => {
+          window.document.querySelector("[data-main]").replaceWith(element);
+          return () => element.remove();
+        },
+        composer: (element) => {
+          app.append(element);
+          return () => element.remove();
+        },
+      },
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "poll me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.match(window.document.querySelector(".term-inner").textContent, /running update/);
+    releaseSubmit();
+    await tick();
+    assert.match(window.document.querySelector(".term-inner").textContent, /final update/);
+    cleanup();
+    globalThis.piWeb = previousPiWeb;
+  });
+});
+
 test("mounted pi-web integration uses plugin backend when composer submit is unavailable", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
