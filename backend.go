@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,8 +32,10 @@ const (
 	maxChatMessages                  = 200
 	defaultMaxSkillDiscoveryDirs     = 4000
 	defaultMaxWorkspaceSearchEntries = 20000
+	defaultPiWebAPIBaseURL           = "http://127.0.0.1:8732"
 	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
 	envMaxWorkspaceSearchEntries     = "PI_WEB_CHAT_MAX_WORKSPACE_SEARCH_ENTRIES"
+	envPiWebAPIBaseURL               = "PI_WEB_CHAT_API_BASE_URL"
 )
 
 var skipDirs = map[string]bool{
@@ -203,9 +207,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	if data, ok := input["data"].(map[string]any); ok {
-		input = request(data)
-	}
+	input = normalizeBackendInput(input)
 
 	result, err := handle(method, workspaceRoot, input)
 	if err != nil {
@@ -226,6 +228,21 @@ func arg(index int) string {
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, err.Error())
 	os.Exit(1)
+}
+
+func normalizeBackendInput(input request) request {
+	data, ok := input["data"].(map[string]any)
+	if !ok {
+		return input
+	}
+
+	out := request(data)
+	if workspaceID, ok := input["workspaceId"].(string); ok && strings.TrimSpace(workspaceID) != "" {
+		if _, exists := out["workspaceId"]; !exists {
+			out["workspaceId"] = workspaceID
+		}
+	}
+	return out
 }
 
 func readInput(reader io.Reader) (request, error) {
@@ -474,6 +491,12 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	}
 	sessionFile := ""
 	requestedSessionID := strings.TrimSpace(stringInput(input, "sessionId"))
+	workspaceID := strings.TrimSpace(stringInput(input, "workspaceId"))
+	if requestedSessionID != "" && workspaceID != "" {
+		if state, apiErr := readPiWebSessionState(workspaceID, requestedSessionID); apiErr == nil {
+			return state, nil
+		}
+	}
 	if requestedSessionID != "" {
 		if path, ok := piSessionFileByID(root, requestedSessionID); ok {
 			sessionFile = path
@@ -496,6 +519,150 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 		isStreaming = last.Role == "assistant" && strings.TrimSpace(last.Text) == ""
 	}
 	return map[string]any{"activeSessionId": sessionID, "messages": messages, "isStreaming": isStreaming}, nil
+}
+
+func readPiWebSessionState(workspaceID, sessionID string) (any, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv(envPiWebAPIBaseURL)), "/")
+	if baseURL == "" {
+		baseURL = defaultPiWebAPIBaseURL
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid pi-web API base URL: %s", baseURL)
+	}
+
+	endpoint := baseURL + "/api/workspaces/" + url.PathEscape(workspaceID) + "/sessions/" + url.PathEscape(sessionID)
+	client := http.Client{Timeout: time.Duration(defaultTimeoutMs) * time.Millisecond}
+	response, err := client.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("pi-web session API failed: %s", response.Status)
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxOutputBytes)).Decode(&payload); err != nil {
+		return nil, err
+	}
+
+	messages := piWebSessionMessages(payload)
+	activeSessionID := firstString(payload, "activeSessionId", "sessionId", "id")
+	if activeSessionID == "" {
+		activeSessionID = sessionID
+	}
+	return map[string]any{"activeSessionId": activeSessionID, "messages": messages, "isStreaming": piWebSessionIsStreaming(payload)}, nil
+}
+
+func piWebSessionMessages(payload map[string]any) []chatMessage {
+	rawMessages := firstList(payload, "messages")
+	if len(rawMessages) == 0 {
+		if session, ok := payload["session"].(map[string]any); ok {
+			rawMessages = firstList(session, "messages")
+		}
+	}
+
+	messages := []chatMessage{}
+	for _, raw := range rawMessages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if parsed, ok := piWebChatMessage(message, len(messages)+1); ok {
+			messages = append(messages, parsed)
+		}
+	}
+	if len(messages) > maxChatMessages {
+		messages = messages[len(messages)-maxChatMessages:]
+	}
+	return messages
+}
+
+func piWebChatMessage(message map[string]any, index int) (chatMessage, bool) {
+	role := mapPiRole(firstString(message, "role"))
+	if role == "" {
+		if nested, ok := message["message"].(map[string]any); ok {
+			role = mapPiRole(firstString(nested, "role"))
+			text := piMessageText(nested["content"])
+			return chatMessage{
+				ID:        firstNonEmptyString(firstString(message, "id"), strconv.Itoa(index)),
+				Role:      role,
+				Text:      text,
+				CreatedAt: firstPositiveInt64(unixMillis(message["timestamp"]), unixMillis(nested["timestamp"])),
+				Meta:      map[string]any{"piRole": firstString(nested, "role")},
+			}, role != "" && (strings.TrimSpace(text) != "" || role == "assistant")
+		}
+		return chatMessage{}, false
+	}
+
+	text := firstString(message, "text", "content")
+	if strings.TrimSpace(text) == "" && role != "assistant" {
+		return chatMessage{}, false
+	}
+	return chatMessage{
+		ID:        firstNonEmptyString(firstString(message, "id"), strconv.Itoa(index)),
+		Role:      role,
+		Text:      text,
+		CreatedAt: unixMillis(firstNonEmptyAny(message["createdAt"], message["timestamp"])),
+	}, true
+}
+
+func firstString(input map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := input[key].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyAny(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return time.Now().UnixMilli()
+}
+
+func firstList(input map[string]any, key string) []any {
+	value, _ := input[key].([]any)
+	return value
+}
+
+func piWebSessionIsStreaming(payload map[string]any) bool {
+	if boolValue(payload["isStreaming"]) || boolValue(payload["streaming"]) || boolValue(payload["running"]) || boolValue(payload["active"]) || boolValue(payload["live"]) {
+		return true
+	}
+
+	status := strings.ToLower(firstString(payload, "status", "state"))
+	return status == "running" || status == "streaming" || status == "thinking" || status == "active" || status == "live"
+}
+
+func boolValue(value any) bool {
+	result, _ := value.(bool)
+	return result
 }
 
 func mostRecentPiSessionFile(workspaceRoot string) (string, error) {

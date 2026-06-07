@@ -2,6 +2,7 @@ import { chmod, mkdtemp, readFile, readdir, writeFile, mkdir, symlink } from "no
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -183,6 +184,42 @@ test("streaming methods reject path-like run ids", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   await rejectBackend("streamEvents", root, { runId: "../../escape", cursor: 0 });
   await rejectBackend("abortPrompt", root, { runId: "../../escape" });
+});
+
+test("chatState fetches selected sessions through backend pi-web API", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({
+      id: "session-1",
+      messages: [
+        { id: "u1", role: "user", text: "hello", createdAt: 1 },
+        { id: "a1", role: "assistant", text: "from api", createdAt: 2 },
+      ],
+      status: "running",
+    }));
+  });
+  await new Promise((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  try {
+    const result = await callBackend(
+      "chatState",
+      root,
+      { workspaceId: "workspace/one", data: { sessionId: "session-1" } },
+      { PI_WEB_CHAT_API_BASE_URL: `http://127.0.0.1:${address.port}` },
+    );
+
+    assert.equal(requests[0], "/api/workspaces/workspace%2Fone/sessions/session-1");
+    assert.equal(result.activeSessionId, "session-1");
+    assert.equal(result.isStreaming, true);
+    assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "from api"]]);
+  } finally {
+    await new Promise((resolve) => { server.close(resolve); });
+  }
 });
 
 test("chatState parses pi JSONL session fixtures", async () => {
