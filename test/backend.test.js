@@ -135,6 +135,12 @@ process.stdin.on('end', () => {
   assert.equal(events.some((event) => event.type === "run.end"), true);
 });
 
+test("streaming methods reject path-like run ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  await rejectBackend("streamEvents", root, { runId: "../../escape", cursor: 0 });
+  await rejectBackend("abortPrompt", root, { runId: "../../escape" });
+});
+
 test("chatState parses pi JSONL session fixtures", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));

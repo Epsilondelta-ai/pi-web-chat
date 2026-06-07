@@ -150,7 +150,7 @@ function abortPrompt(data) {
       // Process already exited.
     }
   }
-  removeFile(state.promptPath);
+  removeFile(runPromptPath(state.runId));
   writeJsonAtomic(runStatePath(state.runId), { ...state, status: "aborted", updatedAt: Date.now() });
   return { aborted: true, runId: state.runId };
 }
@@ -278,6 +278,7 @@ function runRoot() {
 }
 
 function runStatePath(runId) {
+  if (!isRunId(runId)) throw new Error("invalid runId");
   return join(runRoot(), `${runId}.json`);
 }
 
@@ -285,7 +286,12 @@ function readRunState(runId) {
   if (!runId) throw new Error("runId is required");
   const state = safeReadJson(runStatePath(runId));
   if (!state) throw new Error("run state not found");
+  if (state.runId !== runId) throw new Error("run state mismatch");
   return state;
+}
+
+function isRunId(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 function readEvents(path) {
@@ -330,18 +336,26 @@ function pruneRuns() {
     if (!name.endsWith(".json")) continue;
     const path = join(root, name);
     const state = safeReadJson(path);
+    const fileRunId = name.slice(0, -5);
+    if (!isRunId(fileRunId)) continue;
     if (!state) {
-      removeRunFiles(name.slice(0, -5));
+      removeRunFiles(fileRunId);
       continue;
     }
     const age = now - Number(state.updatedAt || state.createdAt || 0);
     const completed = state.status === "complete" || state.status === "aborted";
-    if (completed) removeFile(state.promptPath);
-    if ((completed && age > completedRunTtlMs) || age > staleRunTtlMs) removeRunFiles(state.runId || name.slice(0, -5));
+    if (completed) removeFile(runPromptPath(fileRunId));
+    if ((completed && age > completedRunTtlMs) || age > staleRunTtlMs) removeRunFiles(fileRunId);
   }
 }
 
+function runPromptPath(runId) {
+  if (!isRunId(runId)) throw new Error("invalid runId");
+  return join(runRoot(), `${runId}.prompt.txt`);
+}
+
 function removeRunFiles(runId) {
+  if (!isRunId(runId)) return;
   for (const suffix of [".json", ".events.jsonl", ".prompt.txt"]) removeFile(join(runRoot(), `${runId}${suffix}`));
 }
 
