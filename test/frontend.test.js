@@ -443,6 +443,57 @@ test("activate appends DOM hooks, publishes submits, and cleans up", async () =>
   });
 });
 
+test("legacy backend submitPrompt is used when startPrompt is unsupported", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        if (method === "startPrompt") throw new Error("unknown method: startPrompt");
+        if (method === "submitPrompt") return { activeSessionId: "legacy-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "legacy backend";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    await tick();
+
+    assert.deepEqual(backendCalls.filter((call) => call.method === "startPrompt" || call.method === "submitPrompt").map((call) => call.method), ["startPrompt", "submitPrompt"]);
+    assert.match(root.querySelector("[data-chat-transcript]").textContent, /legacy backend/);
+    cleanup();
+  });
+});
+
+test("startPrompt runtime failures are not hidden by legacy fallback", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const cleanup = activate({
+      app: window.document.querySelector("pi-app"),
+      backend: async (method) => {
+        backendCalls.push({ method });
+        if (method === "startPrompt") throw new Error("stream runner failed");
+        if (method === "submitPrompt") throw new Error("submitPrompt must not be called");
+        return {};
+      },
+    });
+
+    const root = window.document.querySelector(".pi-web-chat-root");
+    const textarea = root.querySelector("[data-chat-input]");
+    textarea.value = "stream fail";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    root.querySelector("[data-send]").click();
+    await tick();
+    await tick();
+
+    assert.deepEqual(backendCalls.filter((call) => call.method === "startPrompt" || call.method === "submitPrompt").map((call) => call.method), ["startPrompt"]);
+    cleanup();
+  });
+});
+
 test("slash commands and file refs are plugin-owned, not app patches", async () => {
   await withWindow(async ({ window }) => {
     const backendCalls = [];

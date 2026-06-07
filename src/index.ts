@@ -372,7 +372,7 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
 }
 
 async function submitPromptWithStreaming(state: State, dom: ChatDom, text: string, attachments: FileAttachment[]): Promise<void> {
-  const start = await backendCall(state.context, "startPrompt", { text, attachments, sessionId: state.store.activeSessionId });
+  const start = await startStreamingPrompt(state.context, text, attachments, state.store.activeSessionId);
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
     applyBackendResponseToStore(state.store, response);
@@ -409,6 +409,19 @@ async function submitPromptWithStreaming(state: State, dom: ChatDom, text: strin
   }
 
   await refreshBackendChatState(state, dom);
+}
+
+async function startStreamingPrompt(context: PluginContext, text: string, attachments: FileAttachment[], sessionId: string): Promise<BackendResponse> {
+  try {
+    return await backendCall(context, "startPrompt", { text, attachments, sessionId });
+  } catch (error) {
+    if (isUnsupportedStreamingBackend(error)) return {};
+    throw error;
+  }
+}
+
+function isUnsupportedStreamingBackend(error: unknown): boolean {
+  return /unknown method: startPrompt|unsupported method: startPrompt|startPrompt unsupported/i.test(errorText(error));
 }
 
 async function submitPromptToPluginBackend(context: PluginContext, text: string, attachments: FileAttachment[], sessionId = ""): Promise<BackendResponse> {
