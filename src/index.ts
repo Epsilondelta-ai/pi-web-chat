@@ -504,7 +504,7 @@ async function refreshMountedBackendChatState(
   sessionId = "",
 ): Promise<void> {
   try {
-    const response = await backendCall(context, "chatState", sessionId ? { sessionId } : {});
+    const response = await backendCall(context, "chatState", chatStateRequestData(context, sessionId));
     const messages = applyBackendResponseToMountedStore(context, store, response, "chatState");
     if (messages.length) {
       renderMountedBackendMessages(chatSurface, messages);
@@ -512,6 +512,23 @@ async function refreshMountedBackendChatState(
   } catch {
     // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
   }
+}
+
+function chatStateRequestData(context: PluginContext, sessionId: string): JsonRecord {
+  const data: JsonRecord = sessionId ? { sessionId } : {};
+  const workspacePath = activeWorkspacePath(context);
+
+  if (workspacePath) {
+    data.workspacePath = workspacePath;
+  }
+
+  return data;
+}
+
+function activeWorkspacePath(context: PluginContext): string {
+  const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
+  const workspaceId = context.app?.dataset.activeWorkspaceId || snapshot?.activeWorkspaceId || "";
+  return snapshot?.workspaces?.find((workspace) => workspace.id === workspaceId)?.path || "";
 }
 
 function applyBackendResponseToMountedStore(
@@ -576,6 +593,13 @@ function bindMountedSidebarSelection(
 
   if (globalThis.piWeb) {
     disposables.add(globalThis.piWeb.behaviorSubject<SidebarSelectedSession | null>(SIDEBAR_SELECTED_SESSION_CHANNEL, readSidebarSelection(context)).subscribe(onSelected));
+    disposables.add(globalThis.piWeb.behaviorSubject<string | null>("session.activeId", null).subscribe((sessionId: string | null): void => {
+      if (!sessionId) {
+        return;
+      }
+
+      onSelected({ sessionId, workspaceId: context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || undefined });
+    }));
   }
 }
 

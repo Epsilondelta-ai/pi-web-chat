@@ -23,9 +23,15 @@ export type SubjectLike<T> = {
   next(value: T): void;
 };
 
+export type SidebarWorkspace = {
+  id?: string;
+  path?: string;
+};
+
 export type SidebarSnapshot = {
   activeWorkspaceId?: string;
   activeSessionId?: string;
+  workspaces?: SidebarWorkspace[];
 };
 
 export type SidebarRxChannels = {

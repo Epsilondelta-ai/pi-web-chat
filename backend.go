@@ -28,6 +28,8 @@ const (
 	defaultTimeoutMs                 = 30000
 	maxSearchResults                 = 30
 	maxChatMessages                  = 200
+	maxChatResponseTextBytes         = 48 * 1024
+	maxChatMessageTextBytes          = 4000
 	defaultMaxSkillDiscoveryDirs     = 4000
 	defaultMaxWorkspaceSearchEntries = 20000
 	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
@@ -418,20 +420,41 @@ func createSessionID() string {
 }
 
 func piSessionFileByID(workspaceRoot, sessionID string) (string, bool) {
-	entries, err := os.ReadDir(piSessionDir(workspaceRoot))
+	for _, dir := range piSessionDirs(workspaceRoot) {
+		if path, ok := piSessionFileInDir(dir, sessionID); ok {
+			return path, true
+		}
+	}
+
+	return "", false
+}
+
+func piSessionFileInDir(dir, sessionID string) (string, bool) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", false
 	}
+
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") || !strings.Contains(entry.Name(), sessionID) {
 			continue
 		}
-		return filepath.Join(piSessionDir(workspaceRoot), entry.Name()), true
+
+		return filepath.Join(dir, entry.Name()), true
 	}
+
 	return "", false
 }
 
 func piSessionDir(workspaceRoot string) string {
+	return filepath.Join(workspaceRoot, ".pi", "sessions")
+}
+
+func piSessionDirs(workspaceRoot string) []string {
+	return []string{piSessionDir(workspaceRoot), piAgentSessionDir(workspaceRoot)}
+}
+
+func piAgentSessionDir(workspaceRoot string) string {
 	home, _ := os.UserHomeDir()
 	safe := "--" + strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.TrimLeft(workspaceRoot, string(filepath.Separator))) + "--"
 	return filepath.Join(home, ".pi", "agent", "sessions", safe)
@@ -485,6 +508,11 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if workspacePath := strings.TrimSpace(stringInput(input, "workspacePath")); workspacePath != "" {
+		if selectedRoot, selectedErr := resolveRoot(workspacePath); selectedErr == nil {
+			root = selectedRoot
+		}
+	}
 	sessionFile := ""
 	requestedSessionID := strings.TrimSpace(stringInput(input, "sessionId"))
 	if requestedSessionID != "" {
@@ -512,35 +540,36 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 }
 
 func mostRecentPiSessionFile(workspaceRoot string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	safe := "--" + strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.TrimLeft(workspaceRoot, string(filepath.Separator))) + "--"
-	dir := filepath.Join(home, ".pi", "agent", "sessions", safe)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
 	var newest string
 	var newestTime time.Time
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+
+	for _, dir := range piSessionDirs(workspaceRoot) {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		info, err := entry.Info()
 		if err != nil {
-			continue
+			return "", err
 		}
-		if newest == "" || info.ModTime().After(newestTime) {
-			newest = path
-			newestTime = info.ModTime()
+
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				continue
+			}
+
+			path := filepath.Join(dir, entry.Name())
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			if newest == "" || info.ModTime().After(newestTime) {
+				newest = path
+				newestTime = info.ModTime()
+			}
 		}
 	}
+
 	return newest, nil
 }
 
@@ -593,10 +622,33 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 		}
 		messages = append(messages, chatMessage{ID: id, Role: mappedRole, Text: text, CreatedAt: createdAt, Meta: map[string]any{"piRole": role}})
 	}
+	messages = trimChatMessagesForResponse(messages)
+	return messages, sessionID, nil
+}
+
+func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 	if len(messages) > maxChatMessages {
 		messages = messages[len(messages)-maxChatMessages:]
 	}
-	return messages, sessionID, nil
+
+	trimmed := []chatMessage{}
+	remaining := maxChatResponseTextBytes
+	for index := len(messages) - 1; index >= 0 && remaining > 0; index-- {
+		message := messages[index]
+		message.Text = limitString(message.Text, maxChatMessageTextBytes)
+		if len(message.Text) > remaining {
+			message.Text = limitString(message.Text, remaining)
+		}
+
+		remaining -= len(message.Text)
+		trimmed = append(trimmed, message)
+	}
+
+	for left, right := 0, len(trimmed)-1; left < right; left, right = left+1, right-1 {
+		trimmed[left], trimmed[right] = trimmed[right], trimmed[left]
+	}
+
+	return trimmed
 }
 
 func mapPiRole(role string) string {

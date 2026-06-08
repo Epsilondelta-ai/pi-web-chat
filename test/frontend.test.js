@@ -178,6 +178,45 @@ test("mounted activation follows sidebar selected-session channel after mount", 
   });
 });
 
+test("mounted activation follows sidebar session.activeId clicks after mount", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.dataset.activeWorkspaceId = "workspace-clicked";
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-clicked",
+        workspaces: [{ id: "workspace-clicked", path: "/tmp/workspace-clicked" }],
+      }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "chatState" && input.data.sessionId === "clicked-session") {
+          return { activeSessionId: "clicked-session", messages: [{ id: "m1", role: "assistant", text: "clicked transcript", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("clicked-session");
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const clickedCall = backendCalls.find((call) => call.method === "chatState" && call.input.data.sessionId === "clicked-session");
+    assert.equal(store.activeSessionId, "clicked-session");
+    assert.equal(clickedCall.input.data.workspacePath, "/tmp/workspace-clicked");
+    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeWorkspaceId"), "workspace-clicked");
+    assert.match(window.document.querySelector(".term-inner").textContent, /clicked transcript/);
+    cleanup();
+  });
+});
+
 test("mounted submit persists backend session and emits sidebar-compatible events", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

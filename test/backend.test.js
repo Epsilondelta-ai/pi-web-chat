@@ -88,10 +88,10 @@ process.stdin.on('end', () => {
   const result = await callBackend("submitPrompt", root, { text: "hello pi", attachments: [{ name: "note.txt", content: "attached context" }] }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
   assert.equal(result.accepted, true);
   assert.equal(result.messages.at(-1).text, "answer");
-  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
-  const files = await readdir(join(home, ".pi", "agent", "sessions", safe));
+  const sessionDir = join(root, ".pi", "sessions");
+  const files = await readdir(sessionDir);
   assert.equal(files.length, 1);
-  const content = await readFile(join(home, ".pi", "agent", "sessions", safe, files[0]), "utf8");
+  const content = await readFile(join(sessionDir, files[0]), "utf8");
   assert.match(content, /"cwd":"/);
   assert.match(content, /hello pi/);
   assert.match(content, /attached context/);
@@ -207,6 +207,49 @@ test("chatState reads selected session files directly", async () => {
   assert.equal(result.activeSessionId, "session-1");
   assert.equal(result.isStreaming, false);
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "from file"]]);
+});
+
+test("chatState finds sidebar-selected sessions from an explicit workspace path", async () => {
+  const activeRoot = await mkdtemp(join(tmpdir(), "pi-web-chat-active-workspace-"));
+  const selectedRoot = await mkdtemp(join(tmpdir(), "pi-web-chat-selected-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const selectedSessionDir = join(selectedRoot, ".pi", "sessions");
+  await mkdir(selectedSessionDir, { recursive: true });
+  await writeFile(join(selectedSessionDir, "newer_cross-session.jsonl"), [
+    JSON.stringify({ type: "session", id: "cross-session" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "from other workspace" } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", activeRoot, { sessionId: "cross-session", workspacePath: selectedRoot }, { HOME: home });
+
+  assert.equal(result.activeSessionId, "cross-session");
+  assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "from other workspace"]]);
+});
+
+test("chatState caps large transcript responses so plugin bridge can parse JSON", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  const lines = [JSON.stringify({ type: "session", id: "large-session" })];
+
+  for (let index = 0; index < 80; index += 1) {
+    lines.push(JSON.stringify({
+      type: "message",
+      id: `m${index}`,
+      timestamp: "2026-01-02T03:04:05.000Z",
+      message: { role: index % 2 === 0 ? "user" : "assistant", content: "x".repeat(5000) },
+    }));
+  }
+
+  await writeFile(join(sessionDir, "newer_large-session.jsonl"), lines.join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "large-session" });
+  const encoded = JSON.stringify(result);
+
+  assert.equal(result.activeSessionId, "large-session");
+  assert.ok(encoded.length < 65_000, `encoded length ${encoded.length} should fit backend bridge`);
+  assert.ok(result.messages.length > 0);
+  assert.equal(result.messages.at(-1).id, "m79");
 });
 
 test("chatState parses pi JSONL session fixtures", async () => {
