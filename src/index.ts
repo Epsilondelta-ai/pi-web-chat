@@ -72,6 +72,10 @@ type State = {
   backendChatToken: number;
 };
 
+type MountedState = {
+  backendChatToken: number;
+};
+
 class Disposables {
   #items: Disposer[] = [];
 
@@ -120,10 +124,11 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const selected = readSidebarSelection(context);
   persistSidebarSelection(context, selected || undefined);
   const mountedStore = loadStore(selected?.sessionId || "");
+  const mountedState: MountedState = { backendChatToken: 0 };
   renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages);
-  void refreshMountedBackendChatState(context, chatSurface, mountedStore, selected?.sessionId || mountedStore.activeSessionId);
-  bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore);
-  bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore);
+  void refreshMountedBackendChatState(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
+  bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
+  bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
   const badge = app ? disposables.add(installBadge(app)) : undefined;
   app?.classList.add(pluginClass());
 
@@ -139,7 +144,14 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   };
 }
 
-function bindMountedComposer(disposables: Disposables, context: PluginContext, composerSurface: HTMLElement, chatSurface: HTMLElement, store: ChatStore): void {
+function bindMountedComposer(
+  disposables: Disposables,
+  context: PluginContext,
+  composerSurface: HTMLElement,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+): void {
   const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
   const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
   if (!textarea || !sendButton) return;
@@ -159,7 +171,7 @@ function bindMountedComposer(disposables: Disposables, context: PluginContext, c
     if (!text) return;
     sendButton.disabled = true;
     activePoll = globalThis.setInterval(() => {
-      void refreshMountedBackendChatState(context, chatSurface, store, store.activeSessionId);
+      void refreshMountedBackendChatState(context, chatSurface, store, mountedState, store.activeSessionId);
     }, MOUNTED_CHAT_POLL_MS);
     try {
       const response = await submitPromptToPluginBackend(context, text, [], store.activeSessionId);
@@ -501,10 +513,18 @@ async function refreshMountedBackendChatState(
   context: PluginContext,
   chatSurface: HTMLElement,
   store: ChatStore,
+  mountedState: MountedState,
   sessionId = "",
 ): Promise<void> {
+  const token = ++mountedState.backendChatToken;
+
   try {
     const response = await backendCall(context, "chatState", chatStateRequestData(context, sessionId));
+
+    if (token !== mountedState.backendChatToken) {
+      return;
+    }
+
     const messages = applyBackendResponseToMountedStore(context, store, response, "chatState");
     if (messages.length) {
       renderMountedBackendMessages(chatSurface, messages);
@@ -573,6 +593,7 @@ function bindMountedSidebarSelection(
   context: PluginContext,
   chatSurface: HTMLElement,
   store: ChatStore,
+  mountedState: MountedState,
 ): void {
   const onSelected = (selected: SidebarSelectedSession | null): void => {
     if (!selected?.sessionId) {
@@ -582,7 +603,7 @@ function bindMountedSidebarSelection(
     persistSidebarSelection(context, selected);
     switchMountedStoreToSession(store, selected.sessionId);
     renderMountedBackendMessages(chatSurface, activeSession(store).messages);
-    void refreshMountedBackendChatState(context, chatSurface, store, selected.sessionId);
+    void refreshMountedBackendChatState(context, chatSurface, store, mountedState, selected.sessionId);
   };
 
   const sidebarSelection = context.app?.piWebSidebar?.channels?.selectedSession$ || globalThis.piWebSidebar?.channels?.selectedSession$;

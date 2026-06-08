@@ -217,6 +217,50 @@ test("mounted activation follows sidebar session.activeId clicks after mount", a
   });
 });
 
+test("mounted activation ignores stale chatState after later sidebar click", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    let releaseInitial;
+    const initialReady = new Promise((resolve) => { releaseInitial = resolve; });
+    app.dataset.activeWorkspaceId = "workspace-clicked";
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-clicked",
+        workspaces: [{ id: "workspace-clicked", path: "/tmp/workspace-clicked" }],
+      }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.sessionId === "clicked-session") {
+          return { activeSessionId: "clicked-session", messages: [{ id: "m1", role: "assistant", text: "clicked transcript", createdAt: 2 }] };
+        }
+
+        if (method === "chatState") {
+          await initialReady;
+          return { activeSessionId: "old-session", messages: [{ id: "old", role: "assistant", text: "old transcript", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("clicked-session");
+    await tick();
+    releaseInitial();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "clicked-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /clicked transcript/);
+    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /old transcript/);
+    cleanup();
+  });
+});
+
 test("mounted submit persists backend session and emits sidebar-compatible events", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
