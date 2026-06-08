@@ -3,7 +3,7 @@ import type { ChatMessage, FileSearchResult, PluginCommand } from "./types";
 const PLUGIN_ID = "pi-web-chat";
 const STYLE_ID = `${PLUGIN_ID}-style`;
 const ROOT_CLASS = "pi-web-chat-root";
-const LEGACY_PLUGIN_CLASS = "pi-web-chat-enhanced";
+const MOUNTED_PLUGIN_CLASS = "pi-web-chat-mounted";
 
 const MATERIAL_PATHS: Record<"attachFile" | "stop" | "send" | "terminal" | "file", string> = {
   attachFile: [
@@ -41,7 +41,7 @@ export type ChatDom = {
 };
 
 export function pluginClass(): string {
-  return LEGACY_PLUGIN_CLASS;
+  return MOUNTED_PLUGIN_CLASS;
 }
 
 export function createChatSurface(): HTMLElement {
@@ -239,84 +239,12 @@ export function renderAttachmentChips(container: HTMLElement, names: string[]): 
   }));
 }
 
-export function installToolbarButton(onClick: () => void): HTMLElement | undefined {
-  const toolbar = document.querySelector("[data-plugin-toolbar]");
-  if (!toolbar) return undefined;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "pi-web-chat-toolbar-button";
-  button.textContent = "New chat";
-  button.addEventListener("click", onClick);
-  toolbar.append(button);
-  return button;
-}
-
-export function installSettingsSection(): HTMLElement | undefined {
-  const settingsRoot = document.querySelector("[data-plugin-settings-root]");
-  if (!settingsRoot) return undefined;
-  const section = document.createElement("section");
-  section.className = "pi-web-chat-settings";
-  section.innerHTML = `<h3>Chat Composer</h3><p>Owns chat UI, composer, local sessions, slash commands, file refs, and shell tool messages.</p>`;
-  settingsRoot.append(section);
-  return section;
-}
-
 export function pluginStyleText(): string {
   return `
     .pi-web-chat-badge { color: var(--muted, #8a8f98); }
     .pi-web-chat-surface { display: flex; flex-direction: column; }
     .pi-web-chat-composer { display: block; }
     .pi-web-chat-composer .material-icon { display: block; width: 16px; height: 16px; pointer-events: none; }
-    .${LEGACY_PLUGIN_CLASS} .app-body:has(.sidebar-wrap) > [data-plugin-chat-root],
-    .${LEGACY_PLUGIN_CLASS} .app-body:has(.sidebar-wrap) > [data-plugin-composer-root] { grid-column: 2; }
-    .${LEGACY_PLUGIN_CLASS} .slash-pop {
-      position: absolute;
-      left: var(--space-3, 12px);
-      right: 120px;
-      bottom: calc(100% + 4px);
-      max-width: 640px;
-      background: var(--bg-2, #161b22);
-      border: 1px solid var(--border-hi, var(--border, #30363d));
-      box-shadow: var(--shadow-modal, 0 18px 48px rgba(0,0,0,.35));
-      z-index: 30;
-    }
-    .${LEGACY_PLUGIN_CLASS} .slash-head {
-      padding: 6px var(--space-3, 12px);
-      border-bottom: 1px solid var(--border-dim, var(--border, #30363d));
-      font-size: var(--text-xs, 12px);
-      color: var(--fg-3, var(--muted, #8a8f98));
-      letter-spacing: var(--tracking-wide, .04em);
-      text-transform: uppercase;
-      background: var(--bg-1, #0f1117);
-    }
-    .${LEGACY_PLUGIN_CLASS} .slash-list { max-height: 240px; overflow-y: auto; }
-    .${LEGACY_PLUGIN_CLASS} .slash-item {
-      display: grid;
-      grid-template-columns: minmax(120px, .8fr) auto minmax(0, 1.4fr);
-      gap: 10px;
-      padding: 6px var(--space-3, 12px);
-      cursor: pointer;
-      font-size: var(--text-sm, 13px);
-      align-items: baseline;
-    }
-    .${LEGACY_PLUGIN_CLASS} .slash-item.selected { background: var(--bg-4, rgba(255,255,255,.08)); }
-    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-cmd { color: var(--accent, #00ff88); font-family: var(--font-mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-tags { display: inline-flex; gap: 4px; align-items: center; }
-    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-scope,
-    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-source { border: 1px solid var(--border, #30363d); color: var(--fg-3, #8a8f98); font-size: 10px; padding: 1px 5px; text-transform: uppercase; }
-    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-scope { color: var(--tool-call, #79c0ff); }
-    .${LEGACY_PLUGIN_CLASS} .slash-item .sl-desc { color: var(--fg-2, #c9d1d9); font-size: var(--text-xs, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .${LEGACY_PLUGIN_CLASS} .slash-empty { padding: 10px var(--space-3, 12px); color: var(--fg-3, #8a8f98); font-size: var(--text-sm, 13px); }
-    .${LEGACY_PLUGIN_CLASS} .prompt-file-ref-pop::before,
-    .${LEGACY_PLUGIN_CLASS} .slash-pop::before {
-      content: "pi-web-chat";
-      display: block;
-      padding: 4px 8px 2px;
-      color: var(--muted, #8a8f98);
-      font-size: 11px;
-      letter-spacing: .03em;
-      text-transform: uppercase;
-    }
     .${ROOT_CLASS} { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
     .pi-web-chat-transcript { flex: 1; min-height: 160px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; }
     .pi-web-chat-message { border: 1px solid var(--border, #30363d); border-radius: 10px; padding: 10px; background: var(--panel, rgba(255,255,255,.03)); }
@@ -330,7 +258,7 @@ export function pluginStyleText(): string {
     .${ROOT_CLASS}[data-composer-mode="file-ref"] .pi-web-chat-prompt-bar { border-color: var(--accent, #60a5fa); }
     .${ROOT_CLASS}[data-composer-mode="file-ref"] .pi-web-chat-icon-btn { color: var(--accent, #60a5fa); border-color: var(--accent, #60a5fa); }
     .pi-web-chat-textarea { flex: 1; min-height: 38px; max-height: 180px; resize: vertical; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; }
-    .pi-web-chat-icon-btn, .pi-web-chat-send, .pi-web-chat-toolbar-button, .pi-web-chat-popover-item { cursor: pointer; }
+    .pi-web-chat-icon-btn, .pi-web-chat-send, .pi-web-chat-popover-item { cursor: pointer; }
     .pi-web-chat-icon-btn, .pi-web-chat-send { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border, #30363d); background: transparent; color: inherit; }
     .pi-web-chat-send[aria-disabled="true"] { opacity: .45; }
     .${ROOT_CLASS} .material-icon { display: block; width: 16px; height: 16px; pointer-events: none; }

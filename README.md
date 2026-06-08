@@ -2,21 +2,18 @@
 
 Trusted local pi-web chat feature plugin.
 
-This plugin follows the pi-web plugin standard: pi-web core supplies plugin lifecycle, stable DOM hooks, and the shared `piWeb` RxJS Subject registry. The plugin owns the chat surface, composer, local sessions, slash commands, file references, shell tool messages, and plugin settings UI.
+This plugin follows the modern pi-web plugin standard: pi-web core supplies `context.mount.chat`, `context.mount.composer`, `context.app`, and optional shared RxJS subjects. The plugin owns the mounted chat surface, composer, local session cache, backend prompt submission, and pi-web-sidebar synchronization.
 
 ## Features
 
-- Chat/composer UI appended to `.main[data-main]`; no `<pi-app>` method patching.
-- Shared RxJS channels:
-  - `chat.input`
-  - `chat.input.submitted`
-  - `session.activeId`
-  - `toast.requested`
-- `/` slash commands loaded from the plugin backend and rendered by the plugin.
-- `@` file references searched and resolved through the plugin backend.
-- `!` shell commands executed through the Go backend and rendered as tool messages.
+- Modern-only activation through `context.mount.chat` and `context.mount.composer`; no legacy host DOM injection.
+- Sidebar RxJS integration when `globalThis.piWeb` is available:
+  - consumes `plugin.pi-web-sidebar.selectedSession`
+  - emits `plugin.pi-web-sidebar.event`
+- pi-web-sidebar integration through `globalThis.piWebSidebar`, `app.piWebSidebar`, and sidebar active-session storage keys.
+- Mounted chat state follows sidebar selected-session changes and requests backend `chatState` for that session id.
+- Chat-created/adopted sessions publish sidebar-compatible events without directly mutating sidebar `selectedSession$`.
 - Local chat/session persistence in `localStorage`.
-- Toolbar and settings extensions through `[data-plugin-toolbar]` and `[data-plugin-settings-root]` when present.
 
 ## Install
 
@@ -36,8 +33,8 @@ In pi-web: **Settings → Plugins → local** and select this folder.
 
 ## Source layout
 
-- `src/index.ts` — browser plugin entry, lifecycle, channel binding, feature orchestration.
-- `src/dom.ts` — plugin-owned DOM, rendering, and styles.
+- `src/index.ts` — modern browser plugin entry, mounted lifecycle, sidebar adapter, and backend chat orchestration.
+- `src/dom.ts` — mounted chat/composer DOM, rendering, and styles.
 - `src/types.ts` — pi-web/RxJS declarations and plugin data contracts.
 - `index.js` — bundled browser entry generated from `src/index.ts`.
 - `backend.go` — Go backend for commands, file search/read/context resolution, and shell execution.
@@ -68,10 +65,11 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
+- `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`
 - `startPrompt` with `{ text, attachments, sessionId }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
 - `abortPrompt` with `{ runId }` → `{ aborted, runId }`
-- `submitPrompt` with `{ text, attachments, sessionId }` → `{ accepted, activeSessionId, messages, isStreaming }` compatibility wrapper
+- `submitPrompt` with `{ text, attachments, sessionId }` → `{ accepted, activeSessionId, messages, isStreaming }`
 - `runShell` with `{ command, timeoutMs }` → `{ output, exitCode, durationMs, truncated }`
 
 Supported prebuilt targets:
@@ -86,7 +84,7 @@ Supported prebuilt targets:
 - Workspace-relative path resolution rejects traversal and NUL bytes.
 - Binary and oversized files are rejected.
 - Shell execution runs in the workspace root with timeout and output cap.
-- Frontend cleanup removes plugin-created DOM and unsubscribes RxJS subscriptions.
+- Frontend cleanup removes mounted plugin DOM, clears mounted CSS/badge state, and unsubscribes RxJS subscriptions.
 - `npm run security:deps` runs `bun audit`.
 - `npm run security:static` runs the local static scan.
 

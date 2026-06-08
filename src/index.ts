@@ -5,9 +5,7 @@ import {
   createChatSurface,
   createComposerSurface,
   installBadge,
-  installSettingsSection,
   installStyles,
-  installToolbarButton,
   pluginClass,
   pluginStyleText,
   renderAttachmentChips,
@@ -34,13 +32,17 @@ import type {
   PluginCommand,
   PluginContext,
   Runtime,
+  SidebarActionEvent,
   SidebarSelectedSession,
   ToastRequest,
 } from "./types";
 
 const STORAGE_KEY = "pi-web-chat.sessions.v1";
 const DRAFT_KEY = "pi-web-chat.draft.v1";
+const SIDEBAR_SELECTED_SESSION_CHANNEL = "plugin.pi-web-sidebar.selectedSession";
+const SIDEBAR_EVENT_CHANNEL = "plugin.pi-web-sidebar.event";
 const SIDEBAR_ACTIVE_SESSION_KEY = "plugin.pi-web-sidebar.activeSessionId";
+const SIDEBAR_ACTIVE_WORKSPACE_KEY = "plugin.pi-web-sidebar.activeWorkspaceId";
 const FILE_REF_LIMIT = 12;
 const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
@@ -99,59 +101,11 @@ export default function activate(context: PluginContext = {}): Cleanup {
   const app = context.app as AppWithRuntime | undefined;
   app?.piWebChat?.dispose();
 
-  if (typeof context.mount?.chat === "function" && typeof context.mount?.composer === "function") {
-    return activateMountedPiWeb(context, app);
+  if (typeof context.mount?.chat !== "function" || typeof context.mount?.composer !== "function") {
+    throw new Error("pi-web-chat requires modern pi-web mount.chat and mount.composer APIs");
   }
 
-  const disposables = new Disposables();
-
-  const pi = requirePiWeb();
-  const channels = createChannels(pi);
-  const draft = loadDraft();
-  if (draft) channels.input$.next(draft);
-  const state: State = {
-    context,
-    channels,
-    store: loadStore(getInitialSidebarSessionId(context, channels)),
-    selectedRefs: new Set(),
-    selectedLocalAttachments: [],
-    selectedAttachmentNames: [],
-    commands: [],
-    fileSearchToken: 0,
-    backendChatToken: 0,
-  };
-
-  saveStore(state.store);
-  channels.activeSessionId$.next(state.store.activeSessionId);
-
-  const style = disposables.add(installStyles());
-  const dom = createChatDom();
-  const main = findMainSurface();
-  main.append(dom.root);
-  disposables.add(dom.root);
-  disposables.add(style);
-
-  disposables.add(installToolbarButton(() => {
-    createNewSession(state);
-    channels.input$.next("");
-    render(state, dom);
-  }));
-  disposables.add(installSettingsSection());
-
-  bindDom(disposables, state, dom);
-  bindChannels(disposables, state, dom);
-  render(state, dom);
-  updateComposerMode(dom, channels.input$.getValue());
-  void refreshCommands(state, dom);
-  void refreshBackendChatState(state, dom);
-
-  const runtime = { dispose: () => disposables.dispose() };
-  if (app) app.piWebChat = runtime;
-
-  return (): void => {
-    disposables.dispose();
-    if (app?.piWebChat === runtime) delete app.piWebChat;
-  };
+  return activateMountedPiWeb(context, app);
 }
 
 function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | undefined): Cleanup {
@@ -163,9 +117,12 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
   if (cleanupChat) disposables.add(cleanupChat);
   if (cleanupComposer) disposables.add(cleanupComposer);
-  const mountedStore = loadStore();
+  const selected = readSidebarSelection(context);
+  persistSidebarSelection(context, selected || undefined);
+  const mountedStore = loadStore(selected?.sessionId || "");
   renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages);
-  void refreshMountedBackendChatState(context, chatSurface, mountedStore);
+  void refreshMountedBackendChatState(context, chatSurface, mountedStore, selected?.sessionId || mountedStore.activeSessionId);
+  bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore);
   const badge = app ? disposables.add(installBadge(app)) : undefined;
   app?.classList.add(pluginClass());
@@ -202,11 +159,11 @@ function bindMountedComposer(disposables: Disposables, context: PluginContext, c
     if (!text) return;
     sendButton.disabled = true;
     activePoll = globalThis.setInterval(() => {
-      void refreshMountedBackendChatState(context, chatSurface, store);
+      void refreshMountedBackendChatState(context, chatSurface, store, store.activeSessionId);
     }, MOUNTED_CHAT_POLL_MS);
     try {
       const response = await submitPromptToPluginBackend(context, text, [], store.activeSessionId);
-      const messages = applyBackendResponseToMountedStore(store, response);
+      const messages = applyBackendResponseToMountedStore(context, store, response, "submitPrompt");
       renderMountedBackendMessages(chatSurface, messages);
       textarea.value = "";
     } catch (error) {
@@ -232,7 +189,7 @@ export function createChannels(pi: PiWebSubjects): Channels {
     input$: pi.behaviorSubject<string>("chat.input", ""),
     submitted$: pi.subject<ChatInputSubmitted>("chat.input.submitted"),
     activeSessionId$: pi.behaviorSubject<string | null>("session.activeId", null),
-    sidebarSelectedSession$: pi.behaviorSubject<SidebarSelectedSession | null>("plugin.pi-web-sidebar.selectedSession", readSidebarSelectedSession()),
+    sidebarSelectedSession$: pi.behaviorSubject<SidebarSelectedSession | null>(SIDEBAR_SELECTED_SESSION_CHANNEL, readSidebarSelectedSession()),
     toastRequested$: pi.subject<ToastRequest>("toast.requested"),
   };
 }
@@ -278,12 +235,53 @@ export function getActiveWorkspaceId(context: PluginContext): string {
 }
 
 function getInitialSidebarSessionId(context: PluginContext, channels: Channels): string {
-  return context.app?.piWebSidebar?.getSnapshot?.().activeSessionId || channels.sidebarSelectedSession$.getValue()?.sessionId || readStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
+  return readSidebarSelection(context)?.sessionId || channels.sidebarSelectedSession$.getValue()?.sessionId || "";
 }
 
 function readSidebarSelectedSession(): SidebarSelectedSession | null {
+  return readSidebarSelection({});
+}
+
+function readSidebarSelection(context: PluginContext): SidebarSelectedSession | null {
+  const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
+  const snapshotSessionId = snapshot?.activeSessionId || "";
+  const snapshotWorkspaceId = snapshot?.activeWorkspaceId || "";
+
+  if (snapshotSessionId) {
+    return { sessionId: snapshotSessionId, workspaceId: snapshotWorkspaceId || undefined };
+  }
+
   const sessionId = readStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
-  return sessionId ? { sessionId } : null;
+  const workspaceId = readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY);
+  return sessionId ? { sessionId, workspaceId: workspaceId || undefined } : null;
+}
+
+function persistSidebarSelection(context: PluginContext, selected: SidebarSelectedSession | undefined): void {
+  if (selected?.workspaceId && context.app) {
+    context.app.dataset.activeWorkspaceId = selected.workspaceId;
+    storeString(SIDEBAR_ACTIVE_WORKSPACE_KEY, selected.workspaceId);
+  }
+
+  if (selected?.sessionId) {
+    context.app?.setAttribute("data-active-session-id", selected.sessionId);
+    storeString(SIDEBAR_ACTIVE_SESSION_KEY, selected.sessionId);
+  }
+}
+
+function publishSidebarEvent(context: PluginContext, type: string, detail: JsonRecord = {}): void {
+  const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
+  const event: SidebarActionEvent = { type, detail, snapshot };
+  const sidebarEvents = context.app?.piWebSidebar?.channels?.events$ || globalThis.piWebSidebar?.channels?.events$;
+  sidebarEvents?.next(event);
+  globalThis.piWeb?.subject<SidebarActionEvent>(SIDEBAR_EVENT_CHANNEL).next(event);
+}
+
+function storeString(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Sidebar persistence is best effort.
+  }
 }
 
 export async function backendCall(context: PluginContext, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
@@ -499,37 +497,99 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
-async function refreshMountedBackendChatState(context: PluginContext, chatSurface: HTMLElement, store: ChatStore): Promise<void> {
+async function refreshMountedBackendChatState(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  sessionId = "",
+): Promise<void> {
   try {
-    const response = await backendCall(context, "chatState", {});
-    const messages = applyBackendResponseToMountedStore(store, response);
-    if (messages.length) renderMountedBackendMessages(chatSurface, messages);
+    const response = await backendCall(context, "chatState", sessionId ? { sessionId } : {});
+    const messages = applyBackendResponseToMountedStore(context, store, response, "chatState");
+    if (messages.length) {
+      renderMountedBackendMessages(chatSurface, messages);
+    }
   } catch {
     // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
   }
 }
 
-function applyBackendResponseToMountedStore(store: ChatStore, response: BackendResponse): ChatMessage[] {
+function applyBackendResponseToMountedStore(
+  context: PluginContext,
+  store: ChatStore,
+  response: BackendResponse,
+  reason: string,
+): ChatMessage[] {
   const responseMessages = Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : [];
+
   if (typeof response.activeSessionId === "string" && response.activeSessionId) {
-    let session = store.sessions.find((item) => item.id === response.activeSessionId);
-    if (!session) {
-      session = createSession(response.activeSessionId);
-      store.sessions.unshift(session);
-    }
-    store.activeSessionId = session.id;
+    switchMountedStoreToSession(store, response.activeSessionId);
+    persistSidebarSelection(context, {
+      sessionId: response.activeSessionId,
+      workspaceId: context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(context) || undefined,
+    });
+    publishSidebarEvent(context, "chat-session", { reason, sessionId: response.activeSessionId });
   }
+
   const session = activeSession(store);
+
   if (responseMessages.length) {
     session.messages = responseMessages.slice(-MAX_MESSAGES_PER_SESSION);
+
     if (session.title === "New chat") {
       const firstUser = responseMessages.find((message) => message.role === "user");
-      if (firstUser) session.title = firstUser.text.slice(0, 48) || session.title;
+
+      if (firstUser) {
+        session.title = firstUser.text.slice(0, 48) || session.title;
+      }
     }
+
     session.updatedAt = Date.now();
   }
+
   saveStore(store);
   return session.messages;
+}
+
+function bindMountedSidebarSelection(
+  disposables: Disposables,
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+): void {
+  const onSelected = (selected: SidebarSelectedSession | null): void => {
+    if (!selected?.sessionId) {
+      return;
+    }
+
+    persistSidebarSelection(context, selected);
+    switchMountedStoreToSession(store, selected.sessionId);
+    renderMountedBackendMessages(chatSurface, activeSession(store).messages);
+    void refreshMountedBackendChatState(context, chatSurface, store, selected.sessionId);
+  };
+
+  const sidebarSelection = context.app?.piWebSidebar?.channels?.selectedSession$ || globalThis.piWebSidebar?.channels?.selectedSession$;
+
+  if (sidebarSelection) {
+    disposables.add(sidebarSelection.subscribe(onSelected));
+  }
+
+  if (globalThis.piWeb) {
+    disposables.add(globalThis.piWeb.behaviorSubject<SidebarSelectedSession | null>(SIDEBAR_SELECTED_SESSION_CHANNEL, readSidebarSelection(context)).subscribe(onSelected));
+  }
+}
+
+function switchMountedStoreToSession(store: ChatStore, sessionId: string): ChatSession {
+  let session = store.sessions.find((item) => item.id === sessionId);
+
+  if (!session) {
+    session = createSession(sessionId);
+    store.sessions.unshift(session);
+  }
+
+  store.activeSessionId = session.id;
+  saveStore(store);
+  return session;
 }
 
 function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[]): void {
@@ -875,15 +935,6 @@ function pruneStore(store: ChatStore): void {
       session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
     }
   }
-}
-
-function findMainSurface(): HTMLElement {
-  return document.querySelector<HTMLElement>(".main[data-main]") || document.querySelector<HTMLElement>("[data-main]") || document.body;
-}
-
-function requirePiWeb(): PiWebSubjects {
-  if (typeof piWeb === "undefined" || !piWeb) throw new Error("pi-web-chat requires the piWeb Subject registry");
-  return piWeb;
 }
 
 function isSession(value: unknown): value is ChatSession {

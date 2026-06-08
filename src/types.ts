@@ -9,9 +9,34 @@ export type BackendRequest = {
 };
 
 export type BackendCall = (method: string, input?: BackendRequest) => Promise<unknown>;
-export type SidebarSnapshot = { activeWorkspaceId?: string; activeSessionId?: string };
-export type SidebarApi = { getSnapshot?: () => SidebarSnapshot };
 export type SidebarSelectedSession = { sessionId?: string; workspaceId?: string };
+
+export type SidebarActionEvent = {
+  type: string;
+  detail?: JsonRecord;
+  reason?: string;
+  snapshot?: SidebarSnapshot;
+};
+
+export type SubjectLike<T> = {
+  subscribe(callback: (value: T) => void): Subscription;
+  next(value: T): void;
+};
+
+export type SidebarSnapshot = {
+  activeWorkspaceId?: string;
+  activeSessionId?: string;
+};
+
+export type SidebarRxChannels = {
+  selectedSession$?: SubjectLike<SidebarSelectedSession | null>;
+  events$?: SubjectLike<SidebarActionEvent>;
+};
+
+export type SidebarApi = {
+  channels?: SidebarRxChannels;
+  getSnapshot?: () => SidebarSnapshot;
+};
 
 export type PluginAppElement = HTMLElement & {
   piWebSidebar?: SidebarApi;
@@ -39,7 +64,8 @@ export type PiWebSubjects = {
 };
 
 declare global {
-  const piWeb: PiWebSubjects | undefined;
+  var piWeb: PiWebSubjects | undefined;
+  var piWebSidebar: SidebarApi | undefined;
 }
 
 export type ChatInputSubmitted = {
