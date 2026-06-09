@@ -76,6 +76,65 @@ type MountedState = {
   backendChatToken: number;
 };
 
+type ToolIconName =
+  | "book-open"
+  | "file-plus"
+  | "pencil"
+  | "terminal"
+  | "cpu"
+  | "globe"
+  | "search"
+  | "braces"
+  | "file-text"
+  | "circle-question-mark"
+  | "users"
+  | "plug"
+  | "git-branch"
+  | "circle-check"
+  | "hammer"
+  | "package";
+
+const TOOL_ICON_PATHS: Record<ToolIconName, string> = {
+  "book-open": `<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>`,
+  "file-plus": `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="M9 15h6"/>`,
+  pencil: `<path d="M21.2 6.8 17.2 2.8a2 2 0 0 0-2.8 0L3 14.2V21h6.8L21.2 9.6a2 2 0 0 0 0-2.8z"/><path d="m14 5 5 5"/>`,
+  terminal: `<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>`,
+  cpu: `<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 15h3"/><path d="M1 9h3"/><path d="M1 15h3"/>`,
+  globe: `<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 0 20"/><path d="M12 2a15.3 15.3 0 0 0 0 20"/>`,
+  search: `<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>`,
+  braces: `<path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-4a2 2 0 0 1 2-2 2 2 0 0 1-2-2V7a2 2 0 0 0-2-2h-1"/>`,
+  "file-text": `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>`,
+  "circle-question-mark": `<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 1 1 5.8 1c-.5 1-1.4 1.5-2.1 2-.6.4-.8.8-.8 2"/><path d="M12 17h.01"/>`,
+  users: `<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>`,
+  plug: `<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8Z"/>`,
+  "git-branch": `<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
+  "circle-check": `<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>`,
+  hammer: `<path d="m15 12-8.5 8.5a2.1 2.1 0 0 1-3-3L12 9"/><path d="m17.6 5.4 1.8-1.8"/><path d="m14 7 3 3"/><path d="M5 11 2 8l6-6 3 3"/>`,
+  package: `<path d="m7.5 4.3 9 5.2"/><path d="M21 8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.7Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>`,
+};
+
+const TOOL_ICON_NAMES: Record<string, ToolIconName> = {
+  read: "book-open",
+  write: "file-plus",
+  edit: "pencil",
+  ctx_execute: "cpu",
+  ctx_batch_execute: "cpu",
+  ctx_execute_file: "cpu",
+  ctx_search: "cpu",
+  ctx_index: "cpu",
+  ctx_fetch_and_index: "cpu",
+  web_search: "globe",
+  fetch_content: "search",
+  get_search_content: "search",
+  code_search: "braces",
+  document_parse: "file-text",
+  ask_user_question: "circle-question-mark",
+  teams: "users",
+  subagent: "users",
+  mcp: "plug",
+  git: "git-branch",
+};
+
 class Disposables {
   #items: Disposer[] = [];
 
@@ -874,7 +933,7 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   }
 
   for (const tool of message.toolCalls || []) {
-    item.append(renderMountedDetail("tool", `${tool.name} · ${tool.status}`, tool.text || JSON.stringify(tool.args || {}, null, 2), tool.status === "running"));
+    item.append(renderMountedToolCard(tool));
   }
 
   if (message.streaming) {
@@ -895,6 +954,127 @@ function renderMountedDetail(prefixClass: string, label: string, text: string, o
   body.textContent = text;
   details.append(summary, body);
   return details;
+}
+
+function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "tool-card";
+  details.dataset.tool = tool.name || "tool";
+  details.dataset.status = tool.status;
+
+  const summary = document.createElement("summary");
+  summary.className = "tc-head";
+  summary.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
+
+  const body = document.createElement("pre");
+  body.className = "tc-body";
+  body.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
+
+  details.append(summary, body);
+  return details;
+}
+
+function toolGlyph(tool: ChatToolCall): HTMLElement {
+  const glyph = document.createElement("span");
+  glyph.className = "tc-glyph";
+  const iconName = toolIconName(tool);
+  const paths = iconName ? TOOL_ICON_PATHS[iconName] : "";
+
+  if (!iconName || !paths) {
+    glyph.textContent = "●";
+    return glyph;
+  }
+
+  glyph.innerHTML = `<svg class="tc-icon" data-tool-icon="${iconName}" aria-hidden="true" viewBox="0 0 24 24">${paths}</svg>`;
+  return glyph;
+}
+
+function toolName(tool: ChatToolCall): HTMLElement {
+  const name = document.createElement("span");
+  name.className = "tc-name";
+  name.textContent = tool.name || "tool";
+  return name;
+}
+
+function toolArgs(tool: ChatToolCall): HTMLElement {
+  const args = document.createElement("span");
+  args.className = "tc-args";
+  args.textContent = mountedToolArgsText(tool);
+  return args;
+}
+
+function toolMeta(tool: ChatToolCall): HTMLElement {
+  const meta = document.createElement("span");
+  meta.className = "tc-meta";
+
+  if (tool.status === "running") {
+    const label = document.createElement("span");
+    label.className = "running";
+    label.textContent = "running";
+    meta.append(label, toolCaret());
+    return meta;
+  }
+
+  const status = document.createElement("span");
+  status.className = tool.status === "err" ? "err" : "ok";
+  status.textContent = tool.status === "err" ? "✗" : "✓";
+  const label = document.createElement("span");
+  label.textContent = tool.status === "err" ? "failed" : "done";
+  meta.append(status, label, toolCaret());
+  return meta;
+}
+
+function toolCaret(): HTMLElement {
+  const caret = document.createElement("span");
+  caret.className = "tc-caret";
+  caret.textContent = "▸";
+  return caret;
+}
+
+function mountedToolArgsText(tool: ChatToolCall): string {
+  if (!tool.args) {
+    return "";
+  }
+
+  if (typeof tool.args.command === "string") {
+    return tool.args.command;
+  }
+
+  return JSON.stringify(tool.args);
+}
+
+function toolIconName(tool: ChatToolCall): ToolIconName | undefined {
+  const name = normalizeToolName(tool.name);
+
+  if (["bash", "shell", "sh", "zsh", "terminal"].includes(name)) {
+    return commandIconName(mountedToolArgsText(tool).toLowerCase()) || "terminal";
+  }
+
+  return TOOL_ICON_NAMES[name];
+}
+
+function normalizeToolName(name: string): string {
+  return name.trim().replace(/^functions\./, "").replace(/^multi_tool_use\./, "");
+}
+
+function commandIconName(text: string): ToolIconName | undefined {
+  if (/\bgit\b|\bgh\b/.test(text)) {
+    return "git-branch";
+  }
+
+  if (/\b(go test|bun test|npm test|pnpm test|yarn test|vitest|pytest|cargo test)\b/.test(text)) {
+    return "circle-check";
+  }
+
+  if (/\b(bun|npm|pnpm|yarn)\s+(run\s+)?build\b|\b(go build|cargo build)\b/.test(text)) {
+    return "hammer";
+  }
+
+  if (/\b(bun|npm|pnpm|yarn)\s+(add|install|i)\b|\bpip\s+install\b|\bgo\s+get\b/.test(text)) {
+    return "package";
+  }
+
+  return undefined;
 }
 
 function mountedMessagePrefix(role: ChatMessage["role"]): string {

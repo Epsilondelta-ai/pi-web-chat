@@ -458,6 +458,110 @@ export function pluginStyleText(): string {
       font: inherit;
     }
 
+    .pi-web-chat-surface .tool-card {
+      border: 1px solid var(--border, #2a2a2a);
+      margin: -6px 0 14px 64px;
+      background: var(--bg-1, #0a0a0a);
+      font-size: var(--text-sm, 13px);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-head {
+      display: grid;
+      grid-template-columns: 18px auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 6px var(--space-2, 8px);
+      background: var(--bg-2, #111111);
+      border-bottom: 1px solid var(--border-dim, #1f1f1f);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    .pi-web-chat-surface .tool-card:not([open]) .tc-head {
+      border-bottom: 0;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-head::-webkit-details-marker {
+      display: none;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-head:hover {
+      background: var(--bg-3, #1a1a1a);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-glyph {
+      align-items: center;
+      color: var(--tool-call, #ffb86c);
+      display: inline-flex;
+      font-size: 12px;
+      justify-content: center;
+      text-align: center;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-icon {
+      fill: none;
+      height: 14px;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+      width: 14px;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-name {
+      color: var(--tool-call, #ffb86c);
+      font-weight: 500;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-args {
+      color: var(--fg-1, #d4d4d4);
+      font-size: var(--text-sm, 13px);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-meta {
+      align-items: center;
+      color: var(--fg-3, #8b8b8b);
+      display: inline-flex;
+      font-size: var(--text-xs, 12px);
+      font-variant-numeric: tabular-nums;
+      gap: 4px;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-meta .ok,
+    .pi-web-chat-surface .tool-card .tc-meta .running {
+      color: var(--accent, #00ff88);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-meta .err {
+      color: var(--danger, #ff6b6b);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-caret {
+      color: var(--fg-3, #8b8b8b);
+      font-size: 10px;
+      padding-right: 4px;
+    }
+
+    .pi-web-chat-surface .tool-card[open] .tc-caret {
+      transform: rotate(90deg);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-body {
+      background: var(--bg-1, #0a0a0a);
+      border-left: 2px solid var(--border-dim, #1f1f1f);
+      color: var(--fg-1, #d4d4d4);
+      font: inherit;
+      margin: 0 0 0 14px;
+      padding: var(--space-2, 8px) var(--space-3, 12px) var(--space-2, 8px) 32px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .${ROOT_CLASS} {
       display: flex;
       flex-direction: column;

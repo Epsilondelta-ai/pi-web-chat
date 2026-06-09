@@ -358,6 +358,53 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
   });
 });
 
+test("mounted tool calls render collapsed cards with tool icons", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "tool-session", activeWorkspaceId: "workspace-1" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return {
+            activeSessionId: "tool-session",
+            messages: [{
+              id: "a1",
+              role: "assistant",
+              text: "used tools",
+              createdAt: 1,
+              toolCalls: [
+                { id: "t1", name: "read", text: "README.md", status: "ok" },
+                { id: "t2", name: "bash", args: { command: "git status" }, text: "clean", status: "ok" },
+                { id: "t3", name: "unknown_tool", text: "dot", status: "ok" },
+                { id: "t4", name: "bash", args: { command: "bun test" }, text: "running", status: "running" },
+              ],
+            }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const cards = [...window.document.querySelectorAll(".tool-card")];
+    assert.equal(cards.length, 4);
+    assert.equal(cards.every((card) => card.open === false), true);
+    assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
+    assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
+    assert.equal(cards[2].querySelector(".tc-glyph").textContent, "●");
+    assert.ok(cards[3].querySelector("[data-tool-icon='circle-check']"));
+    assert.equal(cards[3].querySelector(".tc-meta .running").textContent, "running");
+    assert.equal(cards[3].querySelector(".tc-meta .ok"), null);
+    cleanup();
+  });
+});
+
 test("mounted activation follows sidebar new-session DOM event", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
