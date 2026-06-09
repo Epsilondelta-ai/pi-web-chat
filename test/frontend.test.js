@@ -70,6 +70,9 @@ test("plugin styles target mounted chat surfaces", () => {
   const styles = pluginStyleText();
   assert.match(styles, /pi-web-chat-surface/);
   assert.match(styles, /pi-web-chat-composer/);
+  assert.match(styles, /prefix\.tool/);
+  assert.match(styles, /body\.sys/);
+  assert.match(styles, /resize: none/);
 });
 
 test("channels use pi-web standard names", () => {

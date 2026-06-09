@@ -262,7 +262,7 @@ export function pluginStyleText(): string {
       font-size: var(--text-base, 14px);
       line-height: 1.55;
       color: var(--fg-1, #d4d4d4);
-      background: var(--bg-1, #080b0f);
+      background: var(--bg-1, #0a0a0a);
       position: relative;
       scroll-behavior: smooth;
       overflow-anchor: none;
@@ -290,22 +290,27 @@ export function pluginStyleText(): string {
     .pi-web-chat-surface .msg .prefix {
       width: 56px;
       flex-shrink: 0;
-      font-size: var(--text-sm, 12px);
-      color: var(--fg-3, #858585);
+      font-size: var(--text-sm, 13px);
+      color: var(--fg-3, #8b8b8b);
       padding-top: 1px;
       user-select: none;
+      white-space: nowrap;
     }
 
     .pi-web-chat-surface .msg .prefix.user {
-      color: var(--user-msg, #8ab4ff);
+      color: var(--user-msg, #82aaff);
     }
 
     .pi-web-chat-surface .msg .prefix.pi {
       color: var(--accent, #00ff88);
     }
 
-    .pi-web-chat-surface .msg .prefix.system {
-      color: var(--fg-3, #858585);
+    .pi-web-chat-surface .msg .prefix.tool {
+      color: var(--tool-call, #ffb86c);
+    }
+
+    .pi-web-chat-surface .msg .prefix.sys {
+      color: var(--fg-3, #8b8b8b);
     }
 
     .pi-web-chat-surface .msg .body {
@@ -317,6 +322,15 @@ export function pluginStyleText(): string {
       overflow-wrap: anywhere;
       margin: 0;
       font: inherit;
+    }
+
+    .pi-web-chat-surface .msg .body.sys {
+      color: var(--fg-3, #8b8b8b);
+      font-size: var(--text-sm, 13px);
+    }
+
+    .pi-web-chat-surface .msg .body.tool {
+      color: var(--fg-2, #a3a3a3);
     }
 
     .pi-web-chat-composer {
@@ -348,13 +362,14 @@ export function pluginStyleText(): string {
       width: 100%;
       min-height: 38px;
       max-height: 180px;
-      resize: vertical;
+      resize: none;
       border: 1px solid var(--border, #24313a);
       border-radius: var(--radius-1, 6px);
       outline: 0;
       background: var(--bg-1, #080b0f);
       color: var(--fg-1, #d4d4d4);
-      font: inherit;
+      font-family: var(--font-mono, inherit);
+      font-size: var(--text-base, 14px);
       padding: 9px 10px;
     }
 

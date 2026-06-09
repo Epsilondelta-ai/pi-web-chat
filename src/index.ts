@@ -856,13 +856,14 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
 
   const row = document.createElement("div");
   row.className = "msg";
+  row.dataset.kind = mountedMessageKind(message.role);
 
   const prefix = document.createElement("span");
-  prefix.className = `prefix ${mountedMessagePrefixClass(message.role)}`;
+  prefix.className = `prefix ${mountedMessageKind(message.role)}`;
   prefix.textContent = mountedMessagePrefix(message.role);
 
   const body = document.createElement("pre");
-  body.className = "body";
+  body.className = `body ${mountedMessageKind(message.role)}`;
   body.textContent = message.text;
 
   row.append(prefix, body);
@@ -898,6 +899,22 @@ function renderMountedDetail(prefixClass: string, label: string, text: string, o
 
 function mountedMessagePrefix(role: ChatMessage["role"]): string {
   if (role === "assistant") {
+    return "pi >";
+  }
+
+  if (role === "user") {
+    return "you >";
+  }
+
+  if (role === "system") {
+    return "sys >";
+  }
+
+  return "tool >";
+}
+
+function mountedMessageKind(role: ChatMessage["role"]): string {
+  if (role === "assistant") {
     return "pi";
   }
 
@@ -906,10 +923,6 @@ function mountedMessagePrefix(role: ChatMessage["role"]): string {
   }
 
   return role;
-}
-
-function mountedMessagePrefixClass(role: ChatMessage["role"]): string {
-  return role === "assistant" ? "pi" : role;
 }
 
 async function runShell(state: State, dom: ChatDom, command: string): Promise<void> {
