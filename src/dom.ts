@@ -440,27 +440,42 @@ export function pluginStyleText(): string {
       pointer-events: none;
     }
 
-    .pi-web-chat-surface .msg-detail {
-      margin: -8px 0 14px 64px;
-      color: var(--fg-2, #c9d1d9);
+    .pi-web-chat-surface .thinking-block {
+      border: 1px dashed var(--border, #2a2a2a);
+      color: var(--fg-2, #a3a3a3);
+      font-size: var(--text-sm, 13px);
+      font-style: italic;
+      margin: 4px 0 14px;
+      padding: 18px 26px 20px;
     }
 
-    .pi-web-chat-surface .msg-detail summary {
+    .pi-web-chat-surface .thinking-block .label {
+      color: var(--thinking, #ff79c6);
       cursor: pointer;
-      color: var(--fg-3, #8a8f98);
-      font-size: var(--text-sm, 12px);
+      display: block;
+      font-size: var(--text-md, 15px);
+      font-style: normal;
+      letter-spacing: var(--tracking-wide, .04em);
+      list-style: none;
+      margin-bottom: 18px;
+      text-transform: uppercase;
     }
 
-    .pi-web-chat-surface .msg-detail .body {
-      margin: 6px 0 0;
+    .pi-web-chat-surface .thinking-block .label::-webkit-details-marker {
+      display: none;
+    }
+
+    .pi-web-chat-surface .thinking-block .body {
+      color: inherit;
+      font: inherit;
+      margin: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-      font: inherit;
     }
 
     .pi-web-chat-surface .tool-card {
       border: 1px solid var(--border, #2a2a2a);
-      margin: -6px 0 14px 64px;
+      margin: 8px 0 14px;
       background: var(--bg-1, #0a0a0a);
       font-size: var(--text-sm, 13px);
     }
@@ -533,7 +548,8 @@ export function pluginStyleText(): string {
     }
 
     .pi-web-chat-surface .tool-card .tc-meta .ok,
-    .pi-web-chat-surface .tool-card .tc-meta .running {
+    .pi-web-chat-surface .tool-card .tc-meta .running,
+    .pi-web-chat-surface .tool-card .tc-meta .spinner {
       color: var(--accent, #00ff88);
     }
 

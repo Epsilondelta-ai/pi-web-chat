@@ -929,7 +929,7 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   item.append(row);
 
   if (message.thinking) {
-    item.append(renderMountedDetail("think", "thinking", message.thinking, message.streaming === true));
+    item.append(renderMountedThinking(message.thinking));
   }
 
   for (const tool of message.toolCalls || []) {
@@ -943,12 +943,13 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   return item;
 }
 
-function renderMountedDetail(prefixClass: string, label: string, text: string, open: boolean): HTMLElement {
+function renderMountedThinking(text: string): HTMLElement {
   const details = document.createElement("details");
-  details.className = `msg-detail ${prefixClass}`;
-  details.open = open;
+  details.className = "msg-detail think thinking-block";
+  details.open = true;
   const summary = document.createElement("summary");
-  summary.textContent = label;
+  summary.className = "label";
+  summary.textContent = "THINKING";
   const body = document.createElement("pre");
   body.className = "body";
   body.textContent = text;
@@ -1008,10 +1009,13 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
   meta.className = "tc-meta";
 
   if (tool.status === "running") {
+    const spinner = document.createElement("span");
+    spinner.className = "spinner";
+    spinner.textContent = "⠇";
     const label = document.createElement("span");
     label.className = "running";
     label.textContent = "running";
-    meta.append(label, toolCaret());
+    meta.append(spinner, label, toolCaret());
     return meta;
   }
 
@@ -1019,7 +1023,7 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
   status.className = tool.status === "err" ? "err" : "ok";
   status.textContent = tool.status === "err" ? "✗" : "✓";
   const label = document.createElement("span");
-  label.textContent = tool.status === "err" ? "failed" : "done";
+  label.textContent = tool.status === "err" ? " · failed" : " · done";
   meta.append(status, label, toolCaret());
   return meta;
 }
@@ -1034,10 +1038,6 @@ function toolCaret(): HTMLElement {
 function mountedToolArgsText(tool: ChatToolCall): string {
   if (!tool.args) {
     return "";
-  }
-
-  if (typeof tool.args.command === "string") {
-    return tool.args.command;
   }
 
   return JSON.stringify(tool.args);

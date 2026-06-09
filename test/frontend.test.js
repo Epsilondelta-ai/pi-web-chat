@@ -374,6 +374,7 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
               role: "assistant",
               text: "used tools",
               createdAt: 1,
+              thinking: "**Evaluating git status**\n\nI should inspect the repository before answering.",
               toolCalls: [
                 { id: "t1", name: "read", text: "README.md", status: "ok" },
                 { id: "t2", name: "bash", args: { command: "git status" }, text: "clean", status: "ok" },
@@ -397,10 +398,14 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards.every((card) => card.open === false), true);
     assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
     assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
+    assert.equal(cards[1].querySelector(".tc-args").textContent, JSON.stringify({ command: "git status" }));
     assert.equal(cards[2].querySelector(".tc-glyph").textContent, "●");
     assert.ok(cards[3].querySelector("[data-tool-icon='circle-check']"));
+    assert.equal(cards[3].querySelector(".tc-meta .spinner").textContent, "⠇");
     assert.equal(cards[3].querySelector(".tc-meta .running").textContent, "running");
     assert.equal(cards[3].querySelector(".tc-meta .ok"), null);
+    assert.equal(window.document.querySelector(".thinking-block .label").textContent, "THINKING");
+    assert.match(window.document.querySelector(".thinking-block .body").textContent, /Evaluating git status/);
     cleanup();
   });
 });
