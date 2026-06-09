@@ -262,7 +262,7 @@ export function pluginStyleText(): string {
       font-size: var(--text-base, 14px);
       line-height: 1.55;
       color: var(--fg-1, #d4d4d4);
-      background: var(--bg-1, #080b0f);
+      background: var(--bg-1, #0a0a0a);
       position: relative;
       scroll-behavior: smooth;
       overflow-anchor: none;
@@ -290,22 +290,27 @@ export function pluginStyleText(): string {
     .pi-web-chat-surface .msg .prefix {
       width: 56px;
       flex-shrink: 0;
-      font-size: var(--text-sm, 12px);
-      color: var(--fg-3, #858585);
+      font-size: var(--text-sm, 13px);
+      color: var(--fg-3, #8b8b8b);
       padding-top: 1px;
       user-select: none;
+      white-space: nowrap;
     }
 
     .pi-web-chat-surface .msg .prefix.user {
-      color: var(--user-msg, #8ab4ff);
+      color: var(--user-msg, #82aaff);
     }
 
     .pi-web-chat-surface .msg .prefix.pi {
       color: var(--accent, #00ff88);
     }
 
-    .pi-web-chat-surface .msg .prefix.system {
-      color: var(--fg-3, #858585);
+    .pi-web-chat-surface .msg .prefix.tool {
+      color: var(--tool-call, #ffb86c);
+    }
+
+    .pi-web-chat-surface .msg .prefix.sys {
+      color: var(--fg-3, #8b8b8b);
     }
 
     .pi-web-chat-surface .msg .body {
@@ -317,6 +322,15 @@ export function pluginStyleText(): string {
       overflow-wrap: anywhere;
       margin: 0;
       font: inherit;
+    }
+
+    .pi-web-chat-surface .msg .body.sys {
+      color: var(--fg-3, #8b8b8b);
+      font-size: var(--text-sm, 13px);
+    }
+
+    .pi-web-chat-surface .msg .body.tool {
+      color: var(--fg-2, #a3a3a3);
     }
 
     .pi-web-chat-composer {
@@ -348,13 +362,14 @@ export function pluginStyleText(): string {
       width: 100%;
       min-height: 38px;
       max-height: 180px;
-      resize: vertical;
+      resize: none;
       border: 1px solid var(--border, #24313a);
       border-radius: var(--radius-1, 6px);
       outline: 0;
       background: var(--bg-1, #080b0f);
       color: var(--fg-1, #d4d4d4);
-      font: inherit;
+      font-family: var(--font-mono, inherit);
+      font-size: var(--text-base, 14px);
       padding: 9px 10px;
     }
 
@@ -425,22 +440,144 @@ export function pluginStyleText(): string {
       pointer-events: none;
     }
 
-    .pi-web-chat-surface .msg-detail {
-      margin: -8px 0 14px 64px;
-      color: var(--fg-2, #c9d1d9);
+    .pi-web-chat-surface .thinking-block {
+      border: 1px dashed var(--border, #2a2a2a);
+      color: var(--fg-2, #a3a3a3);
+      font-size: var(--text-sm, 13px);
+      font-style: italic;
+      margin: 4px 0 14px;
+      padding: 18px 26px 20px;
     }
 
-    .pi-web-chat-surface .msg-detail summary {
+    .pi-web-chat-surface .thinking-block .label {
+      color: var(--thinking, #ff79c6);
       cursor: pointer;
-      color: var(--fg-3, #8a8f98);
-      font-size: var(--text-sm, 12px);
+      display: block;
+      font-size: var(--text-md, 15px);
+      font-style: normal;
+      letter-spacing: var(--tracking-wide, .04em);
+      list-style: none;
+      margin-bottom: 18px;
+      text-transform: uppercase;
     }
 
-    .pi-web-chat-surface .msg-detail .body {
-      margin: 6px 0 0;
+    .pi-web-chat-surface .thinking-block .label::-webkit-details-marker {
+      display: none;
+    }
+
+    .pi-web-chat-surface .thinking-block .body {
+      color: inherit;
+      font: inherit;
+      margin: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+    }
+
+    .pi-web-chat-surface .tool-card {
+      border: 1px solid var(--border, #2a2a2a);
+      margin: 8px 0 14px;
+      background: var(--bg-1, #0a0a0a);
+      font-size: var(--text-sm, 13px);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-head {
+      display: grid;
+      grid-template-columns: 18px auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 6px var(--space-2, 8px);
+      background: var(--bg-2, #111111);
+      border: 0;
+      border-bottom: 1px solid var(--border-dim, #1f1f1f);
+      border-radius: 0;
+      color: inherit;
+      cursor: pointer;
       font: inherit;
+      list-style: none;
+      text-align: left;
+      user-select: none;
+    }
+
+    .pi-web-chat-surface .tool-card[data-collapsed="true"] .tc-head {
+      border-bottom: 0;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-head:hover {
+      background: var(--bg-3, #1a1a1a);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-glyph {
+      align-items: center;
+      color: var(--tool-call, #ffb86c);
+      display: inline-flex;
+      font-size: 12px;
+      justify-content: center;
+      text-align: center;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-icon {
+      fill: none;
+      height: 14px;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+      width: 14px;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-name {
+      color: var(--tool-call, #ffb86c);
+      font-weight: 500;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-args {
+      color: var(--fg-1, #d4d4d4);
+      font-size: var(--text-sm, 13px);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-meta {
+      align-items: center;
+      color: var(--fg-3, #8b8b8b);
+      display: inline-flex;
+      font-size: var(--text-xs, 12px);
+      font-variant-numeric: tabular-nums;
+      gap: 4px;
+    }
+
+    .pi-web-chat-surface .tool-card .tc-meta .ok,
+    .pi-web-chat-surface .tool-card .tc-meta .running,
+    .pi-web-chat-surface .tool-card .tc-meta .spinner {
+      color: var(--accent, #00ff88);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-meta .err {
+      color: var(--danger, #ff6b6b);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-caret {
+      color: var(--fg-3, #8b8b8b);
+      font-size: 10px;
+      padding-right: 4px;
+    }
+
+    .pi-web-chat-surface .tool-card[data-collapsed="false"] .tc-caret {
+      transform: rotate(90deg);
+    }
+
+    .pi-web-chat-surface .tool-card .tc-body {
+      background: var(--bg-1, #0a0a0a);
+      border-left: 2px solid var(--border-dim, #1f1f1f);
+      color: var(--fg-1, #d4d4d4);
+      font: inherit;
+      margin: 0 0 0 14px;
+      padding: var(--space-2, 8px) var(--space-3, 12px) var(--space-2, 8px) 32px;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     .${ROOT_CLASS} {
