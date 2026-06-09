@@ -11,7 +11,7 @@ This plugin follows the modern pi-web plugin standard: pi-web core supplies `con
   - consumes `plugin.pi-web-sidebar.selectedSession`
   - emits `plugin.pi-web-sidebar.event`
 - pi-web-sidebar integration through `globalThis.piWebSidebar`, `app.piWebSidebar`, and sidebar active-session storage keys.
-- Mounted chat state follows sidebar selected-session changes and requests backend `chatState` for that session id.
+- Mounted chat state follows sidebar selected-session changes through backend `sessionEventsSse` streams.
 - Chat-created/adopted sessions publish sidebar-compatible events without directly mutating sidebar `selectedSession$`.
 - Local chat/session persistence in `localStorage`.
 
@@ -65,9 +65,10 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
-- `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`; assistant messages may include capped `toolCalls` with `{ id, name, args, text, status }`
+- `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`; fallback state request for hosts without backend streams
 - `startPrompt` with `{ text, attachments, sessionId }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
+- `sessionEventsSse` with `{ sessionId }` → SSE `chat.state` frames for session transcript state
 - `streamEventsSse` with `{ runId, cursor }` → SSE `event:`/`data:` frames for the same chat events
 - `abortPrompt` with `{ runId }` → `{ aborted, runId }`
 - `submitPrompt` with `{ text, attachments, sessionId }` → `{ accepted, activeSessionId, messages, isStreaming }`

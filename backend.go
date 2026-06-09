@@ -233,6 +233,12 @@ func main() {
 		}
 		return
 	}
+	if method == "sessionEventsSse" {
+		if err := streamPiSessionEventsSse(workspaceRoot, input, os.Stdout); err != nil {
+			fail(err)
+		}
+		return
+	}
 
 	result, err := handle(method, workspaceRoot, input)
 	if err != nil {
@@ -537,6 +543,52 @@ func streamPiEventsSse(input request, writer io.Writer) error {
 		}
 		time.Sleep(120 * time.Millisecond)
 	}
+}
+
+func streamPiSessionEventsSse(workspaceRoot string, input request, writer io.Writer) error {
+	if _, err := fmt.Fprint(writer, ": pi-web-chat-session\n\n"); err != nil {
+		return err
+	}
+
+	previous := ""
+	lastHeartbeat := time.Now()
+	for {
+		state, err := readPiChatState(workspaceRoot, input)
+		if err != nil {
+			return err
+		}
+		payload := sessionStatePayload(state)
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		current := string(data)
+
+		if current != previous {
+			if _, err := fmt.Fprintf(writer, "event: chat.state\ndata: %s\n\n", data); err != nil {
+				return err
+			}
+			previous = current
+			lastHeartbeat = time.Now()
+		} else if time.Since(lastHeartbeat) >= 5*time.Second {
+			if _, err := fmt.Fprint(writer, ": heartbeat\n\n"); err != nil {
+				return err
+			}
+			lastHeartbeat = time.Now()
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func sessionStatePayload(state any) map[string]any {
+	payload := map[string]any{"type": "chat.state"}
+	if values, ok := state.(map[string]any); ok {
+		for key, value := range values {
+			payload[key] = value
+		}
+	}
+	return payload
 }
 
 func sseEventName(value string) string {

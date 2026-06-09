@@ -210,6 +210,74 @@ test("mounted activation loads sidebar-selected session and sends chatState for 
   });
 });
 
+test("mounted activation uses session SSE when available", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "sse-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        return {};
+      },
+      backendStream: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"sse-session","messages":[{"id":"m1","role":"assistant","text":"session sse transcript","createdAt":1}]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.ok(backendCalls.some((call) => call.method === "sessionEventsSse" && call.input.data.sessionId === "sse-session"));
+    assert.equal(backendCalls.some((call) => call.method === "chatState"), false);
+    assert.match(window.document.querySelector(".term-inner").textContent, /session sse transcript/);
+    cleanup();
+  });
+});
+
+test("mounted reactivation aborts previous session SSE", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const aborts = [];
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "reactivate-session", activeWorkspaceId: "workspace-2" }) };
+    const context = {
+      app,
+      backend: async () => ({}),
+      backendStream: async (method, input, options) => {
+        if (method === "sessionEventsSse") {
+          options?.signal?.addEventListener("abort", () => aborts.push(input.data.sessionId || ""));
+          return new ReadableStream({ start() {} });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    };
+
+    const cleanup = activate(context);
+    await tick();
+    activate(context);
+    await tick();
+
+    assert.ok(aborts.includes("reactivate-session"));
+    app.piWebChat.dispose();
+  });
+});
+
 test("mounted activation follows sidebar selected-session channel after mount", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
@@ -393,6 +461,15 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
       backendStream: async (method, input) => {
         backendCalls.push({ method, input });
 
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"stream-session","messages":[]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
         if (method === "streamEventsSse") {
           return new ReadableStream({
             start(controller) {
@@ -454,6 +531,15 @@ test("mounted submit never polls streamEvents when SSE succeeds", async () => {
       backendStream: async (method, input) => {
         backendCalls.push({ method, input });
 
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"sse-session","messages":[]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
         if (method === "streamEventsSse") {
           return new ReadableStream({
             start(controller) {
@@ -485,6 +571,63 @@ test("mounted submit never polls streamEvents when SSE succeeds", async () => {
       return call.method === "chatState" && call.input.data.sessionId === "sse-session";
     }), false);
     assert.match(window.document.querySelector(".term-inner").textContent, /hello sse|final sse/);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps text typed while stream is in flight", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let releaseRun;
+    const runReady = new Promise((resolve) => { releaseRun = resolve; });
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "draft-session", runId: "run-draft", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"draft-session","messages":[]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        if (method === "streamEventsSse") {
+          await runReady;
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"answer"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "first prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    textarea.value = "second draft";
+    releaseRun();
+    await tick();
+    await tick();
+
+    assert.equal(textarea.value, "second draft");
     cleanup();
   });
 });

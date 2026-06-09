@@ -29,6 +29,34 @@ function runBackendCommand(command, args, data = {}, env = {}) {
   });
 }
 
+function runBackendStreamUntil(command, args, data = {}, env = {}, marker = "\n\n") {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`stream marker timeout: ${stderr}`));
+    }, 3000);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+
+      if (stdout.includes(marker)) {
+        clearTimeout(timer);
+        child.kill("SIGTERM");
+        resolve({ stdout, stderr });
+      }
+    });
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.stdin.end(JSON.stringify(data));
+  });
+}
+
 async function callBackend(method, workspaceRoot, data = {}, env = {}) {
   const result = await runBackend(backend, method, workspaceRoot, data, env);
   assert.equal(result.code, 0, result.stderr);
@@ -451,6 +479,29 @@ test("chatState caps large transcript responses so plugin bridge can parse JSON"
   assert.ok(encoded.length < 65_000, `encoded length ${encoded.length} should fit backend bridge`);
   assert.ok(result.messages.length > 0);
   assert.equal(result.messages.at(-1).id, "m79");
+});
+
+test("sessionEventsSse emits chat state as SSE frames", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "sse-session.jsonl"), [
+    JSON.stringify({ type: "session", id: "sse-session" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "hello" } }),
+  ].join("\n"));
+
+  const stream = await runBackendStreamUntil(
+    backendBinary,
+    ["sessionEventsSse", root],
+    { data: { sessionId: "sse-session" } },
+    {},
+    "event: chat.state",
+  );
+
+  assert.match(stream.stdout, /: pi-web-chat-session/);
+  assert.match(stream.stdout, /event: chat\.state/);
+  assert.match(stream.stdout, /data: .*"type":"chat.state"/);
+  assert.match(stream.stdout, /data: .*sse-session/);
 });
 
 test("chatState parses pi JSONL session fixtures", async () => {

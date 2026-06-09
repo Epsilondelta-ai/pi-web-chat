@@ -9,7 +9,8 @@ export type BackendRequest = {
 };
 
 export type BackendCall = (method: string, input?: BackendRequest) => Promise<unknown>;
-export type BackendStreamCall = (method: string, input?: BackendRequest) => Promise<unknown>;
+export type BackendStreamOptions = { signal?: AbortSignal };
+export type BackendStreamCall = (method: string, input?: BackendRequest, options?: BackendStreamOptions) => Promise<unknown>;
 export type SidebarSelectedSession = { sessionId?: string; workspaceId?: string };
 
 export type SidebarActionEvent = {
@@ -137,6 +138,9 @@ export type ChatEvent = {
   result?: string;
   isError?: boolean;
   message?: string;
+  activeSessionId?: string;
+  messages?: ChatMessage[];
+  isStreaming?: boolean;
 };
 
 export type ChatMessage = {

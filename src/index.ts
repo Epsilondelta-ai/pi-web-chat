@@ -70,10 +70,14 @@ type State = {
   commands: PluginCommand[];
   fileSearchToken: number;
   backendChatToken: number;
+  runEventsAbort?: AbortController;
+  sessionEventsAbort?: AbortController;
 };
 
 type MountedState = {
   backendChatToken: number;
+  runEventsAbort?: AbortController;
+  sessionEventsAbort?: AbortController;
 };
 
 type ToolIconName =
@@ -190,24 +194,27 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const mountedStore = loadStore(selected?.sessionId || "");
   const mountedState: MountedState = { backendChatToken: 0 };
   renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages);
-  void refreshMountedBackendChatState(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
+  void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
   const badge = app ? disposables.add(installBadge(app)) : undefined;
   app?.classList.add(pluginClass());
 
-  const runtime = { dispose: () => disposables.dispose() };
-  if (app) {
-    app.piWebChat = runtime;
-  }
-
-  return (): void => {
+  const cleanup = (): void => {
+    mountedState.runEventsAbort?.abort();
+    mountedState.sessionEventsAbort?.abort();
     disposables.dispose();
     badge?.remove();
     style.remove();
     app?.classList.remove(pluginClass());
     if (app?.piWebChat === runtime) delete app.piWebChat;
   };
+  const runtime = { dispose: cleanup };
+  if (app) {
+    app.piWebChat = runtime;
+  }
+
+  return cleanup;
 }
 
 function bindMountedComposer(
@@ -261,7 +268,10 @@ function bindMountedComposer(
       await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
       selectedAttachments = [];
       syncAttachments();
-      textarea.value = "";
+
+      if (textarea.value.trim() === text) {
+        textarea.value = "";
+      }
 
       if (fileInput) {
         fileInput.value = "";
@@ -493,8 +503,12 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
     }
 
     if (selected?.sessionId) {
+      if (selected.sessionId !== state.store.activeSessionId) {
+        state.runEventsAbort?.abort();
+      }
+
       switchToSession(state, dom, selected.sessionId);
-      void refreshBackendChatState(state, dom, selected.sessionId);
+      void openSessionEvents(state, dom, selected.sessionId);
     }
   }));
 }
@@ -535,6 +549,9 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
 
 async function submitPromptWithStreaming(state: State, dom: ChatDom, text: string, attachments: FileAttachment[]): Promise<void> {
   state.backendChatToken += 1;
+  state.runEventsAbort?.abort();
+  state.runEventsAbort = new AbortController();
+  state.sessionEventsAbort?.abort();
   const start = await startStreamingPrompt(state.context, text, attachments, state.store.activeSessionId);
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
@@ -548,7 +565,12 @@ async function submitPromptWithStreaming(state: State, dom: ChatDom, text: strin
   }
 
   const assistant = ensureStreamingAssistant(state.store);
-  await consumeStreamingRun(state.context, state.store, start.runId, assistant, (): void => render(state, dom));
+  try {
+    await consumeStreamingRun(state.context, state.store, start.runId, assistant, (): void => render(state, dom), state.runEventsAbort.signal);
+  } finally {
+    state.runEventsAbort = undefined;
+  }
+  void openSessionEvents(state, dom, state.store.activeSessionId);
 }
 
 async function submitMountedPromptWithStreaming(
@@ -560,6 +582,9 @@ async function submitMountedPromptWithStreaming(
   attachments: FileAttachment[],
 ): Promise<void> {
   mountedState.backendChatToken += 1;
+  mountedState.runEventsAbort?.abort();
+  mountedState.runEventsAbort = new AbortController();
+  mountedState.sessionEventsAbort?.abort();
   const pendingUserMessage: ChatMessage = {
     id: id(),
     role: "user",
@@ -600,7 +625,19 @@ async function submitMountedPromptWithStreaming(
   }
 
   const assistant = ensureStreamingAssistant(store);
-  await consumeStreamingRun(context, store, start.runId, assistant, (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages));
+  try {
+    await consumeStreamingRun(
+      context,
+      store,
+      start.runId,
+      assistant,
+      (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages),
+      mountedState.runEventsAbort.signal,
+    );
+  } finally {
+    mountedState.runEventsAbort = undefined;
+  }
+  void openMountedSessionEvents(context, chatSurface, store, mountedState, store.activeSessionId);
 }
 
 async function consumeStreamingRun(
@@ -609,8 +646,9 @@ async function consumeStreamingRun(
   runId: string,
   assistant: ChatMessage,
   renderCurrent: () => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const stream = await backendSseStream(context, "streamEventsSse", { runId, cursor: 0 });
+  const stream = await backendSseStream(context, "streamEventsSse", { runId, cursor: 0 }, signal);
 
   if (!stream) {
     throw new Error("SSE streaming backend did not return a stream");
@@ -638,6 +676,7 @@ async function backendSseStream(
   context: PluginContext,
   method: string,
   data: JsonRecord = {},
+  signal?: AbortSignal,
 ): Promise<ReadableStream<Uint8Array> | null> {
   if (!context.backendStream) {
     throw new Error("SSE streaming backend is unavailable");
@@ -645,7 +684,7 @@ async function backendSseStream(
 
   const workspaceId = getActiveWorkspaceId(context);
 
-  const response = await context.backendStream(method, { workspaceId, data });
+  const response = await context.backendStream(method, { workspaceId, data }, { signal });
   return readableStreamFromBackendResponse(response);
 }
 
@@ -834,6 +873,51 @@ function isChatEvent(value: unknown): value is ChatEvent {
   return isRecord(value) && typeof value.type === "string";
 }
 
+async function openMountedSessionEvents(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+  sessionId = "",
+): Promise<void> {
+  if (!context.backendStream) {
+    await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId);
+    return;
+  }
+
+  const token = ++mountedState.backendChatToken;
+  mountedState.sessionEventsAbort?.abort();
+  const controller = new AbortController();
+  mountedState.sessionEventsAbort = controller;
+
+  try {
+    const stream = await backendSseStream(context, "sessionEventsSse", chatStateRequestData(context, sessionId), controller.signal);
+
+    if (!stream) {
+      throw new Error("session SSE backend did not return a stream");
+    }
+
+    await readSseChatEvents(stream, (event: ChatEvent): void => {
+      if (token !== mountedState.backendChatToken || event.type !== "chat.state") {
+        return;
+      }
+
+      const messages = applyBackendResponseToMountedStore(context, store, chatStateEventResponse(event), "chatState");
+      if (messages.length) {
+        renderMountedBackendMessages(chatSurface, messages);
+      }
+    });
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId);
+    }
+  } finally {
+    if (mountedState.sessionEventsAbort === controller) {
+      mountedState.sessionEventsAbort = undefined;
+    }
+  }
+}
+
 async function refreshMountedBackendChatState(
   context: PluginContext,
   chatSurface: HTMLElement,
@@ -870,6 +954,14 @@ function chatStateRequestData(context: PluginContext, sessionId: string): JsonRe
   return data;
 }
 
+function chatStateEventResponse(event: ChatEvent): BackendResponse {
+  return {
+    activeSessionId: event.activeSessionId,
+    messages: event.messages,
+    isStreaming: event.isStreaming,
+  };
+}
+
 function activeWorkspacePath(context: PluginContext): string {
   const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
   const workspaceId = context.app?.dataset.activeWorkspaceId || snapshot?.activeWorkspaceId || "";
@@ -904,10 +996,10 @@ function applyBackendResponseToMountedStore(
   const session = activeSession(store);
 
   if (responseMessages.length) {
-    session.messages = responseMessages.slice(-MAX_MESSAGES_PER_SESSION);
+    session.messages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
 
     if (session.title === "New chat") {
-      const firstUser = responseMessages.find((message) => message.role === "user");
+      const firstUser = session.messages.find((message) => message.role === "user");
 
       if (firstUser) {
         session.title = firstUser.text.slice(0, 48) || session.title;
@@ -933,10 +1025,14 @@ function bindMountedSidebarSelection(
       return;
     }
 
+    if (selected.sessionId !== store.activeSessionId) {
+      mountedState.runEventsAbort?.abort();
+    }
+
     persistSidebarSelection(context, selected);
     switchMountedStoreToSession(store, selected.sessionId);
     renderMountedBackendMessages(chatSurface, activeSession(store).messages);
-    void refreshMountedBackendChatState(context, chatSurface, store, mountedState, selected.sessionId);
+    void openMountedSessionEvents(context, chatSurface, store, mountedState, selected.sessionId);
   };
 
   const onSidebarEvent = (event: SidebarActionEvent): void => {
@@ -1376,6 +1472,55 @@ function updateComposerMode(dom: ChatDom, value: string): void {
   if (value.startsWith("!")) setComposerMode(dom, "shell");
   else if (currentFileRefQuery(value) !== null) setComposerMode(dom, "file-ref");
   else setComposerMode(dom, "normal");
+}
+
+async function openSessionEvents(state: State, dom: ChatDom, sessionId = ""): Promise<void> {
+  if (!state.context.backendStream) {
+    await refreshBackendChatState(state, dom, sessionId);
+    return;
+  }
+
+  const token = ++state.backendChatToken;
+  state.sessionEventsAbort?.abort();
+  const controller = new AbortController();
+  state.sessionEventsAbort = controller;
+
+  try {
+    const stream = await backendSseStream(state.context, "sessionEventsSse", sessionId ? { sessionId } : {}, controller.signal);
+
+    if (!stream) {
+      throw new Error("session SSE backend did not return a stream");
+    }
+
+    await readSseChatEvents(stream, (event: ChatEvent): void => {
+      if (token !== state.backendChatToken || event.type !== "chat.state") {
+        return;
+      }
+
+      applySessionStateEvent(state, dom, event);
+    });
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      await refreshBackendChatState(state, dom, sessionId);
+    }
+  } finally {
+    if (state.sessionEventsAbort === controller) {
+      state.sessionEventsAbort = undefined;
+    }
+  }
+}
+
+function applySessionStateEvent(state: State, dom: ChatDom, event: ChatEvent): void {
+  const messages = sanitizeChatMessages(event.messages);
+  if (!messages.length) {
+    return;
+  }
+
+  const session = sessionForBackendState(state.store, typeof event.activeSessionId === "string" ? event.activeSessionId : null);
+  session.messages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
+  session.updatedAt = Date.now();
+  saveStore(state.store);
+  render(state, dom);
 }
 
 async function refreshBackendChatState(state: State, dom: ChatDom, sessionId = ""): Promise<void> {
