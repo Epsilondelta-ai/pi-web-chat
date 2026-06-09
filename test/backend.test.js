@@ -29,6 +29,34 @@ function runBackendCommand(command, args, data = {}, env = {}) {
   });
 }
 
+function runBackendStreamUntil(command, args, data = {}, env = {}, marker = "\n\n") {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`stream marker timeout: ${stderr}`));
+    }, 3000);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+
+      if (stdout.includes(marker)) {
+        clearTimeout(timer);
+        child.kill("SIGTERM");
+        resolve({ stdout, stderr });
+      }
+    });
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.stdin.end(JSON.stringify(data));
+  });
+}
+
 async function callBackend(method, workspaceRoot, data = {}, env = {}) {
   const result = await runBackend(backend, method, workspaceRoot, data, env);
   assert.equal(result.code, 0, result.stderr);
@@ -160,6 +188,29 @@ test("backend wrapper completes stream when pi is unavailable", async () => {
   assert.ok(stream.events.some((event) => event.type === "error"));
 });
 
+test("backend wrapper emits stream events as SSE frames", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse js' } }));
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
+  const start = await callBackend("startPrompt", root, { text: "hello" }, env);
+  const stream = await runBackend(backend, "streamEventsSse", root, { runId: start.runId, cursor: 0 }, env);
+
+  assert.equal(stream.code, 0, stream.stderr);
+  assert.match(stream.stdout, /: pi-web-chat/);
+  assert.match(stream.stdout, /event: text\.delta/);
+  assert.match(stream.stdout, /data: .*sse js/);
+});
+
 test("js streaming backend caps response session ids", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
@@ -218,6 +269,32 @@ process.stdin.on('end', () => {
   }
 
   assert.equal(stream.isStreaming, false);
+});
+
+test("compiled backend emits stream events as SSE frames", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse go' } }));
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "hello" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const stream = await runBackendBinary("streamEventsSse", root, { data: { runId: started.runId, cursor: 0 } }, env);
+
+  assert.equal(stream.code, 0, stream.stderr);
+  assert.match(stream.stdout, /: pi-web-chat/);
+  assert.match(stream.stdout, /event: text\.delta/);
+  assert.match(stream.stdout, /data: .*sse go/);
 });
 
 test("compiled backend completes stream when pi is unavailable", async () => {
@@ -402,6 +479,29 @@ test("chatState caps large transcript responses so plugin bridge can parse JSON"
   assert.ok(encoded.length < 65_000, `encoded length ${encoded.length} should fit backend bridge`);
   assert.ok(result.messages.length > 0);
   assert.equal(result.messages.at(-1).id, "m79");
+});
+
+test("sessionEventsSse emits chat state as SSE frames", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "sse-session.jsonl"), [
+    JSON.stringify({ type: "session", id: "sse-session" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "hello" } }),
+  ].join("\n"));
+
+  const stream = await runBackendStreamUntil(
+    backendBinary,
+    ["sessionEventsSse", root],
+    { data: { sessionId: "sse-session" } },
+    {},
+    "event: chat.state",
+  );
+
+  assert.match(stream.stdout, /: pi-web-chat-session/);
+  assert.match(stream.stdout, /event: chat\.state/);
+  assert.match(stream.stdout, /data: .*"type":"chat.state"/);
+  assert.match(stream.stdout, /data: .*sse-session/);
 });
 
 test("chatState parses pi JSONL session fixtures", async () => {

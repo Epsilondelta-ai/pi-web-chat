@@ -29,7 +29,7 @@ if (method === "__streamRunner") {
   process.exit(0);
 }
 
-if (["startPrompt", "streamEvents", "abortPrompt"].includes(method)) {
+if (["startPrompt", "streamEvents", "streamEventsSse", "sessionEventsSse", "abortPrompt"].includes(method)) {
   await handleStreamingMethod(method, workspaceRoot);
   process.exit(0);
 }
@@ -82,6 +82,16 @@ async function handleStreamingMethod(name, root) {
     pruneRuns();
     const input = parseInput(await readStdin());
     const data = input.data && typeof input.data === "object" ? input.data : input;
+    if (name === "streamEventsSse") {
+      await streamEventsSse(data);
+      return;
+    }
+
+    if (name === "sessionEventsSse") {
+      await sessionEventsSse(root, data);
+      return;
+    }
+
     const result = name === "startPrompt" ? startPrompt(root, data) : name === "streamEvents" ? streamEvents(data) : abortPrompt(data);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
@@ -144,6 +154,76 @@ function streamEvents(data) {
   const nextCursor = events.reduce((max, event) => Math.max(max, Number(event.seq || 0)), cursor);
   const isStreaming = state.status === "running" || state.status === "starting";
   return { runId: state.runId, activeSessionId: responseSessionId(state.activeSessionId), events, cursor: nextCursor, isStreaming };
+}
+
+async function streamEventsSse(data) {
+  let cursor = Number(data.cursor || 0);
+  process.stdout.write(": pi-web-chat\n\n");
+
+  while (true) {
+    const response = streamEvents({ ...data, cursor });
+    cursor = response.cursor;
+
+    for (const event of response.events) {
+      process.stdout.write(`event: ${sseEventName(event.type)}\n`);
+      process.stdout.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+
+    if (!response.isStreaming) return;
+    await sleep(120);
+  }
+}
+
+async function sessionEventsSse(root, data) {
+  const binary = resolveBinary();
+  if (!existsSync(binary)) throw new Error(`Unsupported platform or missing backend binary: ${process.platform}/${process.arch}`);
+
+  try {
+    chmodSync(binary, 0o755);
+  } catch {
+    // Already executable or installed on a read-only filesystem.
+  }
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(binary, ["sessionEventsSse", root], { stdio: ["pipe", "pipe", "pipe"] });
+    let settled = false;
+    const cleanup = () => {
+      process.removeListener("SIGTERM", stop);
+      process.removeListener("SIGINT", stop);
+      process.stdout.removeListener("error", stop);
+      process.stdout.removeListener("close", stop);
+    };
+    const stop = () => {
+      if (child.exitCode === null) child.kill("SIGTERM");
+    };
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+
+    process.once("SIGTERM", stop);
+    process.once("SIGINT", stop);
+    process.stdout.once("error", stop);
+    process.stdout.once("close", stop);
+    child.stdout.pipe(process.stdout);
+    child.stderr.pipe(process.stderr);
+    child.on("error", (error) => settle(reject, error));
+    child.on("close", (code) => {
+      if (code && code !== 0) settle(reject, new Error(`sessionEventsSse exited with code ${code}`));
+      else settle(resolve, undefined);
+    });
+    child.stdin.end(JSON.stringify({ data }));
+  });
+}
+
+function sseEventName(value) {
+  return String(value || "message").replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function abortPrompt(data) {

@@ -227,6 +227,19 @@ func main() {
 	}
 	input = normalizeBackendInput(input)
 
+	if method == "streamEventsSse" {
+		if err := streamPiEventsSse(input, os.Stdout); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if method == "sessionEventsSse" {
+		if err := streamPiSessionEventsSse(workspaceRoot, input, os.Stdout); err != nil {
+			fail(err)
+		}
+		return
+	}
+
 	result, err := handle(method, workspaceRoot, input)
 	if err != nil {
 		fail(err)
@@ -495,6 +508,102 @@ func streamPiEvents(input request) (any, error) {
 		"cursor":          nextCursor,
 		"isStreaming":     streaming,
 	}, nil
+}
+
+func streamPiEventsSse(input request, writer io.Writer) error {
+	cursor := intInput(input, "cursor", 0)
+	if _, err := fmt.Fprint(writer, ": pi-web-chat\n\n"); err != nil {
+		return err
+	}
+
+	for {
+		response, err := streamPiEvents(request{"runId": stringInput(input, "runId"), "cursor": cursor})
+		if err != nil {
+			return err
+		}
+		payload, ok := response.(map[string]any)
+		if !ok {
+			return errors.New("invalid stream response")
+		}
+		cursor = intFromAny(payload["cursor"])
+		events, _ := payload["events"].([]streamEvent)
+
+		for _, event := range events {
+			data, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", sseEventName(stringFromAny(event["type"])), data); err != nil {
+				return err
+			}
+		}
+
+		if payload["isStreaming"] != true {
+			return nil
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+func streamPiSessionEventsSse(workspaceRoot string, input request, writer io.Writer) error {
+	if _, err := fmt.Fprint(writer, ": pi-web-chat-session\n\n"); err != nil {
+		return err
+	}
+
+	previous := ""
+	lastHeartbeat := time.Now()
+	for {
+		state, err := readPiChatState(workspaceRoot, input)
+		if err != nil {
+			return err
+		}
+		payload := sessionStatePayload(state)
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		current := string(data)
+
+		if current != previous {
+			if _, err := fmt.Fprintf(writer, "event: chat.state\ndata: %s\n\n", data); err != nil {
+				return err
+			}
+			previous = current
+			lastHeartbeat = time.Now()
+		} else if time.Since(lastHeartbeat) >= 5*time.Second {
+			if _, err := fmt.Fprint(writer, ": heartbeat\n\n"); err != nil {
+				return err
+			}
+			lastHeartbeat = time.Now()
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func sessionStatePayload(state any) map[string]any {
+	payload := map[string]any{"type": "chat.state"}
+	if values, ok := state.(map[string]any); ok {
+		for key, value := range values {
+			payload[key] = value
+		}
+	}
+	return payload
+}
+
+func sseEventName(value string) string {
+	if value == "" {
+		return "message"
+	}
+	builder := strings.Builder{}
+	for _, r := range value {
+		if r == '.' || r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			builder.WriteRune(r)
+			continue
+		}
+		builder.WriteRune('_')
+	}
+	return builder.String()
 }
 
 func abortPiPrompt(input request) (any, error) {

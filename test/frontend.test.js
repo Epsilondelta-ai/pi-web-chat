@@ -210,6 +210,74 @@ test("mounted activation loads sidebar-selected session and sends chatState for 
   });
 });
 
+test("mounted activation uses session SSE when available", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "sse-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        return {};
+      },
+      backendStream: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"sse-session","messages":[{"id":"m1","role":"assistant","text":"session sse transcript","createdAt":1}]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.ok(backendCalls.some((call) => call.method === "sessionEventsSse" && call.input.data.sessionId === "sse-session"));
+    assert.equal(backendCalls.some((call) => call.method === "chatState"), false);
+    assert.match(window.document.querySelector(".term-inner").textContent, /session sse transcript/);
+    cleanup();
+  });
+});
+
+test("mounted reactivation aborts previous session SSE", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const aborts = [];
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "reactivate-session", activeWorkspaceId: "workspace-2" }) };
+    const context = {
+      app,
+      backend: async () => ({}),
+      backendStream: async (method, input, options) => {
+        if (method === "sessionEventsSse") {
+          options?.signal?.addEventListener("abort", () => aborts.push(input.data.sessionId || ""));
+          return new ReadableStream({ start() {} });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    };
+
+    const cleanup = activate(context);
+    await tick();
+    activate(context);
+    await tick();
+
+    assert.ok(aborts.includes("reactivate-session"));
+    app.piWebChat.dispose();
+  });
+});
+
 test("mounted activation follows sidebar selected-session channel after mount", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
@@ -368,10 +436,11 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
-test("mounted submit streams with startPrompt and notifies sidebar refresh channel", async () => {
+test("mounted submit streams through SSE and notifies sidebar refresh channel", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
     const submitted = [];
+    const encoder = new TextEncoder();
     globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
 
     const cleanup = activate({
@@ -383,16 +452,164 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
           return { activeSessionId: "stream-session", runId: "run-1", isStreaming: true };
         }
 
-        if (method === "streamEvents") {
-          return {
-            cursor: 1,
-            events: [{ type: "text.delta", delta: "streamed answer" }],
-            isStreaming: false,
-          };
-        }
-
         if (method === "chatState" && input.data.sessionId === "stream-session") {
           return { activeSessionId: "stream-session", messages: [{ id: "a1", role: "assistant", text: "final answer", createdAt: 2 }] };
+        }
+
+        return {};
+      },
+      backendStream: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"stream-session","messages":[]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"streamed answer"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end","exitCode":0}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    assert.deepEqual(submitted.map((event) => event.text), ["stream me"]);
+    assert.ok(backendCalls.some((call) => call.method === "startPrompt" && call.input.data.text === "stream me"));
+    assert.ok(backendCalls.some((call) => call.method === "streamEventsSse" && call.input.data.runId === "run-1"));
+    assert.equal(backendCalls.some((call) => call.method === "streamEvents"), false);
+    const streamIndex = backendCalls.findIndex((call) => call.method === "streamEventsSse");
+    assert.equal(backendCalls.slice(streamIndex + 1).some((call) => {
+      return call.method === "chatState" && call.input.data.sessionId === "stream-session";
+    }), false);
+    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
+    assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
+    cleanup();
+  });
+});
+
+test("mounted submit never polls streamEvents when SSE succeeds", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "sse-session", runId: "run-sse", isStreaming: true };
+        }
+
+        if (method === "chatState" && input.data.sessionId === "sse-session") {
+          return { activeSessionId: "sse-session", messages: [{ id: "a1", role: "assistant", text: "final sse", createdAt: 2 }] };
+        }
+
+        return {};
+      },
+      backendStream: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"sse-session","messages":[]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"hello "}\n\n'));
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"sse"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end","exitCode":0}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream with sse";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    assert.ok(backendCalls.some((call) => call.method === "streamEventsSse" && call.input.data.runId === "run-sse"));
+    assert.equal(backendCalls.some((call) => call.method === "streamEvents"), false);
+    const streamIndex = backendCalls.findIndex((call) => call.method === "streamEventsSse");
+    assert.equal(backendCalls.slice(streamIndex + 1).some((call) => {
+      return call.method === "chatState" && call.input.data.sessionId === "sse-session";
+    }), false);
+    assert.match(window.document.querySelector(".term-inner").textContent, /hello sse|final sse/);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps text typed while stream is in flight", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let releaseRun;
+    const runReady = new Promise((resolve) => { releaseRun = resolve; });
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "draft-session", runId: "run-draft", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: chat.state\ndata: {"type":"chat.state","activeSessionId":"draft-session","messages":[]}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        if (method === "streamEventsSse") {
+          await runReady;
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"answer"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+              controller.close();
+            },
+          });
         }
 
         return {};
@@ -401,18 +618,16 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
     });
 
     const textarea = window.document.querySelector(".prompt-textarea");
-    textarea.value = "stream me";
+    textarea.value = "first prompt";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
-    await tick(160);
+    await tick();
+    textarea.value = "second draft";
+    releaseRun();
+    await tick();
     await tick();
 
-    assert.deepEqual(submitted.map((event) => event.text), ["stream me"]);
-    assert.ok(backendCalls.some((call) => call.method === "startPrompt" && call.input.data.text === "stream me"));
-    assert.ok(backendCalls.some((call) => call.method === "streamEvents" && call.input.data.runId === "run-1"));
-    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
-    assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
-    assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
+    assert.equal(textarea.value, "second draft");
     cleanup();
   });
 });

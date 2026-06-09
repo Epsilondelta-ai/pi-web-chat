@@ -9,6 +9,8 @@ export type BackendRequest = {
 };
 
 export type BackendCall = (method: string, input?: BackendRequest) => Promise<unknown>;
+export type BackendStreamOptions = { signal?: AbortSignal };
+export type BackendStreamCall = (method: string, input?: BackendRequest, options?: BackendStreamOptions) => Promise<unknown>;
 export type SidebarSelectedSession = { sessionId?: string; workspaceId?: string };
 
 export type SidebarActionEvent = {
@@ -51,6 +53,7 @@ export type PluginAppElement = HTMLElement & {
 export type PluginContext = {
   app?: PluginAppElement;
   backend?: BackendCall;
+  backendStream?: BackendStreamCall;
   mount?: {
     chat(element: HTMLElement, options?: { replace?: boolean }): Cleanup;
     composer(element: HTMLElement, options?: { replace?: boolean }): Cleanup;
@@ -135,6 +138,9 @@ export type ChatEvent = {
   result?: string;
   isError?: boolean;
   message?: string;
+  activeSessionId?: string;
+  messages?: ChatMessage[];
+  isStreaming?: boolean;
 };
 
 export type ChatMessage = {
