@@ -119,8 +119,13 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const composerSurface = createComposerSurface();
   const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
-  if (cleanupChat) disposables.add(cleanupChat);
-  if (cleanupComposer) disposables.add(cleanupComposer);
+  if (cleanupChat) {
+    disposables.add(cleanupChat);
+  }
+
+  if (cleanupComposer) {
+    disposables.add(cleanupComposer);
+  }
   const selected = readSidebarSelection(context);
   persistSidebarSelection(context, selected || undefined);
   const mountedStore = loadStore(selected?.sessionId || "");
@@ -133,7 +138,9 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   app?.classList.add(pluginClass());
 
   const runtime = { dispose: () => disposables.dispose() };
-  if (app) app.piWebChat = runtime;
+  if (app) {
+    app.piWebChat = runtime;
+  }
 
   return (): void => {
     disposables.dispose();
@@ -154,35 +161,55 @@ function bindMountedComposer(
 ): void {
   const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
   const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
-  if (!textarea || !sendButton) return;
+  const attachButton = composerSurface.querySelector<HTMLButtonElement>(".attach-btn");
+  const fileInput = composerSurface.querySelector<HTMLInputElement>("[data-file-input]");
+  const attachmentChips = composerSurface.querySelector<HTMLElement>(".attach-chips");
+
+  if (!textarea || !sendButton) {
+    return;
+  }
+
+  let selectedAttachments: FileAttachment[] = [];
 
   const sync = (): void => {
     const value = textarea.value;
     sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
   };
-  let activePoll: ReturnType<typeof globalThis.setInterval> | undefined;
-  disposables.add({ remove: () => { if (activePoll) globalThis.clearInterval(activePoll); } });
+  const syncAttachments = (): void => {
+    if (!attachmentChips) {
+      return;
+    }
 
+    renderAttachmentChips(attachmentChips, selectedAttachments.map((attachment): string => {
+      return attachment.name || "attachment";
+    }));
+  };
   const submit = async (event?: Event): Promise<void> => {
     event?.preventDefault();
     event?.stopImmediatePropagation();
     const text = textarea.value.trim();
     sync();
-    if (!text) return;
+
+    if (!text) {
+      return;
+    }
+
+    const attachments = [...selectedAttachments];
     sendButton.disabled = true;
-    activePoll = globalThis.setInterval(() => {
-      void refreshMountedBackendChatState(context, chatSurface, store, mountedState, store.activeSessionId);
-    }, MOUNTED_CHAT_POLL_MS);
+
     try {
-      const response = await submitPromptToPluginBackend(context, text, [], store.activeSessionId);
-      const messages = applyBackendResponseToMountedStore(context, store, response, "submitPrompt");
-      renderMountedBackendMessages(chatSurface, messages);
+      publishChatInputSubmitted(text, attachments);
+      await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+      selectedAttachments = [];
+      syncAttachments();
       textarea.value = "";
+
+      if (fileInput) {
+        fileInput.value = "";
+      }
     } catch (error) {
-      renderMountedBackendMessages(chatSurface, [{ id: id(), role: "system", text: `prompt failed: ${errorText(error)}`, createdAt: Date.now() }]);
+      renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)]);
     } finally {
-      if (activePoll) globalThis.clearInterval(activePoll);
-      activePoll = undefined;
       sendButton.disabled = false;
       sync();
     }
@@ -191,9 +218,56 @@ function bindMountedComposer(
   disposables.listen(textarea, "input", sync);
   disposables.listen(textarea, "keydown", (event) => {
     const keyEvent = event as KeyboardEvent;
-    if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) void submit(keyEvent);
+
+    if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) {
+      void submit(keyEvent);
+    }
   });
-  disposables.listen(sendButton, "click", (event) => { void submit(event); });
+  disposables.listen(sendButton, "click", (event) => {
+    void submit(event);
+  });
+
+  if (attachButton && fileInput) {
+    disposables.listen(attachButton, "click", () => fileInput.click());
+    disposables.listen(fileInput, "change", () => {
+      void loadMountedLocalAttachments(fileInput, (attachments: FileAttachment[]): void => {
+        selectedAttachments = attachments;
+        syncAttachments();
+      });
+    });
+  }
+}
+
+function mountedPromptErrorMessage(error: unknown): ChatMessage {
+  return {
+    id: id(),
+    role: "system",
+    text: `prompt failed: ${errorText(error)}`,
+    createdAt: Date.now(),
+  };
+}
+
+async function loadMountedLocalAttachments(
+  fileInput: HTMLInputElement,
+  onLoaded: (attachments: FileAttachment[]) => void,
+): Promise<void> {
+  const files = Array.from(fileInput.files || []).slice(0, MAX_LOCAL_ATTACHMENTS);
+  const attachments: FileAttachment[] = [];
+
+  for (const file of files) {
+    if (file.size > MAX_LOCAL_ATTACHMENT_BYTES) {
+      continue;
+    }
+
+    attachments.push({
+      name: file.name,
+      size: file.size,
+      content: await file.text(),
+      mimeType: file.type || undefined,
+    });
+  }
+
+  onLoaded(attachments);
 }
 
 export function createChannels(pi: PiWebSubjects): Channels {
@@ -286,6 +360,16 @@ function publishSidebarEvent(context: PluginContext, type: string, detail: JsonR
   const sidebarEvents = context.app?.piWebSidebar?.channels?.events$ || globalThis.piWebSidebar?.channels?.events$;
   sidebarEvents?.next(event);
   globalThis.piWeb?.subject<SidebarActionEvent>(SIDEBAR_EVENT_CHANNEL).next(event);
+}
+
+function publishSidebarActiveSession(context: PluginContext, sessionId: string, reason: string): void {
+  const workspaceId = context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(context);
+  const detail: JsonRecord = { reason, sessionId, workspaceId };
+
+  globalThis.piWeb?.behaviorSubject<string | null>("session.activeId", sessionId).next(sessionId);
+  globalThis.piWeb?.subject<JsonRecord>("session.changed").next({ sessionId, workspaceId, reason });
+  publishSidebarEvent(context, "active.start", detail);
+  publishSidebarEvent(context, "session.created", detail);
 }
 
 function storeString(key: string, value: string): void {
@@ -404,30 +488,98 @@ async function submitPromptWithStreaming(state: State, dom: ChatDom, text: strin
   }
 
   const assistant = ensureStreamingAssistant(state.store);
+  await consumeStreamingRun(state.context, state.store, start.runId, assistant, (): void => render(state, dom));
+  await refreshBackendChatState(state, dom);
+}
+
+async function submitMountedPromptWithStreaming(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+  text: string,
+  attachments: FileAttachment[],
+): Promise<void> {
+  const pendingUserMessage: ChatMessage = {
+    id: id(),
+    role: "user",
+    text,
+    attachments: sanitizeAttachmentsForStorage(attachments),
+    createdAt: Date.now(),
+  };
+  const session = activeSession(store);
+  session.messages.push(pendingUserMessage);
+  session.updatedAt = Date.now();
+  saveStore(store);
+  renderMountedBackendMessages(chatSurface, session.messages);
+
+  const start = await startStreamingPrompt(context, text, attachments, store.activeSessionId);
+
+  if (typeof start.activeSessionId === "string" && start.activeSessionId) {
+    const previousSessionId = store.activeSessionId;
+    const active = switchMountedStoreToSession(store, start.activeSessionId);
+
+    if (previousSessionId !== active.id && !active.messages.some((message) => message.id === pendingUserMessage.id)) {
+      active.messages.push(pendingUserMessage);
+      active.updatedAt = Date.now();
+    }
+
+    persistSidebarSelection(context, {
+      sessionId: start.activeSessionId,
+      workspaceId: context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(context) || undefined,
+    });
+    publishSidebarEvent(context, "chat-session", { reason: "startPrompt", sessionId: start.activeSessionId });
+    publishSidebarActiveSession(context, start.activeSessionId, "startPrompt");
+  }
+
+  if (typeof start.runId !== "string" || !start.runId) {
+    const response = await submitPromptToPluginBackend(context, text, attachments, store.activeSessionId);
+    const messages = applyBackendResponseToMountedStore(context, store, response, "submitPrompt");
+    renderMountedBackendMessages(chatSurface, messages);
+    return;
+  }
+
+  const assistant = ensureStreamingAssistant(store);
+  await consumeStreamingRun(context, store, start.runId, assistant, (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages));
+  await refreshMountedBackendChatState(context, chatSurface, store, mountedState, store.activeSessionId);
+}
+
+async function consumeStreamingRun(
+  context: PluginContext,
+  store: ChatStore,
+  runId: string,
+  assistant: ChatMessage,
+  renderCurrent: () => void,
+): Promise<void> {
   let cursor = 0;
   let streaming = true;
-  render(state, dom);
+  renderCurrent();
 
   try {
     while (streaming) {
       await delay(120);
-      const response = await backendCall(state.context, "streamEvents", { runId: start.runId, cursor });
+      const response = await backendCall(context, "streamEvents", { runId, cursor });
       const events = Array.isArray(response.events) ? response.events.filter(isChatEvent) : [];
       cursor = typeof response.cursor === "number" ? response.cursor : cursor;
       streaming = response.isStreaming === true;
       applyChatEvents(assistant, events);
       assistant.streaming = streaming;
-      activeSession(state.store).updatedAt = Date.now();
-      saveStore(state.store);
-      render(state, dom);
+      activeSession(store).updatedAt = Date.now();
+      saveStore(store);
+      renderCurrent();
     }
   } finally {
     assistant.streaming = false;
-    saveStore(state.store);
-    render(state, dom);
+    saveStore(store);
+    renderCurrent();
   }
+}
 
-  await refreshBackendChatState(state, dom);
+function publishChatInputSubmitted(text: string, attachments: FileAttachment[]): void {
+  globalThis.piWeb?.subject<ChatInputSubmitted>("chat.input.submitted").next({
+    text,
+    attachments: sanitizeAttachmentsForStorage(attachments) || [],
+  });
 }
 
 async function startStreamingPrompt(context: PluginContext, text: string, attachments: FileAttachment[], sessionId: string): Promise<BackendResponse> {
@@ -560,12 +712,20 @@ function applyBackendResponseToMountedStore(
   const responseMessages = Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : [];
 
   if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+    const previousSessionId = store.activeSessionId;
     switchMountedStoreToSession(store, response.activeSessionId);
     persistSidebarSelection(context, {
       sessionId: response.activeSessionId,
       workspaceId: context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(context) || undefined,
     });
-    publishSidebarEvent(context, "chat-session", { reason, sessionId: response.activeSessionId });
+
+    if (reason !== "chatState" || previousSessionId !== response.activeSessionId) {
+      publishSidebarEvent(context, "chat-session", { reason, sessionId: response.activeSessionId });
+    }
+
+    if (reason !== "chatState") {
+      publishSidebarActiveSession(context, response.activeSessionId, reason);
+    }
   }
 
   const session = activeSession(store);
@@ -606,14 +766,39 @@ function bindMountedSidebarSelection(
     void refreshMountedBackendChatState(context, chatSurface, store, mountedState, selected.sessionId);
   };
 
+  const onSidebarEvent = (event: SidebarActionEvent): void => {
+    const selected = selectedSessionFromSidebarEvent(context, event);
+
+    if (selected) {
+      onSelected(selected);
+    }
+  };
   const sidebarSelection = context.app?.piWebSidebar?.channels?.selectedSession$ || globalThis.piWebSidebar?.channels?.selectedSession$;
+  const sidebarEvents = context.app?.piWebSidebar?.channels?.events$ || globalThis.piWebSidebar?.channels?.events$;
 
   if (sidebarSelection) {
     disposables.add(sidebarSelection.subscribe(onSelected));
   }
 
+  if (sidebarEvents) {
+    disposables.add(sidebarEvents.subscribe(onSidebarEvent));
+  }
+
+  if (context.app) {
+    disposables.listen(context.app, "pi-web-sidebar:session-created", (event: Event): void => {
+      const detail = (event as CustomEvent<JsonRecord>).detail || {};
+      const sessionId = typeof detail.sessionId === "string" ? detail.sessionId : "";
+      const workspaceId = typeof detail.workspaceId === "string" ? detail.workspaceId : "";
+
+      if (sessionId) {
+        onSelected({ sessionId, workspaceId: workspaceId || undefined });
+      }
+    });
+  }
+
   if (globalThis.piWeb) {
     disposables.add(globalThis.piWeb.behaviorSubject<SidebarSelectedSession | null>(SIDEBAR_SELECTED_SESSION_CHANNEL, readSidebarSelection(context)).subscribe(onSelected));
+    disposables.add(globalThis.piWeb.subject<SidebarActionEvent>(SIDEBAR_EVENT_CHANNEL).subscribe(onSidebarEvent));
     disposables.add(globalThis.piWeb.behaviorSubject<string | null>("session.activeId", null).subscribe((sessionId: string | null): void => {
       if (!sessionId) {
         return;
@@ -622,6 +807,28 @@ function bindMountedSidebarSelection(
       onSelected({ sessionId, workspaceId: context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || undefined });
     }));
   }
+}
+
+function selectedSessionFromSidebarEvent(context: PluginContext, event: SidebarActionEvent): SidebarSelectedSession | null {
+  if (!isSidebarSessionSelectionEvent(event.type)) {
+    return null;
+  }
+
+  const detail = event.detail || {};
+  const sessionId = typeof detail.sessionId === "string" ? detail.sessionId : event.snapshot?.activeSessionId || "";
+  const workspaceId = typeof detail.workspaceId === "string"
+    ? detail.workspaceId
+    : event.snapshot?.activeWorkspaceId || context.app?.dataset.activeWorkspaceId || "";
+
+  if (!sessionId) {
+    return null;
+  }
+
+  return { sessionId, workspaceId: workspaceId || undefined };
+}
+
+function isSidebarSessionSelectionEvent(type: string): boolean {
+  return type === "session.selected" || type === "session.created" || type === "new-session" || type === "active.start";
 }
 
 function switchMountedStoreToSession(store: ChatStore, sessionId: string): ChatSession {
@@ -639,18 +846,70 @@ function switchMountedStoreToSession(store: ChatStore, sessionId: string): ChatS
 
 function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[]): void {
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
-  container.replaceChildren(...messages.map((message) => {
-    const item = document.createElement("article");
-    item.className = `transcript-item pi-web-chat-message pi-web-chat-message-${message.role}`;
-    const role = document.createElement("div");
-    role.className = "pi-web-chat-message-role";
-    role.textContent = message.role;
-    const body = document.createElement("pre");
-    body.className = "pi-web-chat-message-body";
-    body.textContent = message.text;
-    item.append(role, body);
-    return item;
-  }));
+  container.replaceChildren(...messages.map(renderMountedBackendMessage));
+}
+
+function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
+  const item = document.createElement("article");
+  item.className = "transcript-item";
+  item.dataset.messageId = message.id;
+
+  const row = document.createElement("div");
+  row.className = "msg";
+
+  const prefix = document.createElement("span");
+  prefix.className = `prefix ${mountedMessagePrefixClass(message.role)}`;
+  prefix.textContent = mountedMessagePrefix(message.role);
+
+  const body = document.createElement("pre");
+  body.className = "body";
+  body.textContent = message.text;
+
+  row.append(prefix, body);
+  item.append(row);
+
+  if (message.thinking) {
+    item.append(renderMountedDetail("think", "thinking", message.thinking, message.streaming === true));
+  }
+
+  for (const tool of message.toolCalls || []) {
+    item.append(renderMountedDetail("tool", `${tool.name} · ${tool.status}`, tool.text || JSON.stringify(tool.args || {}, null, 2), tool.status === "running"));
+  }
+
+  if (message.streaming) {
+    item.dataset.streaming = "true";
+  }
+
+  return item;
+}
+
+function renderMountedDetail(prefixClass: string, label: string, text: string, open: boolean): HTMLElement {
+  const details = document.createElement("details");
+  details.className = `msg-detail ${prefixClass}`;
+  details.open = open;
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  const body = document.createElement("pre");
+  body.className = "body";
+  body.textContent = text;
+  details.append(summary, body);
+  return details;
+}
+
+function mountedMessagePrefix(role: ChatMessage["role"]): string {
+  if (role === "assistant") {
+    return "pi";
+  }
+
+  if (role === "system") {
+    return "sys";
+  }
+
+  return role;
+}
+
+function mountedMessagePrefixClass(role: ChatMessage["role"]): string {
+  return role === "assistant" ? "pi" : role;
 }
 
 async function runShell(state: State, dom: ChatDom, command: string): Promise<void> {

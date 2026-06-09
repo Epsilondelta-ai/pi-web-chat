@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -200,6 +202,13 @@ func readSkillDescription(path string) string {
 
 func main() {
 	method := arg(1)
+	if method == "__streamRunner" {
+		if err := runGoStreamRunner(os.Args[2:]); err != nil {
+			fail(err)
+		}
+		return
+	}
+
 	workspaceRoot := arg(2)
 	input, err := readInput(os.Stdin)
 	if err != nil {
@@ -266,6 +275,12 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 		return readPiChatState(workspaceRoot, input)
 	case "submitPrompt":
 		return submitPiPrompt(workspaceRoot, input)
+	case "startPrompt":
+		return startPiPrompt(workspaceRoot, input)
+	case "streamEvents":
+		return streamPiEvents(input)
+	case "abortPrompt":
+		return abortPiPrompt(input)
 	case "searchFiles":
 		files, truncated, err := searchWorkspaceFiles(workspaceRoot, stringInput(input, "query"), intInput(input, "limit", maxSearchResults))
 		return map[string]any{"files": files, "truncated": truncated}, err
@@ -355,6 +370,387 @@ func submitPiPrompt(workspaceRoot string, input request) (any, error) {
 		sessionID = parsedID
 	}
 	return map[string]any{"accepted": true, "activeSessionId": sessionID, "messages": messages, "isStreaming": false}, nil
+}
+
+type streamRunState struct {
+	RunID           string `json:"runId"`
+	ActiveSessionID string `json:"activeSessionId"`
+	SessionFile     string `json:"sessionFile"`
+	EventsPath      string `json:"eventsPath"`
+	PromptPath      string `json:"promptPath"`
+	Status          string `json:"status"`
+	PID             int    `json:"pid"`
+	ChildPID        int    `json:"childPid"`
+	Cursor          int    `json:"cursor"`
+	CreatedAt       int64  `json:"createdAt"`
+	UpdatedAt       int64  `json:"updatedAt"`
+}
+
+type streamEvent map[string]any
+
+func startPiPrompt(workspaceRoot string, input request) (any, error) {
+	root, err := resolveRoot(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	text := mergePromptAttachments(stringInput(input, "text"), input["attachments"])
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("text is required")
+	}
+
+	sessionID := strings.TrimSpace(stringInput(input, "sessionId"))
+	sessionFile := ""
+	if sessionID != "" {
+		if path, ok := piSessionFileByID(root, sessionID); ok {
+			sessionFile = path
+		} else {
+			sessionID = ""
+		}
+	}
+	if sessionFile == "" {
+		var createErr error
+		sessionID, sessionFile, createErr = createPiSessionFile(root)
+		if createErr != nil {
+			return nil, createErr
+		}
+	}
+
+	runID := createSessionID()
+	runDir := goStreamRunDir()
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	statePath := goStreamStatePath(runID)
+	eventsPath := filepath.Join(runDir, runID+".events.jsonl")
+	promptPath := filepath.Join(runDir, runID+".prompt.txt")
+	if err := os.WriteFile(promptPath, []byte(text), 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		return nil, err
+	}
+
+	state := streamRunState{
+		RunID:           runID,
+		ActiveSessionID: sessionID,
+		SessionFile:     sessionFile,
+		EventsPath:      eventsPath,
+		PromptPath:      promptPath,
+		Status:          "starting",
+		CreatedAt:       time.Now().UnixMilli(),
+		UpdatedAt:       time.Now().UnixMilli(),
+	}
+	if err := writeGoStreamState(statePath, state); err != nil {
+		return nil, err
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(executable, "__streamRunner", runID, root, sessionFile, statePath, eventsPath, promptPath)
+	cmd.Dir = root
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	state.PID = cmd.Process.Pid
+	state.Status = "running"
+	state.UpdatedAt = time.Now().UnixMilli()
+	if err := writeGoStreamState(statePath, state); err != nil {
+		return nil, err
+	}
+	_ = cmd.Process.Release()
+
+	return map[string]any{"accepted": true, "runId": runID, "activeSessionId": sessionID, "isStreaming": true}, nil
+}
+
+func streamPiEvents(input request) (any, error) {
+	state, err := readGoStreamState(stringInput(input, "runId"))
+	if err != nil {
+		return nil, err
+	}
+	cursor := intInput(input, "cursor", 0)
+	events, nextCursor, err := readGoStreamEvents(state.EventsPath, cursor)
+	if err != nil {
+		return nil, err
+	}
+	streaming := state.Status == "running" || state.Status == "starting"
+	return map[string]any{
+		"runId":           state.RunID,
+		"activeSessionId": state.ActiveSessionID,
+		"events":          events,
+		"cursor":          nextCursor,
+		"isStreaming":     streaming,
+	}, nil
+}
+
+func abortPiPrompt(input request) (any, error) {
+	state, err := readGoStreamState(stringInput(input, "runId"))
+	if err != nil {
+		return nil, err
+	}
+	if state.ChildPID > 0 {
+		if process, findErr := os.FindProcess(state.ChildPID); findErr == nil {
+			_ = process.Signal(syscall.SIGTERM)
+		}
+	}
+
+	if state.PID > 0 {
+		if process, findErr := os.FindProcess(state.PID); findErr == nil {
+			_ = process.Signal(syscall.SIGTERM)
+		}
+	}
+	state.Status = "aborted"
+	state.UpdatedAt = time.Now().UnixMilli()
+	_ = os.Remove(state.PromptPath)
+	if err := writeGoStreamState(goStreamStatePath(state.RunID), state); err != nil {
+		return nil, err
+	}
+	return map[string]any{"aborted": true, "runId": state.RunID}, nil
+}
+
+func runGoStreamRunner(args []string) error {
+	if len(args) < 6 {
+		return errors.New("stream runner arguments are required")
+	}
+	runID, root, sessionFile, statePath, eventsPath, promptPath := args[0], args[1], args[2], args[3], args[4], args[5]
+	state, err := readGoStreamState(runID)
+	if err == nil {
+		state.Status = "running"
+		state.UpdatedAt = time.Now().UnixMilli()
+		_ = writeGoStreamState(statePath, state)
+	}
+
+	textBytes, err := os.ReadFile(promptPath)
+	if err != nil {
+		completeGoStreamRunWithError(eventsPath, statePath, err)
+		return err
+	}
+	cmd := exec.Command("pi", "--session", sessionFile, "--mode", "rpc")
+	cmd.Dir = root
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		completeGoStreamRunWithError(eventsPath, statePath, err)
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		completeGoStreamRunWithError(eventsPath, statePath, err)
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		completeGoStreamRunWithError(eventsPath, statePath, err)
+		return err
+	}
+	state, err = readGoStreamState(runID)
+	if err == nil {
+		state.ChildPID = cmd.Process.Pid
+		state.Status = "running"
+		state.UpdatedAt = time.Now().UnixMilli()
+		_ = writeGoStreamState(statePath, state)
+	}
+	emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.start"})
+	payload, err := json.Marshal(map[string]any{"type": "prompt", "message": string(textBytes)})
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+	_, writeErr := stdin.Write(append(payload, '\n'))
+	_ = stdin.Close()
+	if writeErr != nil {
+		_ = cmd.Process.Kill()
+		return writeErr
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	buffer := make([]byte, 0, 64*1024)
+	scanner.Buffer(buffer, maxOutputBytes)
+	for scanner.Scan() {
+		emitMappedPiRPCLine(eventsPath, statePath, scanner.Bytes())
+	}
+	waitErr := cmd.Wait()
+	if scanErr := scanner.Err(); scanErr != nil {
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "error", "message": scanErr.Error()})
+	}
+	if waitErr != nil {
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "error", "message": waitErr.Error()})
+	}
+	emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.end"})
+	_ = os.Remove(promptPath)
+	return nil
+}
+
+func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) {
+	var event map[string]any
+	if err := json.Unmarshal(line, &event); err != nil {
+		return
+	}
+	typeName, _ := event["type"].(string)
+	switch typeName {
+	case "message_update":
+		if mapped := mapAssistantMessageEvent(event["assistantMessageEvent"]); mapped != nil {
+			emitGoStreamEvent(eventsPath, statePath, mapped)
+		}
+	case "tool_execution_start":
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{
+			"type":       "tool.start",
+			"toolCallId": stringFromAny(event["toolCallId"]),
+			"toolName":   stringFromAny(event["toolName"]),
+			"args":       event["args"],
+		})
+	case "tool_execution_update":
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{
+			"type":       "tool.delta",
+			"toolCallId": stringFromAny(event["toolCallId"]),
+			"toolName":   stringFromAny(event["toolName"]),
+			"delta":      textFromAny(event["partialResult"]),
+		})
+	case "tool_execution_end":
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{
+			"type":       "tool.end",
+			"toolCallId": stringFromAny(event["toolCallId"]),
+			"toolName":   stringFromAny(event["toolName"]),
+			"result":     textFromAny(event["result"]),
+		})
+	}
+}
+
+func mapAssistantMessageEvent(raw any) streamEvent {
+	event, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	typeName, _ := event["type"].(string)
+	delta, _ := event["delta"].(string)
+	if delta == "" {
+		return nil
+	}
+	if typeName == "text_delta" {
+		return streamEvent{"type": "text.delta", "delta": delta}
+	}
+	if typeName == "thinking_delta" {
+		return streamEvent{"type": "thinking.delta", "delta": delta}
+	}
+	return nil
+}
+
+func completeGoStreamRunWithError(eventsPath, statePath string, err error) {
+	emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "error", "message": err.Error()})
+	emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.end"})
+}
+
+func emitGoStreamEvent(eventsPath, statePath string, event streamEvent) {
+	state, err := readGoStreamStateByPath(statePath)
+	if err != nil {
+		return
+	}
+	state.Cursor++
+	state.UpdatedAt = time.Now().UnixMilli()
+	if event["type"] == "run.end" || event["type"] == "error" {
+		state.Status = "completed"
+	}
+	event["seq"] = state.Cursor
+	event["time"] = time.Now().UnixMilli()
+	line, err := json.Marshal(event)
+	if err == nil {
+		file, openErr := os.OpenFile(eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if openErr == nil {
+			_, _ = file.Write(append(line, '\n'))
+			_ = file.Close()
+		}
+	}
+	_ = writeGoStreamState(statePath, state)
+}
+
+func readGoStreamEvents(path string, cursor int) ([]streamEvent, int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, cursor, err
+	}
+	events := []streamEvent{}
+	nextCursor := cursor
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var event streamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			continue
+		}
+		seq := intFromAny(event["seq"])
+		if seq > cursor {
+			events = append(events, event)
+		}
+		if seq > nextCursor {
+			nextCursor = seq
+		}
+	}
+	return events, nextCursor, nil
+}
+
+func readGoStreamState(runID string) (streamRunState, error) {
+	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") || strings.Contains(runID, "..") || runID == "" {
+		return streamRunState{}, errors.New("invalid runId")
+	}
+	return readGoStreamStateByPath(goStreamStatePath(runID))
+}
+
+func readGoStreamStateByPath(path string) (streamRunState, error) {
+	var state streamRunState
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return state, err
+	}
+	return state, json.Unmarshal(data, &state)
+}
+
+func writeGoStreamState(path string, state streamRunState) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+func goStreamRunDir() string {
+	return filepath.Join(os.TempDir(), "pi-web-chat-runs-go")
+}
+
+func goStreamStatePath(runID string) string {
+	return filepath.Join(goStreamRunDir(), runID+".json")
+}
+
+func stringFromAny(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case int:
+		return typed
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
+}
+
+func textFromAny(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func mergePromptAttachments(text string, raw any) string {

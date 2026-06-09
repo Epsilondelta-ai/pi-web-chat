@@ -277,6 +277,10 @@ test("mounted submit persists backend session and emits sidebar-compatible event
     const cleanup = activate({
       app,
       backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return {};
+        }
+
         if (method === "submitPrompt") {
           return { activeSessionId: "new-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
         }
@@ -302,14 +306,101 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
+test("mounted submit streams with startPrompt and notifies sidebar refresh channel", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const submitted = [];
+    globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "stream-session", runId: "run-1", isStreaming: true };
+        }
+
+        if (method === "streamEvents") {
+          return {
+            cursor: 1,
+            events: [{ type: "text.delta", delta: "streamed answer" }],
+            isStreaming: false,
+          };
+        }
+
+        if (method === "chatState" && input.data.sessionId === "stream-session") {
+          return { activeSessionId: "stream-session", messages: [{ id: "a1", role: "assistant", text: "final answer", createdAt: 2 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick(160);
+    await tick();
+
+    assert.deepEqual(submitted.map((event) => event.text), ["stream me"]);
+    assert.ok(backendCalls.some((call) => call.method === "startPrompt" && call.input.data.text === "stream me"));
+    assert.ok(backendCalls.some((call) => call.method === "streamEvents" && call.input.data.runId === "run-1"));
+    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
+    assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
+    cleanup();
+  });
+});
+
+test("mounted activation follows sidebar new-session DOM event", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.sessionId === "created-session") {
+          return { activeSessionId: "created-session", messages: [{ id: "m1", role: "assistant", text: "created transcript", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    app.dispatchEvent(new window.CustomEvent("pi-web-sidebar:session-created", {
+      bubbles: true,
+      detail: { sessionId: "created-session", workspaceId: "workspace-created" },
+    }));
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "created-session");
+    assert.equal(app.dataset.activeWorkspaceId, "workspace-created");
+    assert.match(window.document.querySelector(".term-inner").textContent, /created transcript/);
+    cleanup();
+  });
+});
+
 test("mounted submit gracefully works without sidebar plugin", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     const cleanup = activate({
       app,
       backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return {};
+        }
+
         if (method === "submitPrompt") {
-          return { activeSessionId: "solo-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+          return {
+            activeSessionId: "solo-session",
+            messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }],
+          };
         }
 
         return {};
@@ -328,6 +419,59 @@ test("mounted submit gracefully works without sidebar plugin", async () => {
   });
 });
 
+test("mounted attach button sends selected files with prompt", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const submitted = [];
+    globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: "attached-session",
+            messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const fileInput = window.document.querySelector("[data-file-input]");
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new window.File(["hello"], "note.txt", { type: "text/plain" })],
+    });
+    fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await tick();
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "use attachment";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
+    const stored = window.localStorage.getItem("pi-web-chat.sessions.v1") || "";
+
+    assert.equal(submitCall.input.data.attachments[0].name, "note.txt");
+    assert.equal(submitCall.input.data.attachments[0].content, "hello");
+    assert.equal(submitted[0].attachments[0].name, "note.txt");
+    assert.equal(submitted[0].attachments[0].content, undefined);
+    assert.equal(stored.includes("hello"), false);
+    assert.equal(window.document.querySelector(".attach-chips").hidden, true);
+    cleanup();
+  });
+});
+
 function createMount(window, app) {
   return {
     chat: (element) => {
@@ -341,8 +485,8 @@ function createMount(window, app) {
   };
 }
 
-function tick() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+function tick(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function withWindow(callback) {

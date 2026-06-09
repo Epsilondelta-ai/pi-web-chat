@@ -6,10 +6,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const backend = new URL("../backend.js", import.meta.url).pathname;
+const backendBinary = new URL(`../bin/${process.platform}-${process.arch === "x64" ? "amd64" : process.arch}/pi-web-chat-backend`, import.meta.url).pathname;
 
 function runBackend(script, method, workspaceRoot, data = {}, env = {}) {
+  return runBackendCommand(process.execPath, [script, method, workspaceRoot], data, env);
+}
+
+function runBackendBinary(method, workspaceRoot, data = {}, env = {}) {
+  return runBackendCommand(backendBinary, [method, workspaceRoot], data, env);
+}
+
+function runBackendCommand(command, args, data = {}, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script, method, workspaceRoot], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -133,6 +142,125 @@ process.stdin.on('end', () => {
   assert.ok(types.includes("tool.end"));
   assert.equal(stream.isStreaming, false);
   assert.equal(events.some((event) => event.type === "run.end"), true);
+});
+
+test("backend wrapper completes stream when pi is unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const env = { HOME: home, PATH: join(home, "missing-bin") };
+  const start = await callBackend("startPrompt", root, { text: "hello" }, env);
+
+  let stream = { events: [], cursor: 0, isStreaming: true };
+  for (let index = 0; index < 20 && stream.isStreaming; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stream = await callBackend("streamEvents", root, { runId: start.runId, cursor: stream.cursor }, env);
+  }
+
+  assert.equal(stream.isStreaming, false);
+  assert.ok(stream.events.some((event) => event.type === "error"));
+});
+
+test("compiled backend exposes streaming methods", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'go stream' } }));
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "hello" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+  assert.equal(started.accepted, true);
+  assert.ok(started.runId);
+
+  let stream = { events: [], cursor: 0, isStreaming: true };
+  for (let index = 0; index < 20 && stream.isStreaming; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const result = await runBackendBinary(
+      "streamEvents",
+      root,
+      { data: { runId: started.runId, cursor: stream.cursor } },
+      env,
+    );
+    assert.equal(result.code, 0, result.stderr);
+    stream = JSON.parse(result.stdout);
+  }
+
+  assert.equal(stream.isStreaming, false);
+});
+
+test("compiled backend completes stream when pi is unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const env = { HOME: home, PATH: join(home, "missing-bin") };
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "hello" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+
+  let stream = { events: [], cursor: 0, isStreaming: true };
+  for (let index = 0; index < 20 && stream.isStreaming; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const result = await runBackendBinary(
+      "streamEvents",
+      root,
+      { data: { runId: started.runId, cursor: stream.cursor } },
+      env,
+    );
+    assert.equal(result.code, 0, result.stderr);
+    stream = JSON.parse(result.stdout);
+  }
+
+  assert.equal(stream.isStreaming, false);
+  assert.ok(stream.events.some((event) => event.type === "error"));
+});
+
+test("compiled backend abortPrompt terminates the spawned pi child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const marker = join(home, "pi-aborted.txt");
+  const ready = join(home, "pi-ready.txt");
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+process.on('SIGTERM', () => {
+  fs.writeFileSync(process.env.PI_ABORT_MARKER, 'aborted');
+  process.exit(0);
+});
+fs.writeFileSync(process.env.PI_READY_MARKER, 'ready');
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_ABORT_MARKER: marker, PI_READY_MARKER: ready };
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "abort me" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+
+  let readyText = "";
+  for (let index = 0; index < 20 && readyText !== "ready"; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    readyText = await readFile(ready, "utf8").catch(() => "");
+  }
+  assert.equal(readyText, "ready");
+
+  const abort = await runBackendBinary("abortPrompt", root, { data: { runId: started.runId } }, env);
+  assert.equal(abort.code, 0, abort.stderr);
+
+  let markerText = "";
+  for (let index = 0; index < 20 && markerText !== "aborted"; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    markerText = await readFile(marker, "utf8").catch(() => "");
+  }
+  assert.equal(markerText, "aborted");
 });
 
 test("abortPrompt terminates the spawned pi child", async () => {

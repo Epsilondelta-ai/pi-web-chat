@@ -188,6 +188,17 @@ function runStreamRunnerProcess(args, resolve) {
   writeJsonAtomic(statePath, { ...(safeReadJson(statePath) || {}), childPid: proc.pid, updatedAt: Date.now() });
   let buffer = "";
   let aborted = false;
+  let settled = false;
+  const finish = (status, code = 0) => {
+    if (settled) return;
+    settled = true;
+    process.removeListener("SIGTERM", abort);
+    process.removeListener("SIGINT", abort);
+    emit({ type: "run.end", runId, exitCode: code });
+    const current = safeReadJson(statePath) || {};
+    writeJsonAtomic(statePath, { ...current, status, updatedAt: Date.now(), completedAt: Date.now() });
+    resolve(undefined);
+  };
   const abort = () => {
     aborted = true;
     try {
@@ -213,16 +224,16 @@ function runStreamRunnerProcess(args, resolve) {
     }
   });
   proc.stderr.on("data", (chunk) => emit({ type: "error", message: chunk.toString("utf8") }));
+  proc.on("error", (error) => {
+    emit({ type: "error", message: error.message });
+    finish("complete", 1);
+  });
   proc.on("close", (code) => {
-    process.removeListener("SIGTERM", abort);
-    process.removeListener("SIGINT", abort);
-    emit({ type: "run.end", runId, exitCode: code ?? 0 });
     const current = safeReadJson(statePath) || {};
     const status = aborted || current.status === "aborted" ? "aborted" : "complete";
-    writeJsonAtomic(statePath, { ...current, status, updatedAt: Date.now(), completedAt: Date.now() });
-    resolve(undefined);
+    finish(status, code ?? 0);
   });
-  proc.stdin.end(`${JSON.stringify({ id: runId, type: "prompt", message: prompt })}\n`);
+  proc.stdin?.end(`${JSON.stringify({ id: runId, type: "prompt", message: prompt })}\n`);
 }
 
 function mapRpcLine(line, emit) {
