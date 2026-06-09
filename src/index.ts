@@ -958,21 +958,34 @@ function renderMountedThinking(text: string): HTMLElement {
 }
 
 function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
-  const details = document.createElement("details");
-  details.className = "tool-card";
-  details.dataset.tool = tool.name || "tool";
-  details.dataset.status = tool.status;
+  const card = document.createElement("div");
+  card.className = "tool-card";
+  card.dataset.tool = tool.name || "tool";
+  card.dataset.status = tool.status;
+  card.dataset.collapsed = "true";
 
-  const summary = document.createElement("summary");
-  summary.className = "tc-head";
-  summary.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "tc-head";
+  head.dataset.action = "toggle-tool";
+  head.setAttribute("aria-expanded", "false");
+  head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
 
   const body = document.createElement("pre");
   body.className = "tc-body";
+  body.hidden = true;
   body.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
 
-  details.append(summary, body);
-  return details;
+  head.addEventListener("click", () => toggleMountedToolCard(card, head, body));
+  card.append(head, body);
+  return card;
+}
+
+function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, body: HTMLElement): void {
+  const collapsed = body.hidden === false;
+  body.hidden = collapsed;
+  card.dataset.collapsed = collapsed ? "true" : "false";
+  head.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
 function toolGlyph(tool: ChatToolCall): HTMLElement {

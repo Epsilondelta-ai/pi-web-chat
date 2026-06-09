@@ -485,20 +485,22 @@ export function pluginStyleText(): string {
       grid-template-columns: 18px auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 8px;
+      width: 100%;
       padding: 6px var(--space-2, 8px);
       background: var(--bg-2, #111111);
+      border: 0;
       border-bottom: 1px solid var(--border-dim, #1f1f1f);
+      border-radius: 0;
+      color: inherit;
       cursor: pointer;
+      font: inherit;
       list-style: none;
+      text-align: left;
       user-select: none;
     }
 
-    .pi-web-chat-surface .tool-card:not([open]) .tc-head {
+    .pi-web-chat-surface .tool-card[data-collapsed="true"] .tc-head {
       border-bottom: 0;
-    }
-
-    .pi-web-chat-surface .tool-card .tc-head::-webkit-details-marker {
-      display: none;
     }
 
     .pi-web-chat-surface .tool-card .tc-head:hover {
@@ -563,7 +565,7 @@ export function pluginStyleText(): string {
       padding-right: 4px;
     }
 
-    .pi-web-chat-surface .tool-card[open] .tc-caret {
+    .pi-web-chat-surface .tool-card[data-collapsed="false"] .tc-caret {
       transform: rotate(90deg);
     }
 

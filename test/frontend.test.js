@@ -395,7 +395,8 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
 
     const cards = [...window.document.querySelectorAll(".tool-card")];
     assert.equal(cards.length, 4);
-    assert.equal(cards.every((card) => card.open === false), true);
+    assert.equal(cards.every((card) => card.dataset.collapsed === "true"), true);
+    assert.equal(cards.every((card) => card.querySelector(".tc-body").hidden === true), true);
     assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
     assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
     assert.equal(cards[1].querySelector(".tc-args").textContent, JSON.stringify({ command: "git status" }));
@@ -406,6 +407,15 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards[3].querySelector(".tc-meta .ok"), null);
     assert.equal(window.document.querySelector(".thinking-block .label").textContent, "THINKING");
     assert.match(window.document.querySelector(".thinking-block .body").textContent, /Evaluating git status/);
+
+    cards[0].querySelector(".tc-head").click();
+    assert.equal(cards[0].dataset.collapsed, "false");
+    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "true");
+    assert.equal(cards[0].querySelector(".tc-body").hidden, false);
+    cards[0].querySelector(".tc-head").click();
+    assert.equal(cards[0].dataset.collapsed, "true");
+    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "false");
+    assert.equal(cards[0].querySelector(".tc-body").hidden, true);
     cleanup();
   });
 });
