@@ -157,7 +157,7 @@ class Disposables {
   }
 }
 
-export { commandName, createChatDom, createChatSurface, createComposerSurface, pluginClass, pluginStyleText };
+export { commandName, createChatDom, createChatSurface, createComposerSurface, pluginClass, pluginStyleText, renderMessages };
 export { chatEventsToAgUiLikeEvents, createAgUiLikeRunInput, promptFromAgUiLikeRunInput } from "./ag-ui";
 
 export default function activate(context: PluginContext = {}): Cleanup {
@@ -664,7 +664,7 @@ function applyBackendResponseToStore(store: ChatStore, response: BackendResponse
     store.activeSessionId = response.activeSessionId;
   }
   if (Array.isArray(response.messages)) {
-    activeSession(store).messages = response.messages.filter(isChatMessage).slice(-MAX_MESSAGES_PER_SESSION);
+    activeSession(store).messages = sanitizeChatMessages(response.messages).slice(-MAX_MESSAGES_PER_SESSION);
     activeSession(store).updatedAt = Date.now();
     saveStore(store);
   }
@@ -768,7 +768,7 @@ function applyBackendResponseToMountedStore(
   response: BackendResponse,
   reason: string,
 ): ChatMessage[] {
-  const responseMessages = Array.isArray(response.messages) ? response.messages.filter(isChatMessage) : [];
+  const responseMessages = sanitizeChatMessages(response.messages);
 
   if (typeof response.activeSessionId === "string" && response.activeSessionId) {
     const previousSessionId = store.activeSessionId;
@@ -929,7 +929,7 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   item.append(row);
 
   if (message.thinking) {
-    item.append(renderMountedThinking(message.thinking));
+    item.append(renderMountedThinking(message.thinking, Boolean(message.streaming)));
   }
 
   for (const tool of message.toolCalls || []) {
@@ -943,10 +943,10 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   return item;
 }
 
-function renderMountedThinking(text: string): HTMLElement {
+function renderMountedThinking(text: string, open: boolean): HTMLElement {
   const details = document.createElement("details");
   details.className = "msg-detail think thinking-block";
-  details.open = true;
+  details.open = open;
   const summary = document.createElement("summary");
   summary.className = "label";
   summary.textContent = "THINKING";
@@ -962,19 +962,20 @@ function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
   card.className = "tool-card";
   card.dataset.tool = tool.name || "tool";
   card.dataset.status = tool.status;
-  card.dataset.collapsed = "true";
+  const collapsed = tool.status !== "running";
+  card.dataset.collapsed = collapsed ? "true" : "false";
 
   const head = document.createElement("button");
   head.type = "button";
   head.className = "tc-head";
-  head.title = "Show tool output";
-  head.setAttribute("aria-expanded", "false");
-  head.setAttribute("aria-label", `Show ${tool.name || "tool"} output`);
+  head.title = collapsed ? "Show tool output" : "Hide tool output";
+  head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${tool.name || "tool"} output`);
   head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
 
   const body = document.createElement("pre");
   body.className = "tc-body";
-  body.hidden = true;
+  body.hidden = collapsed;
   body.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
 
   head.addEventListener("click", () => toggleMountedToolCard(card, head, body));
@@ -1036,7 +1037,7 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
     const label = document.createElement("span");
     label.className = "running";
     label.textContent = "running";
-    meta.append(spinner, label, toolCaret());
+    meta.append(spinner, label, toolCaret(tool.status));
     return meta;
   }
 
@@ -1049,12 +1050,12 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
   return meta;
 }
 
-function toolCaret(): HTMLElement {
+function toolCaret(status: ChatToolCall["status"] = "ok"): HTMLElement {
   const wrap = document.createElement("span");
   wrap.className = "tc-toggle";
   const label = document.createElement("span");
   label.className = "tc-toggle-label";
-  label.textContent = "show";
+  label.textContent = status === "running" ? "hide" : "show";
   const caret = document.createElement("span");
   caret.className = "tc-caret";
   caret.textContent = "▸";
@@ -1271,7 +1272,7 @@ async function refreshBackendChatState(state: State, dom: ChatDom, sessionId = "
     if (token !== state.backendChatToken) return;
 
     if (Array.isArray(response.messages)) {
-      const messages = response.messages.filter(isChatMessage);
+      const messages = sanitizeChatMessages(response.messages);
       if (messages.length) {
         const session = sessionForBackendState(state.store, typeof response.activeSessionId === "string" ? response.activeSessionId : null);
         session.messages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
@@ -1414,7 +1415,7 @@ function loadStore(preferredSessionId = ""): ChatStore {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
     if (parsed && typeof parsed.activeSessionId === "string" && Array.isArray(parsed.sessions)) {
-      const sessions = parsed.sessions.filter(isSession);
+      const sessions = parsed.sessions.filter(isSession).map(sanitizeSession);
       if (preferredSessionId && !sessions.some((session) => session.id === preferredSessionId)) {
         sessions.unshift(createSession(preferredSessionId));
       }
@@ -1465,9 +1466,45 @@ function isSession(value: unknown): value is ChatSession {
   return isRecord(value) && typeof value.id === "string" && Array.isArray(value.messages);
 }
 
+function sanitizeSession(session: ChatSession): ChatSession {
+  return { ...session, messages: sanitizeChatMessages(session.messages) };
+}
+
+function sanitizeChatMessages(value: unknown): ChatMessage[] {
+  return Array.isArray(value) ? value.filter(isChatMessage).map(sanitizeChatMessage) : [];
+}
+
+function sanitizeChatMessage(message: ChatMessage): ChatMessage {
+  if (!Array.isArray(message.toolCalls)) {
+    const { toolCalls: _toolCalls, ...rest } = message;
+    return rest;
+  }
+
+  return { ...message, toolCalls: message.toolCalls.filter(isChatToolCall) };
+}
+
+function isChatToolCall(value: unknown): value is ChatToolCall {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") {
+    return false;
+  }
+
+  return typeof value.text === "string" && isToolStatus(value.status);
+}
+
+function isToolStatus(value: unknown): value is ChatToolCall["status"] {
+  return value === "running" || value === "ok" || value === "err";
+}
+
 function isChatMessage(value: unknown): value is ChatMessage {
-  return isRecord(value) && typeof value.id === "string" && typeof value.text === "string" && typeof value.createdAt === "number"
-    && (value.role === "user" || value.role === "assistant" || value.role === "tool" || value.role === "system");
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.text !== "string") {
+    return false;
+  }
+
+  return typeof value.createdAt === "number" && isChatRole(value.role);
+}
+
+function isChatRole(value: unknown): value is ChatMessage["role"] {
+  return value === "user" || value === "assistant" || value === "tool" || value === "system";
 }
 
 function isRecord(value: unknown): value is JsonRecord {

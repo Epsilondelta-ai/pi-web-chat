@@ -160,6 +160,30 @@ test("backend wrapper completes stream when pi is unavailable", async () => {
   assert.ok(stream.events.some((event) => event.type === "error"));
 });
 
+test("js streaming backend caps response session ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
+});
+`);
+  await chmod(fakePi, 0o755);
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  const longID = "s".repeat(200);
+  await writeFile(join(sessionDir, `existing_${longID}.jsonl`), JSON.stringify({ type: "session", id: longID }));
+
+  const start = await callBackend("startPrompt", root, { text: "hello", sessionId: longID }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
+  assert.equal(start.activeSessionId.length, 160);
+  const stream = await callBackend("streamEvents", root, { runId: start.runId, cursor: 0 }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
+  assert.equal(stream.activeSessionId.length, 160);
+});
+
 test("compiled backend exposes streaming methods", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
@@ -390,7 +414,8 @@ test("chatState parses pi JSONL session fixtures", async () => {
     JSON.stringify({ type: "session", id: "pi-session-1" }),
     JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "hello" } }),
     JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:06.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } }),
-    JSON.stringify({ type: "message", id: "t1", timestamp: "2026-01-02T03:04:07.000Z", message: { role: "toolResult", content: "done" } }),
+    JSON.stringify({ type: "message", id: "a2", timestamp: "2026-01-02T03:04:06.500Z", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun test" } }] } }),
+    JSON.stringify({ type: "message", id: "t1", timestamp: "2026-01-02T03:04:07.000Z", message: { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "done" }], isError: false } }),
   ].join("\n"));
   await writeFile(join(sessionDir, "older_pi-session-2.jsonl"), [
     JSON.stringify({ type: "session", id: "pi-session-2" }),
@@ -399,11 +424,122 @@ test("chatState parses pi JSONL session fixtures", async () => {
 
   const result = await callBackend("chatState", root, { sessionId: "pi-session-1" }, { HOME: home });
   assert.equal(result.activeSessionId, "pi-session-1");
-  assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["t1", "tool", "done"]]);
+  assert.equal(result.isStreaming, false);
+  assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["a2", "assistant", ""]]);
+  assert.deepEqual(result.messages.at(-1).toolCalls, [{ id: "call-1", name: "bash", args: { command: "bun test" }, text: "done", status: "ok" }]);
 
   const selected = await callBackend("chatState", root, { sessionId: "pi-session-2" }, { HOME: home });
   assert.equal(selected.activeSessionId, "pi-session-2");
   assert.deepEqual(selected.messages.map((message) => [message.id, message.role, message.text]), [["u2", "user", "selected"]]);
+});
+
+test("chatState caps large tool call arguments and generates stable fallback ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "large-args.jsonl"), [
+    JSON.stringify({ type: "session", id: "large-args" }),
+    JSON.stringify({
+      type: "message",
+      id: "a1",
+      timestamp: "2026-01-02T03:04:06.000Z",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", name: "edit", arguments: { nested: { patch: "x".repeat(2000000) } } },
+          { type: "toolCall", name: "edit", arguments: { patch: "y".repeat(10) } },
+        ],
+      },
+    }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "large-args" }, { HOME: home });
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].toolCalls.length, 2);
+  assert.notEqual(result.messages[0].toolCalls[0].id, result.messages[0].toolCalls[1].id);
+  assert.equal(result.messages[0].toolCalls[0].args._truncated, true);
+  assert.equal(typeof result.messages[0].toolCalls[0].args._preview, "string");
+  assert.ok(result.messages[0].toolCalls[0].args._preview.length <= 1100);
+  assert.ok(JSON.stringify(result).length < 70000);
+});
+
+test("chatState caps excessive tool call count", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  const content = Array.from({ length: 5000 }, (_, index) => {
+    return { type: "toolCall", name: "read", arguments: { path: `file-${index}.txt` } };
+  });
+  await writeFile(join(sessionDir, "many-tools.jsonl"), [
+    JSON.stringify({ type: "session", id: "many-tools" }),
+    JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:06.000Z", message: { role: "assistant", content } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "many-tools" }, { HOME: home });
+  assert.equal(result.messages[0].toolCalls.length, 100);
+  assert.ok(JSON.stringify(result).length < 70000);
+});
+
+test("chatState keeps tool-heavy transcript responses bounded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  const lines = [JSON.stringify({ type: "session", id: "tool-heavy" })];
+  for (let message = 0; message < 200; message += 1) {
+    const content = Array.from({ length: 100 }, (_, index) => {
+      return { type: "toolCall", id: "x".repeat(500), name: "read".repeat(80), arguments: { path: `${message}-${index}` } };
+    });
+    lines.push(JSON.stringify({
+      type: "message",
+      id: `a${message}`,
+      timestamp: "2026-01-02T03:04:06.000Z",
+      message: { role: "assistant", content },
+    }));
+  }
+  await writeFile(join(sessionDir, "tool-heavy.jsonl"), lines.join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "tool-heavy" }, { HOME: home });
+  assert.ok(JSON.stringify(result).length < 70000);
+  assert.ok(result.messages.length > 0);
+  assert.ok(result.messages.every((message) => !message.toolCalls || message.toolCalls.length <= 100));
+});
+
+test("chatState caps response session ids and synthesized tool ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  const longID = "s".repeat(100000);
+  await writeFile(join(sessionDir, "long-session.jsonl"), [
+    JSON.stringify({ type: "session", id: longID }),
+    JSON.stringify({
+      type: "message",
+      id: "m".repeat(500),
+      timestamp: "2026-01-02T03:04:06.000Z",
+      message: { role: "assistant", content: [{ type: "toolCall", name: "n".repeat(500), arguments: {} }] },
+    }),
+    JSON.stringify({
+      type: "message",
+      id: "r1",
+      timestamp: "2026-01-02T03:04:07.000Z",
+      message: { role: "toolResult", toolName: "n".repeat(500), content: "should not merge without id" },
+    }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: longID }, { HOME: home });
+  assert.equal(result.activeSessionId.length, 160);
+  assert.equal(result.messages[0].toolCalls[0].id.length, 160);
+  assert.equal(result.messages[0].toolCalls[0].name.length, 120);
+  assert.equal(result.messages[0].toolCalls[0].status, "running");
+  assert.equal(result.messages.at(-1).role, "tool");
+  assert.ok(JSON.stringify(result).length < 70000);
 });
 
 test("searchFiles reports configurable traversal truncation", async () => {

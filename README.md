@@ -23,7 +23,7 @@ In pi-web: **Settings → Plugins → local** and select this folder.
 {
   "id": "pi-web-chat",
   "name": "Chat Composer",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "entry": "index.js",
   "backend": "backend.js"
 }
@@ -65,7 +65,7 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
-- `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`
+- `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`; assistant messages may include capped `toolCalls` with `{ id, name, args, text, status }`
 - `startPrompt` with `{ text, attachments, sessionId }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
 - `abortPrompt` with `{ runId }` → `{ aborted, runId }`

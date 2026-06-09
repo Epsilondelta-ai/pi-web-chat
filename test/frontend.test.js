@@ -13,6 +13,7 @@ import activate, {
   mergeCommands,
   pluginStyleText,
   promptFromAgUiLikeRunInput,
+  renderMessages,
 } from "../index.js";
 
 function createPiWeb() {
@@ -73,6 +74,15 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /prefix\.tool/);
   assert.match(styles, /body\.sys/);
   assert.match(styles, /resize: none/);
+  assert.match(styles, /focus-visible/);
+});
+
+test("legacy chat renderer remains exported", async () => {
+  await withWindow(async ({ window }) => {
+    const container = window.document.createElement("div");
+    renderMessages(container, [{ id: "m1", role: "assistant", text: "hello", createdAt: 1 }]);
+    assert.match(container.textContent, /hello/);
+  });
 });
 
 test("channels use pi-web standard names", () => {
@@ -117,6 +127,55 @@ test("activate requires modern pi-web mount APIs", async () => {
       () => activate({ app: window.document.querySelector("pi-app"), backend: async () => ({}) }),
       /requires modern pi-web mount\.chat and mount\.composer APIs/,
     );
+  });
+});
+
+test("mounted chatState preserves messages while sanitizing malformed tool calls", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "malformed-session" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState") {
+          const second = input.data.sessionId === "malformed-session-2";
+          return {
+            activeSessionId: input.data.sessionId || "malformed-session",
+            messages: [{
+              id: second ? "bad-2" : "bad-1",
+              role: "assistant",
+              text: second ? "message survives 2" : "message survives 1",
+              createdAt: second ? 2 : 1,
+              toolCalls: second
+                ? [
+                  { id: "ok", name: "read", text: "safe", status: "ok" },
+                  { id: "bad", name: 42, text: "bad", status: "ok" },
+                ]
+                : { id: "bad", name: "read", text: "bad", status: "ok" },
+            }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /message survives 1/);
+    assert.equal(window.document.querySelectorAll(".tool-card").length, 0);
+
+    window.document.querySelector("pi-app").piWebSidebar.getSnapshot = () => ({ activeSessionId: "malformed-session-2" });
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("malformed-session-2");
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /message survives 2/);
+    assert.equal(window.document.querySelectorAll(".tool-card").length, 1);
+    assert.equal(window.document.querySelector(".tool-card").dataset.tool, "read");
+    cleanup();
   });
 });
 
@@ -395,8 +454,11 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
 
     const cards = [...window.document.querySelectorAll(".tool-card")];
     assert.equal(cards.length, 4);
-    assert.equal(cards.every((card) => card.dataset.collapsed === "true"), true);
-    assert.equal(cards.every((card) => card.querySelector(".tc-body").hidden === true), true);
+    assert.equal(cards.slice(0, 3).every((card) => card.dataset.collapsed === "true"), true);
+    assert.equal(cards.slice(0, 3).every((card) => card.querySelector(".tc-body").hidden === true), true);
+    assert.equal(cards[3].dataset.collapsed, "false");
+    assert.equal(cards[3].querySelector(".tc-body").hidden, false);
+    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Show read output");
     assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
     assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
     assert.equal(cards[1].querySelector(".tc-args").textContent, JSON.stringify({ command: "git status" }));
@@ -411,6 +473,7 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     cards[0].querySelector(".tc-head").click();
     assert.equal(cards[0].dataset.collapsed, "false");
     assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "true");
+    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Hide read output");
     assert.equal(cards[0].querySelector(".tc-body").hidden, false);
     cards[0].querySelector(".tc-head").click();
     assert.equal(cards[0].dataset.collapsed, "true");
