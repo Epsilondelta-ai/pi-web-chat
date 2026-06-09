@@ -260,6 +260,7 @@ process.stdin.on('end', () => {
   const start = await runBackendBinary("startPrompt", root, { data: { text: "hello" } }, env);
   assert.equal(start.code, 0, start.stderr);
   const started = JSON.parse(start.stdout);
+  await new Promise((resolve) => setTimeout(resolve, 50));
   const stream = await runBackendBinary("streamEventsSse", root, { data: { runId: started.runId, cursor: 0 } }, env);
 
   assert.equal(stream.code, 0, stream.stderr);

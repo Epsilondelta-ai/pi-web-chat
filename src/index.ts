@@ -534,6 +534,7 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
 }
 
 async function submitPromptWithStreaming(state: State, dom: ChatDom, text: string, attachments: FileAttachment[]): Promise<void> {
+  state.backendChatToken += 1;
   const start = await startStreamingPrompt(state.context, text, attachments, state.store.activeSessionId);
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
@@ -548,7 +549,6 @@ async function submitPromptWithStreaming(state: State, dom: ChatDom, text: strin
 
   const assistant = ensureStreamingAssistant(state.store);
   await consumeStreamingRun(state.context, state.store, start.runId, assistant, (): void => render(state, dom));
-  await refreshBackendChatState(state, dom);
 }
 
 async function submitMountedPromptWithStreaming(
@@ -559,6 +559,7 @@ async function submitMountedPromptWithStreaming(
   text: string,
   attachments: FileAttachment[],
 ): Promise<void> {
+  mountedState.backendChatToken += 1;
   const pendingUserMessage: ChatMessage = {
     id: id(),
     role: "user",
@@ -600,7 +601,6 @@ async function submitMountedPromptWithStreaming(
 
   const assistant = ensureStreamingAssistant(store);
   await consumeStreamingRun(context, store, start.runId, assistant, (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages));
-  await refreshMountedBackendChatState(context, chatSurface, store, mountedState, store.activeSessionId);
 }
 
 async function consumeStreamingRun(
@@ -639,13 +639,13 @@ async function backendSseStream(
   method: string,
   data: JsonRecord = {},
 ): Promise<ReadableStream<Uint8Array> | null> {
-  if (!context.backend) {
-    return null;
+  if (!context.backendStream) {
+    throw new Error("SSE streaming backend is unavailable");
   }
 
   const workspaceId = getActiveWorkspaceId(context);
 
-  const response = await context.backend(method, { workspaceId, data });
+  const response = await context.backendStream(method, { workspaceId, data });
   return readableStreamFromBackendResponse(response);
 }
 

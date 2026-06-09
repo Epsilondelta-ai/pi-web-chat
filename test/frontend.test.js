@@ -384,6 +384,15 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
           return { activeSessionId: "stream-session", runId: "run-1", isStreaming: true };
         }
 
+        if (method === "chatState" && input.data.sessionId === "stream-session") {
+          return { activeSessionId: "stream-session", messages: [{ id: "a1", role: "assistant", text: "final answer", createdAt: 2 }] };
+        }
+
+        return {};
+      },
+      backendStream: async (method, input) => {
+        backendCalls.push({ method, input });
+
         if (method === "streamEventsSse") {
           return new ReadableStream({
             start(controller) {
@@ -394,15 +403,12 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
           });
         }
 
-        if (method === "chatState" && input.data.sessionId === "stream-session") {
-          return { activeSessionId: "stream-session", messages: [{ id: "a1", role: "assistant", text: "final answer", createdAt: 2 }] };
-        }
-
         return {};
       },
       mount: createMount(window, app),
     });
 
+    await tick();
     const textarea = window.document.querySelector(".prompt-textarea");
     textarea.value = "stream me";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
@@ -414,6 +420,10 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
     assert.ok(backendCalls.some((call) => call.method === "startPrompt" && call.input.data.text === "stream me"));
     assert.ok(backendCalls.some((call) => call.method === "streamEventsSse" && call.input.data.runId === "run-1"));
     assert.equal(backendCalls.some((call) => call.method === "streamEvents"), false);
+    const streamIndex = backendCalls.findIndex((call) => call.method === "streamEventsSse");
+    assert.equal(backendCalls.slice(streamIndex + 1).some((call) => {
+      return call.method === "chatState" && call.input.data.sessionId === "stream-session";
+    }), false);
     assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
     assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
     assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
@@ -435,6 +445,15 @@ test("mounted submit never polls streamEvents when SSE succeeds", async () => {
           return { activeSessionId: "sse-session", runId: "run-sse", isStreaming: true };
         }
 
+        if (method === "chatState" && input.data.sessionId === "sse-session") {
+          return { activeSessionId: "sse-session", messages: [{ id: "a1", role: "assistant", text: "final sse", createdAt: 2 }] };
+        }
+
+        return {};
+      },
+      backendStream: async (method, input) => {
+        backendCalls.push({ method, input });
+
         if (method === "streamEventsSse") {
           return new ReadableStream({
             start(controller) {
@@ -446,15 +465,12 @@ test("mounted submit never polls streamEvents when SSE succeeds", async () => {
           });
         }
 
-        if (method === "chatState" && input.data.sessionId === "sse-session") {
-          return { activeSessionId: "sse-session", messages: [{ id: "a1", role: "assistant", text: "final sse", createdAt: 2 }] };
-        }
-
         return {};
       },
       mount: createMount(window, app),
     });
 
+    await tick();
     const textarea = window.document.querySelector(".prompt-textarea");
     textarea.value = "stream with sse";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
@@ -464,6 +480,10 @@ test("mounted submit never polls streamEvents when SSE succeeds", async () => {
 
     assert.ok(backendCalls.some((call) => call.method === "streamEventsSse" && call.input.data.runId === "run-sse"));
     assert.equal(backendCalls.some((call) => call.method === "streamEvents"), false);
+    const streamIndex = backendCalls.findIndex((call) => call.method === "streamEventsSse");
+    assert.equal(backendCalls.slice(streamIndex + 1).some((call) => {
+      return call.method === "chatState" && call.input.data.sessionId === "sse-session";
+    }), false);
     assert.match(window.document.querySelector(".term-inner").textContent, /hello sse|final sse/);
     cleanup();
   });
