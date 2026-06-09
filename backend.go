@@ -32,6 +32,8 @@ const (
 	maxChatMessages                  = 200
 	maxChatResponseTextBytes         = 48 * 1024
 	maxChatMessageTextBytes          = 4000
+	maxChatToolArgsBytes             = 1000
+	maxChatToolCallsPerMessage       = 100
 	defaultMaxSkillDiscoveryDirs     = 4000
 	defaultMaxWorkspaceSearchEntries = 20000
 	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
@@ -74,6 +76,15 @@ type chatMessage struct {
 	Text      string         `json:"text"`
 	CreatedAt int64          `json:"createdAt"`
 	Meta      map[string]any `json:"meta,omitempty"`
+	ToolCalls []chatToolCall `json:"toolCalls,omitempty"`
+}
+
+type chatToolCall struct {
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Args   map[string]any `json:"args,omitempty"`
+	Text   string         `json:"text"`
+	Status string         `json:"status"`
 }
 
 type textFile struct {
@@ -369,7 +380,7 @@ func submitPiPrompt(workspaceRoot string, input request) (any, error) {
 	if parsedID != "" {
 		sessionID = parsedID
 	}
-	return map[string]any{"accepted": true, "activeSessionId": sessionID, "messages": messages, "isStreaming": false}, nil
+	return map[string]any{"accepted": true, "activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": false}, nil
 }
 
 type streamRunState struct {
@@ -463,7 +474,7 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 	}
 	_ = cmd.Process.Release()
 
-	return map[string]any{"accepted": true, "runId": runID, "activeSessionId": sessionID, "isStreaming": true}, nil
+	return map[string]any{"accepted": true, "runId": runID, "activeSessionId": responseSessionID(sessionID), "isStreaming": true}, nil
 }
 
 func streamPiEvents(input request) (any, error) {
@@ -479,7 +490,7 @@ func streamPiEvents(input request) (any, error) {
 	streaming := state.Status == "running" || state.Status == "starting"
 	return map[string]any{
 		"runId":           state.RunID,
-		"activeSessionId": state.ActiveSessionID,
+		"activeSessionId": responseSessionID(state.ActiveSessionID),
 		"events":          events,
 		"cursor":          nextCursor,
 		"isStreaming":     streaming,
@@ -920,7 +931,7 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 		sessionFile, err = mostRecentPiSessionFile(root)
 	}
 	if err != nil || sessionFile == "" {
-		return map[string]any{"activeSessionId": requestedSessionID, "messages": []chatMessage{}, "isStreaming": false}, err
+		return map[string]any{"activeSessionId": responseSessionID(requestedSessionID), "messages": []chatMessage{}, "isStreaming": false}, err
 	}
 	messages, sessionID, err := readPiSessionMessages(sessionFile)
 	if err != nil {
@@ -930,9 +941,24 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	isStreaming := false
 	if len(messages) > 0 && time.Since(info.ModTime()) < 3*time.Second {
 		last := messages[len(messages)-1]
-		isStreaming = last.Role == "assistant" && strings.TrimSpace(last.Text) == ""
+		isStreaming = isAssistantMessageStreaming(last)
 	}
-	return map[string]any{"activeSessionId": sessionID, "messages": messages, "isStreaming": isStreaming}, nil
+	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": isStreaming}, nil
+}
+
+func isAssistantMessageStreaming(message chatMessage) bool {
+	if message.Role != "assistant" || strings.TrimSpace(message.Text) != "" {
+		return false
+	}
+	if len(message.ToolCalls) == 0 {
+		return true
+	}
+	for _, toolCall := range message.ToolCalls {
+		if toolCall.Status == "running" {
+			return true
+		}
+	}
+	return false
 }
 
 func mostRecentPiSessionFile(workspaceRoot string) (string, error) {
@@ -1004,10 +1030,6 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 		if mappedRole == "" {
 			continue
 		}
-		text := piMessageText(msg["content"])
-		if strings.TrimSpace(text) == "" && mappedRole != "assistant" {
-			continue
-		}
 		createdAt := unixMillis(entry["timestamp"])
 		if t := unixMillis(msg["timestamp"]); t > 0 {
 			createdAt = t
@@ -1016,10 +1038,51 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 		if id == "" {
 			id = strconv.Itoa(len(messages) + 1)
 		}
-		messages = append(messages, chatMessage{ID: id, Role: mappedRole, Text: text, CreatedAt: createdAt, Meta: map[string]any{"piRole": role}})
+		text, toolCalls := piMessageParts(msg["content"], id)
+		if role == "toolResult" && mergeToolResult(messages, msg, text) {
+			continue
+		}
+		if strings.TrimSpace(text) == "" && len(toolCalls) == 0 && mappedRole != "assistant" {
+			continue
+		}
+		messages = append(messages, chatMessage{
+			ID: id, Role: mappedRole, Text: text, CreatedAt: createdAt,
+			Meta: map[string]any{"piRole": role}, ToolCalls: toolCalls,
+		})
 	}
 	messages = trimChatMessagesForResponse(messages)
 	return messages, sessionID, nil
+}
+
+func mergeToolResult(messages []chatMessage, msg map[string]any, text string) bool {
+	toolCallID, _ := msg["toolCallId"].(string)
+	if toolCallID == "" {
+		return false
+	}
+
+	for messageIndex := len(messages) - 1; messageIndex >= 0; messageIndex-- {
+		message := &messages[messageIndex]
+		if message.Role != "assistant" || len(message.ToolCalls) == 0 {
+			continue
+		}
+
+		for toolIndex := len(message.ToolCalls) - 1; toolIndex >= 0; toolIndex-- {
+			tool := &message.ToolCalls[toolIndex]
+			if tool.ID != toolCallID {
+				continue
+			}
+
+			tool.Text = text
+			if isError, _ := msg["isError"].(bool); isError {
+				tool.Status = "err"
+			} else {
+				tool.Status = "ok"
+			}
+			return true
+		}
+	}
+
+	return false
 }
 
 func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
@@ -1032,11 +1095,28 @@ func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 	for index := len(messages) - 1; index >= 0 && remaining > 0; index-- {
 		message := messages[index]
 		message.Text = limitString(message.Text, maxChatMessageTextBytes)
-		if len(message.Text) > remaining {
-			message.Text = limitString(message.Text, remaining)
+		for toolIndex := range message.ToolCalls {
+			message.ToolCalls[toolIndex].Text = limitString(message.ToolCalls[toolIndex].Text, maxChatMessageTextBytes)
 		}
 
-		remaining -= len(message.Text)
+		messageBytes := chatMessageResponseBytes(message)
+		if messageBytes > remaining {
+			message.Text = limitString(message.Text, remaining)
+			for toolIndex := range message.ToolCalls {
+				message.ToolCalls[toolIndex].Text = ""
+				message.ToolCalls[toolIndex].Args = nil
+			}
+			messageBytes = chatMessageResponseBytes(message)
+		}
+		if messageBytes > remaining {
+			message.ToolCalls = nil
+			messageBytes = chatMessageResponseBytes(message)
+		}
+		if messageBytes > remaining {
+			continue
+		}
+
+		remaining -= messageBytes
 		trimmed = append(trimmed, message)
 	}
 
@@ -1045,6 +1125,18 @@ func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 	}
 
 	return trimmed
+}
+
+func chatMessageResponseBytes(message chatMessage) int {
+	data, err := json.Marshal(message)
+	if err != nil {
+		return maxChatResponseTextBytes
+	}
+	return len(data)
+}
+
+func responseSessionID(sessionID string) string {
+	return limitString(sessionID, 160)
 }
 
 func mapPiRole(role string) string {
@@ -1058,13 +1150,14 @@ func mapPiRole(role string) string {
 	}
 }
 
-func piMessageText(content any) string {
+func piMessageParts(content any, messageID string) (string, []chatToolCall) {
 	switch value := content.(type) {
 	case string:
-		return value
+		return value, nil
 	case []any:
 		parts := []string{}
-		for _, raw := range value {
+		toolCalls := []chatToolCall{}
+		for blockIndex, raw := range value {
 			block, ok := raw.(map[string]any)
 			if !ok {
 				continue
@@ -1076,15 +1169,61 @@ func piMessageText(content any) string {
 					parts = append(parts, text)
 				}
 			case "toolCall":
-				name, _ := block["name"].(string)
-				if name != "" {
-					parts = append(parts, "[tool call: "+name+"]")
+				if toolCall := piToolCall(block, messageID, blockIndex); toolCall.Name != "" {
+					toolCalls = append(toolCalls, toolCall)
 				}
 			}
 		}
-		return strings.Join(parts, "\n")
+		if len(toolCalls) > maxChatToolCallsPerMessage {
+			toolCalls = toolCalls[:maxChatToolCallsPerMessage]
+		}
+		return strings.Join(parts, "\n"), toolCalls
 	default:
-		return ""
+		return "", nil
+	}
+}
+
+func piToolCall(block map[string]any, messageID string, blockIndex int) chatToolCall {
+	name, _ := block["name"].(string)
+	name = limitString(name, 120)
+	if name == "" {
+		return chatToolCall{}
+	}
+
+	id, _ := block["id"].(string)
+	id = limitString(id, 160)
+	if id == "" {
+		id = limitString(fmt.Sprintf("%s-tool-%d-%s", limitString(messageID, 80), blockIndex, name), 160)
+	}
+
+	args := map[string]any{}
+	if input, ok := block["input"].(map[string]any); ok {
+		args = input
+	} else if arguments, ok := block["arguments"].(map[string]any); ok {
+		args = arguments
+	} else if rawArgs, ok := block["args"].(map[string]any); ok {
+		args = rawArgs
+	}
+
+	return chatToolCall{ID: id, Name: name, Args: trimToolArgs(args), Text: "", Status: "running"}
+}
+
+func trimToolArgs(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return args
+	}
+
+	data, err := json.Marshal(args)
+	if err != nil {
+		return map[string]any{"_truncated": true, "_preview": "[unserializable tool arguments]"}
+	}
+	if len(data) <= maxChatToolArgsBytes {
+		return args
+	}
+
+	return map[string]any{
+		"_truncated": true,
+		"_preview":   limitString(string(data), maxChatToolArgsBytes),
 	}
 }
 

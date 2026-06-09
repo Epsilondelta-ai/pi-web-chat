@@ -22,6 +22,7 @@ const method = process.argv[2] || "";
 const workspaceRoot = process.argv[3] || ".";
 const completedRunTtlMs = 15 * 60 * 1000;
 const staleRunTtlMs = 60 * 60 * 1000;
+const maxResponseSessionIdLength = 160;
 
 if (method === "__streamRunner") {
   await runStreamRunner(process.argv.slice(3));
@@ -89,6 +90,10 @@ async function handleStreamingMethod(name, root) {
   }
 }
 
+function responseSessionId(value) {
+  return String(value || "").slice(0, maxResponseSessionIdLength);
+}
+
 function parseInput(value) {
   const trimmed = value.trim();
   if (!trimmed) return {};
@@ -129,7 +134,7 @@ function startPrompt(root, data) {
   child.unref();
 
   writeJsonAtomic(statePath, { ...readJson(statePath), pid: child.pid, status: "running", updatedAt: Date.now() });
-  return { accepted: true, runId, activeSessionId: session.sessionId, isStreaming: true };
+  return { accepted: true, runId, activeSessionId: responseSessionId(session.sessionId), isStreaming: true };
 }
 
 function streamEvents(data) {
@@ -138,7 +143,7 @@ function streamEvents(data) {
   const events = readEvents(state.eventsPath).filter((event) => Number(event.seq || 0) > cursor);
   const nextCursor = events.reduce((max, event) => Math.max(max, Number(event.seq || 0)), cursor);
   const isStreaming = state.status === "running" || state.status === "starting";
-  return { runId: state.runId, activeSessionId: state.activeSessionId, events, cursor: nextCursor, isStreaming };
+  return { runId: state.runId, activeSessionId: responseSessionId(state.activeSessionId), events, cursor: nextCursor, isStreaming };
 }
 
 function abortPrompt(data) {
