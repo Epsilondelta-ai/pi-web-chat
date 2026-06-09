@@ -368,10 +368,11 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
-test("mounted submit streams with startPrompt and notifies sidebar refresh channel", async () => {
+test("mounted submit streams through SSE and notifies sidebar refresh channel", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
     const submitted = [];
+    const encoder = new TextEncoder();
     globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
 
     const cleanup = activate({
@@ -383,12 +384,14 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
           return { activeSessionId: "stream-session", runId: "run-1", isStreaming: true };
         }
 
-        if (method === "streamEvents") {
-          return {
-            cursor: 1,
-            events: [{ type: "text.delta", delta: "streamed answer" }],
-            isStreaming: false,
-          };
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"streamed answer"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end","exitCode":0}\n\n'));
+              controller.close();
+            },
+          });
         }
 
         if (method === "chatState" && input.data.sessionId === "stream-session") {
@@ -404,12 +407,13 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
     textarea.value = "stream me";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
-    await tick(160);
+    await tick();
     await tick();
 
     assert.deepEqual(submitted.map((event) => event.text), ["stream me"]);
     assert.ok(backendCalls.some((call) => call.method === "startPrompt" && call.input.data.text === "stream me"));
-    assert.ok(backendCalls.some((call) => call.method === "streamEvents" && call.input.data.runId === "run-1"));
+    assert.ok(backendCalls.some((call) => call.method === "streamEventsSse" && call.input.data.runId === "run-1"));
+    assert.equal(backendCalls.some((call) => call.method === "streamEvents"), false);
     assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
     assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
     assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
@@ -417,7 +421,7 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
   });
 });
 
-test("mounted submit consumes SSE before polling streamEvents", async () => {
+test("mounted submit never polls streamEvents when SSE succeeds", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
     const encoder = new TextEncoder();

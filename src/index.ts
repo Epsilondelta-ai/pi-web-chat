@@ -610,45 +610,10 @@ async function consumeStreamingRun(
   assistant: ChatMessage,
   renderCurrent: () => void,
 ): Promise<void> {
-  if (await consumeStreamingRunSse(context, store, runId, assistant, renderCurrent)) {
-    return;
-  }
-
-  let cursor = 0;
-  let streaming = true;
-  renderCurrent();
-
-  try {
-    while (streaming) {
-      await delay(120);
-      const response = await backendCall(context, "streamEvents", { runId, cursor });
-      const events = Array.isArray(response.events) ? response.events.filter(isChatEvent) : [];
-      cursor = typeof response.cursor === "number" ? response.cursor : cursor;
-      streaming = response.isStreaming === true;
-      applyChatEvents(assistant, events);
-      assistant.streaming = streaming;
-      activeSession(store).updatedAt = Date.now();
-      saveStore(store);
-      renderCurrent();
-    }
-  } finally {
-    assistant.streaming = false;
-    saveStore(store);
-    renderCurrent();
-  }
-}
-
-async function consumeStreamingRunSse(
-  context: PluginContext,
-  store: ChatStore,
-  runId: string,
-  assistant: ChatMessage,
-  renderCurrent: () => void,
-): Promise<boolean> {
   const stream = await backendSseStream(context, "streamEventsSse", { runId, cursor: 0 });
 
   if (!stream) {
-    return false;
+    throw new Error("SSE streaming backend did not return a stream");
   }
 
   assistant.streaming = true;
@@ -667,8 +632,6 @@ async function consumeStreamingRunSse(
     saveStore(store);
     renderCurrent();
   }
-
-  return true;
 }
 
 async function backendSseStream(
@@ -682,16 +645,8 @@ async function backendSseStream(
 
   const workspaceId = getActiveWorkspaceId(context);
 
-  try {
-    const response = await context.backend(method, { workspaceId, data });
-    return readableStreamFromBackendResponse(response);
-  } catch (error) {
-    if (isUnsupportedStreamingBackend(error)) {
-      return null;
-    }
-
-    throw error;
-  }
+  const response = await context.backend(method, { workspaceId, data });
+  return readableStreamFromBackendResponse(response);
 }
 
 function readableStreamFromBackendResponse(response: unknown): ReadableStream<Uint8Array> | null {
@@ -877,10 +832,6 @@ function upsertToolCall(message: ChatMessage, event: ChatEvent, status: "running
 
 function isChatEvent(value: unknown): value is ChatEvent {
   return isRecord(value) && typeof value.type === "string";
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 async function refreshMountedBackendChatState(
