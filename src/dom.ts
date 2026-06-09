@@ -99,7 +99,7 @@ export function createChatDom(): ChatDom {
       <div class="pi-web-chat-prompt-bar">
         <button class="pi-web-chat-icon-btn" type="button" data-attach aria-label="attach files" title="attach files">${materialIcon("attach_file", MATERIAL_PATHS.attachFile)}</button>
         <input type="file" multiple hidden data-file-input />
-        <textarea class="pi-web-chat-textarea" data-chat-input placeholder="ask pi to do something…" rows="1"></textarea>
+        <textarea class="pi-web-chat-textarea" data-chat-input aria-label="Prompt" placeholder="ask pi to do something…" rows="1"></textarea>
         <button class="pi-web-chat-send" type="button" data-send aria-label="send" title="send" aria-disabled="true">${materialIcon("send", MATERIAL_PATHS.send)}</button>
       </div>
     </section>`;
@@ -371,6 +371,11 @@ export function pluginStyleText(): string {
       font-family: var(--font-mono, inherit);
       font-size: var(--text-base, 14px);
       padding: 9px 10px;
+    }
+
+    .pi-web-chat-composer .prompt-textarea:focus-visible {
+      border-color: var(--accent, #00ff88);
+      box-shadow: 0 0 0 2px rgba(0,255,136,.25);
     }
 
     .pi-web-chat-composer .attach-btn {
@@ -670,6 +675,10 @@ export function pluginStyleText(): string {
       background: transparent;
       color: inherit;
       font: inherit;
+    }
+
+    .${ROOT_CLASS} .pi-web-chat-textarea:focus-visible {
+      box-shadow: inset 0 -2px 0 var(--accent, #60a5fa);
     }
 
     .${ROOT_CLASS} .pi-web-chat-icon-btn,
