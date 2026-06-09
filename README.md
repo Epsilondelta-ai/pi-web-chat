@@ -68,6 +68,7 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`; assistant messages may include capped `toolCalls` with `{ id, name, args, text, status }`
 - `startPrompt` with `{ text, attachments, sessionId }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
+- `streamEventsSse` with `{ runId, cursor }` → SSE `event:`/`data:` frames for the same chat events
 - `abortPrompt` with `{ runId }` → `{ aborted, runId }`
 - `submitPrompt` with `{ text, attachments, sessionId }` → `{ accepted, activeSessionId, messages, isStreaming }`
 - `runShell` with `{ command, timeoutMs }` → `{ output, exitCode, durationMs, truncated }`

@@ -610,6 +610,10 @@ async function consumeStreamingRun(
   assistant: ChatMessage,
   renderCurrent: () => void,
 ): Promise<void> {
+  if (await consumeStreamingRunSse(context, store, runId, assistant, renderCurrent)) {
+    return;
+  }
+
   let cursor = 0;
   let streaming = true;
   renderCurrent();
@@ -634,6 +638,165 @@ async function consumeStreamingRun(
   }
 }
 
+async function consumeStreamingRunSse(
+  context: PluginContext,
+  store: ChatStore,
+  runId: string,
+  assistant: ChatMessage,
+  renderCurrent: () => void,
+): Promise<boolean> {
+  const stream = await backendSseStream(context, "streamEventsSse", { runId, cursor: 0 });
+
+  if (!stream) {
+    return false;
+  }
+
+  assistant.streaming = true;
+  renderCurrent();
+
+  try {
+    await readSseChatEvents(stream, (event: ChatEvent): void => {
+      applyChatEvents(assistant, [event]);
+      assistant.streaming = event.type !== "run.end";
+      activeSession(store).updatedAt = Date.now();
+      saveStore(store);
+      renderCurrent();
+    });
+  } finally {
+    assistant.streaming = false;
+    saveStore(store);
+    renderCurrent();
+  }
+
+  return true;
+}
+
+async function backendSseStream(
+  context: PluginContext,
+  method: string,
+  data: JsonRecord = {},
+): Promise<ReadableStream<Uint8Array> | null> {
+  if (!context.backend) {
+    return null;
+  }
+
+  const workspaceId = getActiveWorkspaceId(context);
+
+  try {
+    const response = await context.backend(method, { workspaceId, data });
+    return readableStreamFromBackendResponse(response);
+  } catch (error) {
+    if (isUnsupportedStreamingBackend(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function readableStreamFromBackendResponse(response: unknown): ReadableStream<Uint8Array> | null {
+  if (typeof ReadableStream !== "undefined" && response instanceof ReadableStream) {
+    return response as ReadableStream<Uint8Array>;
+  }
+
+  if (typeof Response !== "undefined" && response instanceof Response) {
+    return response.body;
+  }
+
+  if (typeof response === "string") {
+    return textToReadableStream(response);
+  }
+
+  if (!isRecord(response)) {
+    return null;
+  }
+
+  const body = response.body;
+
+  if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+    return body as ReadableStream<Uint8Array>;
+  }
+
+  const sse = response.sse;
+
+  if (typeof sse === "string") {
+    return textToReadableStream(sse);
+  }
+
+  return null;
+}
+
+function textToReadableStream(text: string): ReadableStream<Uint8Array> {
+  const encoded = new TextEncoder().encode(text);
+  return new ReadableStream<Uint8Array>({
+    start(controller: ReadableStreamDefaultController<Uint8Array>): void {
+      controller.enqueue(encoded);
+      controller.close();
+    },
+  });
+}
+
+async function readSseChatEvents(stream: ReadableStream<Uint8Array>, onEvent: (event: ChatEvent) => void): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const result = await reader.read();
+
+    if (result.done) {
+      buffer += decoder.decode();
+      emitSseBuffer(buffer, onEvent);
+      return;
+    }
+
+    buffer += decoder.decode(result.value, { stream: true });
+    const split = splitCompleteSseFrames(buffer);
+    buffer = split.remainder;
+
+    for (const frame of split.frames) {
+      emitSseFrame(frame, onEvent);
+    }
+  }
+}
+
+function splitCompleteSseFrames(buffer: string): { frames: string[]; remainder: string } {
+  const normalized = buffer.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const parts = normalized.split("\n\n");
+  const remainder = parts.pop() || "";
+  return { frames: parts, remainder };
+}
+
+function emitSseBuffer(buffer: string, onEvent: (event: ChatEvent) => void): void {
+  const trimmed = buffer.trim();
+
+  if (trimmed) {
+    emitSseFrame(trimmed, onEvent);
+  }
+}
+
+function emitSseFrame(frame: string, onEvent: (event: ChatEvent) => void): void {
+  const data = frame
+    .split("\n")
+    .filter((line: string): boolean => line.startsWith("data:"))
+    .map((line: string): string => line.slice(5).trimStart())
+    .join("\n");
+
+  if (!data) {
+    return;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(data);
+
+    if (isChatEvent(parsed)) {
+      onEvent(parsed);
+    }
+  } catch {
+    // Ignore malformed SSE frames; the next frame can still be valid.
+  }
+}
+
 function publishChatInputSubmitted(text: string, attachments: FileAttachment[]): void {
   globalThis.piWeb?.subject<ChatInputSubmitted>("chat.input.submitted").next({
     text,
@@ -651,7 +814,7 @@ async function startStreamingPrompt(context: PluginContext, text: string, attach
 }
 
 function isUnsupportedStreamingBackend(error: unknown): boolean {
-  return /unknown method: startPrompt|unsupported method: startPrompt|startPrompt unsupported/i.test(errorText(error));
+  return /unknown method: (startPrompt|streamEventsSse)|unsupported method: (startPrompt|streamEventsSse)|(startPrompt|streamEventsSse) unsupported/i.test(errorText(error));
 }
 
 async function submitPromptToPluginBackend(context: PluginContext, text: string, attachments: FileAttachment[], sessionId = ""): Promise<BackendResponse> {

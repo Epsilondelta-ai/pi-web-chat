@@ -160,6 +160,29 @@ test("backend wrapper completes stream when pi is unavailable", async () => {
   assert.ok(stream.events.some((event) => event.type === "error"));
 });
 
+test("backend wrapper emits stream events as SSE frames", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse js' } }));
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
+  const start = await callBackend("startPrompt", root, { text: "hello" }, env);
+  const stream = await runBackend(backend, "streamEventsSse", root, { runId: start.runId, cursor: 0 }, env);
+
+  assert.equal(stream.code, 0, stream.stderr);
+  assert.match(stream.stdout, /: pi-web-chat/);
+  assert.match(stream.stdout, /event: text\.delta/);
+  assert.match(stream.stdout, /data: .*sse js/);
+});
+
 test("js streaming backend caps response session ids", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
@@ -218,6 +241,31 @@ process.stdin.on('end', () => {
   }
 
   assert.equal(stream.isStreaming, false);
+});
+
+test("compiled backend emits stream events as SSE frames", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse go' } }));
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "hello" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+  const stream = await runBackendBinary("streamEventsSse", root, { data: { runId: started.runId, cursor: 0 } }, env);
+
+  assert.equal(stream.code, 0, stream.stderr);
+  assert.match(stream.stdout, /: pi-web-chat/);
+  assert.match(stream.stdout, /event: text\.delta/);
+  assert.match(stream.stdout, /data: .*sse go/);
 });
 
 test("compiled backend completes stream when pi is unavailable", async () => {

@@ -417,6 +417,54 @@ test("mounted submit streams with startPrompt and notifies sidebar refresh chann
   });
 });
 
+test("mounted submit consumes SSE before polling streamEvents", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "sse-session", runId: "run-sse", isStreaming: true };
+        }
+
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"hello "}\n\n'));
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"sse"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end","exitCode":0}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        if (method === "chatState" && input.data.sessionId === "sse-session") {
+          return { activeSessionId: "sse-session", messages: [{ id: "a1", role: "assistant", text: "final sse", createdAt: 2 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream with sse";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    assert.ok(backendCalls.some((call) => call.method === "streamEventsSse" && call.input.data.runId === "run-sse"));
+    assert.equal(backendCalls.some((call) => call.method === "streamEvents"), false);
+    assert.match(window.document.querySelector(".term-inner").textContent, /hello sse|final sse/);
+    cleanup();
+  });
+});
+
 test("mounted tool calls render collapsed cards with tool icons", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

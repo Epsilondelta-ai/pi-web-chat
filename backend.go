@@ -227,6 +227,13 @@ func main() {
 	}
 	input = normalizeBackendInput(input)
 
+	if method == "streamEventsSse" {
+		if err := streamPiEventsSse(input, os.Stdout); err != nil {
+			fail(err)
+		}
+		return
+	}
+
 	result, err := handle(method, workspaceRoot, input)
 	if err != nil {
 		fail(err)
@@ -495,6 +502,56 @@ func streamPiEvents(input request) (any, error) {
 		"cursor":          nextCursor,
 		"isStreaming":     streaming,
 	}, nil
+}
+
+func streamPiEventsSse(input request, writer io.Writer) error {
+	cursor := intInput(input, "cursor", 0)
+	if _, err := fmt.Fprint(writer, ": pi-web-chat\n\n"); err != nil {
+		return err
+	}
+
+	for {
+		response, err := streamPiEvents(request{"runId": stringInput(input, "runId"), "cursor": cursor})
+		if err != nil {
+			return err
+		}
+		payload, ok := response.(map[string]any)
+		if !ok {
+			return errors.New("invalid stream response")
+		}
+		cursor = intFromAny(payload["cursor"])
+		events, _ := payload["events"].([]streamEvent)
+
+		for _, event := range events {
+			data, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", sseEventName(stringFromAny(event["type"])), data); err != nil {
+				return err
+			}
+		}
+
+		if payload["isStreaming"] != true {
+			return nil
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+func sseEventName(value string) string {
+	if value == "" {
+		return "message"
+	}
+	builder := strings.Builder{}
+	for _, r := range value {
+		if r == '.' || r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			builder.WriteRune(r)
+			continue
+		}
+		builder.WriteRune('_')
+	}
+	return builder.String()
 }
 
 func abortPiPrompt(input request) (any, error) {
