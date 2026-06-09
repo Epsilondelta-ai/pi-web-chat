@@ -967,8 +967,9 @@ function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
   const head = document.createElement("button");
   head.type = "button";
   head.className = "tc-head";
-  head.dataset.action = "toggle-tool";
+  head.title = "Show tool output";
   head.setAttribute("aria-expanded", "false");
+  head.setAttribute("aria-label", `Show ${tool.name || "tool"} output`);
   head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
 
   const body = document.createElement("pre");
@@ -986,6 +987,13 @@ function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, body: HTMLE
   body.hidden = collapsed;
   card.dataset.collapsed = collapsed ? "true" : "false";
   head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${card.dataset.tool || "tool"} output`);
+  head.title = collapsed ? "Show tool output" : "Hide tool output";
+  const toggle = head.querySelector<HTMLElement>(".tc-toggle-label");
+
+  if (toggle) {
+    toggle.textContent = collapsed ? "show" : "hide";
+  }
 }
 
 function toolGlyph(tool: ChatToolCall): HTMLElement {
@@ -1042,10 +1050,16 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
 }
 
 function toolCaret(): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className = "tc-toggle";
+  const label = document.createElement("span");
+  label.className = "tc-toggle-label";
+  label.textContent = "show";
   const caret = document.createElement("span");
   caret.className = "tc-caret";
   caret.textContent = "▸";
-  return caret;
+  wrap.append(label, caret);
+  return wrap;
 }
 
 function mountedToolArgsText(tool: ChatToolCall): string {
