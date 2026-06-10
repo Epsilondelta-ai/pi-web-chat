@@ -359,7 +359,7 @@ func resolveRoot(root string) (string, error) {
 }
 
 func submitPiPrompt(workspaceRoot string, input request) (any, error) {
-	root, err := resolveRoot(workspaceRoot)
+	root, err := promptWorkspaceRoot(workspaceRoot, input)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +413,7 @@ type streamRunState struct {
 type streamEvent map[string]any
 
 func startPiPrompt(workspaceRoot string, input request) (any, error) {
-	root, err := resolveRoot(workspaceRoot)
+	root, err := promptWorkspaceRoot(workspaceRoot, input)
 	if err != nil {
 		return nil, err
 	}
@@ -952,11 +952,28 @@ func piSessionFileInDir(dir, sessionID string) (string, bool) {
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") || !strings.Contains(entry.Name(), sessionID) {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
 
-		return filepath.Join(dir, entry.Name()), true
+		path := filepath.Join(dir, entry.Name())
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			continue
+		}
+		reader := bufio.NewReader(file)
+		firstLine, readErr := reader.ReadString('\n')
+		_ = file.Close()
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			continue
+		}
+		var header map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(firstLine)), &header); err != nil {
+			continue
+		}
+		if header["type"] == "session" && header["id"] == sessionID {
+			return path, true
+		}
 	}
 
 	return "", false
@@ -1020,14 +1037,9 @@ func limitString(value string, max int) string {
 }
 
 func readPiChatState(workspaceRoot string, input request) (any, error) {
-	root, err := resolveRoot(workspaceRoot)
+	root, err := promptWorkspaceRoot(workspaceRoot, input)
 	if err != nil {
 		return nil, err
-	}
-	if workspacePath := strings.TrimSpace(stringInput(input, "workspacePath")); workspacePath != "" {
-		if selectedRoot, selectedErr := resolveRoot(workspacePath); selectedErr == nil {
-			root = selectedRoot
-		}
 	}
 	sessionFile := ""
 	requestedSessionID := strings.TrimSpace(stringInput(input, "sessionId"))
@@ -1053,6 +1065,34 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 		isStreaming = isAssistantMessageStreaming(last)
 	}
 	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": isStreaming}, nil
+}
+
+func promptWorkspaceRoot(workspaceRoot string, input request) (string, error) {
+	root, err := resolveRoot(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	workspacePath := strings.TrimSpace(stringInput(input, "workspacePath"))
+	if workspacePath == "" {
+		return root, nil
+	}
+	selectedRoot, selectedErr := resolveRoot(workspacePath)
+	if selectedErr != nil {
+		return root, nil
+	}
+	if selectedRoot == root {
+		return selectedRoot, nil
+	}
+	requestedSessionID := strings.TrimSpace(stringInput(input, "sessionId"))
+	if requestedSessionID == "" {
+		return root, nil
+	}
+	for _, dir := range piSessionDirs(selectedRoot) {
+		if _, ok := piSessionFileInDir(dir, requestedSessionID); ok {
+			return selectedRoot, nil
+		}
+	}
+	return root, nil
 }
 
 func isAssistantMessageStreaming(message chatMessage) bool {

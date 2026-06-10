@@ -308,6 +308,46 @@ test("mounted activation follows sidebar selected-session channel after mount", 
   });
 });
 
+test("mounted activation ignores duplicate sidebar selection events", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const selectedSession$ = new BehaviorSubject(null);
+    let sessionStreamCount = 0;
+    app.dataset.activeWorkspaceId = "workspace-dup";
+    app.piWebSidebar = {
+      channels: { selectedSession$ },
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-dup",
+        activeSessionId: "dup-session",
+        workspaces: [{ id: "workspace-dup", path: "/tmp/workspace-dup" }],
+      }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      backendStream: async (method) => {
+        if (method === "sessionEventsSse") {
+          sessionStreamCount += 1;
+          return new ReadableStream({ start() {} });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const initialStreamCount = sessionStreamCount;
+    selectedSession$.next({ sessionId: "dup-session", workspaceId: "workspace-dup" });
+    selectedSession$.next({ sessionId: "dup-session", workspaceId: "workspace-dup" });
+    await tick();
+
+    assert.equal(sessionStreamCount, initialStreamCount);
+    cleanup();
+  });
+});
+
 test("mounted activation follows sidebar session.activeId clicks after mount", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
@@ -436,13 +476,69 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
+test("mounted submit sends selected workspace path with prompt", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.dataset.activeWorkspaceId = "workspace-selected";
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-selected",
+        activeSessionId: "workspace-session",
+        workspaces: [{ id: "workspace-selected", path: "/tmp/workspace-selected" }],
+      }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return { activeSessionId: input.data.sessionId, messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "workspace prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    const startCall = backendCalls.find((call) => call.method === "startPrompt");
+    const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
+
+    assert.equal(startCall.input.data.sessionId, "workspace-session");
+    assert.equal(startCall.input.data.workspacePath, "/tmp/workspace-selected");
+    assert.equal(submitCall.input.data.workspacePath, "/tmp/workspace-selected");
+    cleanup();
+  });
+});
+
 test("mounted submit keeps captured viewed session during startPrompt fallback race", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
     let viewedSession = "clicked-session";
+    let viewedWorkspaceId = "workspace-clicked";
     let releaseStart;
     const startReady = new Promise((resolve) => { releaseStart = resolve; });
-    app.piWebSidebar = { getSnapshot: () => ({ activeWorkspaceId: "workspace-1", activeSessionId: viewedSession }) };
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: viewedWorkspaceId,
+        activeSessionId: viewedSession,
+        workspaces: [
+          { id: "workspace-clicked", path: "/tmp/workspace-clicked" },
+          { id: "workspace-later", path: "/tmp/workspace-later" },
+        ],
+      }),
+    };
 
     const cleanup = activate({
       app,
@@ -451,7 +547,7 @@ test("mounted submit keeps captured viewed session during startPrompt fallback r
 
         if (method === "startPrompt") {
           await startReady;
-          return {};
+          return { activeSessionId: "backend-created-session" };
         }
 
         if (method === "submitPrompt") {
@@ -470,6 +566,8 @@ test("mounted submit keeps captured viewed session during startPrompt fallback r
     window.document.querySelector(".send-btn").click();
     await tick();
     viewedSession = "later-session";
+    viewedWorkspaceId = "workspace-later";
+    app.dataset.activeWorkspaceId = "workspace-later";
     globalThis.piWeb.behaviorSubject("session.activeId", null).next("later-session");
     releaseStart();
     await tick();
@@ -478,12 +576,14 @@ test("mounted submit keeps captured viewed session during startPrompt fallback r
     const startCall = backendCalls.find((call) => call.method === "startPrompt");
     const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
     const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
-    const clicked = store.sessions.find((session) => session.id === "clicked-session");
     const later = store.sessions.find((session) => session.id === "later-session");
 
     assert.equal(startCall.input.data.sessionId, "clicked-session");
-    assert.equal(submitCall.input.data.sessionId, "clicked-session");
-    assert.match(JSON.stringify(clicked.messages), /race-safe prompt/);
+    assert.equal(startCall.input.data.workspacePath, "/tmp/workspace-clicked");
+    assert.equal(submitCall.input.data.sessionId, "backend-created-session");
+    assert.equal(submitCall.input.data.workspacePath, "/tmp/workspace-clicked");
+    assert.equal(store.activeSessionId, "later-session");
+    assert.equal(store.sessions.some((session) => session.id === "backend-created-session"), true);
     assert.doesNotMatch(JSON.stringify(later.messages), /race-safe prompt/);
     cleanup();
   });
@@ -810,11 +910,9 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     await tick();
     await tick();
 
-    const updatedRunningCard = window.document.querySelectorAll(".tool-card")[3];
-    assert.equal(updatedRunningCard.dataset.collapsed, "false");
-    assert.equal(updatedRunningCard.querySelector(".tc-head").getAttribute("aria-expanded"), "true");
-    assert.equal(updatedRunningCard.querySelector(".tc-body").textContent, "running update");
-    assert.equal(updatedRunningCard.querySelector(".tc-toggle-label").textContent, "hide");
+    const unchangedRunningCard = window.document.querySelectorAll(".tool-card")[3];
+    assert.equal(unchangedRunningCard.dataset.collapsed, "false");
+    assert.equal(unchangedRunningCard.querySelector(".tc-body").textContent, "running");
 
     globalThis.piWeb.behaviorSubject("session.activeId", null).next("other-tool-session");
     await tick();

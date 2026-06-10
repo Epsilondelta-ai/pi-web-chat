@@ -65,13 +65,13 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
-- `chatState` with `{ sessionId }` → `{ activeSessionId, messages }`; fallback state request for hosts without backend streams
-- `startPrompt` with `{ text, attachments, sessionId }` → `{ accepted, runId, activeSessionId, isStreaming }`
+- `chatState` with `{ sessionId, workspacePath }` → `{ activeSessionId, messages }`; fallback state request for hosts without backend streams
+- `startPrompt` with `{ text, attachments, sessionId, workspacePath }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
-- `sessionEventsSse` with `{ sessionId }` → SSE `chat.state` frames for session transcript state
-- `streamEventsSse` with `{ runId, cursor }` → SSE `event:`/`data:` frames for the same chat events
+- `sessionEventsSse` with `{ sessionId, workspacePath }` → SSE `chat.state` frames for session transcript state
+- `streamEventsSse` with `{ runId, cursor, workspacePath }` → SSE `event:`/`data:` frames for the same chat events
 - `abortPrompt` with `{ runId }` → `{ aborted, runId }`
-- `submitPrompt` with `{ text, attachments, sessionId }` → `{ accepted, activeSessionId, messages, isStreaming }`
+- `submitPrompt` with `{ text, attachments, sessionId, workspacePath }` → `{ accepted, activeSessionId, messages, isStreaming }`
 - `runShell` with `{ command, timeoutMs }` → `{ output, exitCode, durationMs, truncated }`
 
 Supported prebuilt targets:
