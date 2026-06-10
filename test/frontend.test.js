@@ -179,6 +179,58 @@ test("mounted chatState preserves messages while sanitizing malformed tool calls
   });
 });
 
+test("mounted activation shows guide when no selected or stored session exists", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.match(window.document.querySelector(".term-inner").textContent, /Select or create a session/);
+    assert.equal(backendCalls.some((call) => call.method === "chatState"), false);
+    cleanup();
+  });
+});
+
+test("mounted activation loads stored session instead of guide", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{
+        id: "stored-session",
+        title: "Stored",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "m1", role: "assistant", text: "stored transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /stored transcript/);
+    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    cleanup();
+  });
+});
+
 test("mounted activation loads sidebar-selected session and sends chatState for it", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
