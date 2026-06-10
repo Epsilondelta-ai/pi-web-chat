@@ -148,6 +148,7 @@ process.stdin.on('end', () => {
   console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't0', name: 'read', arguments: { path: 'README.md' } } } }));
   console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id: 't0', name: 'read' } } }));
   console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't2', name: 'edit', arguments: { patch: 'x'.repeat(2000) } } } }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't3', name: 'edit', arguments: { patch: '漢'.repeat(400) } } } }));
   console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pwd' } }));
   console.log(JSON.stringify({ type: 'tool_execution_update', toolCallId: 't1', toolName: 'bash', partialResult: { content: [{ type: 'text', text: 'out' }] } }));
   console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));
@@ -177,6 +178,8 @@ process.stdin.on('end', () => {
   assert.equal(events.find((event) => event.toolCallId === "t2" && event.type === "tool.start").argsStatus, "truncated");
   assert.equal(events.find((event) => event.toolCallId === "t2" && event.type === "tool.start").args._truncated, true);
   assert.equal(events.find((event) => event.toolCallId === "t2" && event.type === "tool.start").args._preview, undefined);
+  assert.equal(events.find((event) => event.toolCallId === "t3" && event.type === "tool.start").argsStatus, "truncated");
+  assert.equal(events.find((event) => event.toolCallId === "t3" && event.type === "tool.start").args._truncated, true);
   assert.deepEqual(events.find((event) => event.toolCallId === "t1" && event.type === "tool.start").args, { command: "pwd" });
   assert.equal(events.find((event) => event.toolCallId === "t1" && event.type === "tool.start").argsStatus, "present");
   assert.equal(stream.isStreaming, false);

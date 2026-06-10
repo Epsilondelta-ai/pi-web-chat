@@ -387,7 +387,7 @@ function trimToolArgs(args) {
   } catch {
     return { args: { _truncated: true }, argsStatus: "truncated" };
   }
-  if (data.length <= maxToolArgsBytes) return { args, argsStatus: "present" };
+  if (Buffer.byteLength(data, "utf8") <= maxToolArgsBytes) return { args, argsStatus: "present" };
   return { args: { _truncated: true }, argsStatus: "truncated" };
 }
 
