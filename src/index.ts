@@ -51,6 +51,8 @@ const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
 const MOUNTED_CHAT_POLL_MS = 250;
 const STREAM_RENDER_MIN_MS = 250;
+const SPINNER_FRAME_COUNT = 6;
+const SPINNER_INTERVAL_MS = 150;
 const mountedExpandedToolCards: Set<string> = new Set<string>();
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
@@ -195,6 +197,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
   installMountedScrollLock(disposables, chatSurface);
+  startMountedSpinners(disposables, chatSurface);
   if (cleanupChat) {
     disposables.add(cleanupChat);
   }
@@ -1758,6 +1761,70 @@ function renderMountedToolBody(tool: ChatToolCall): HTMLElement {
   return body;
 }
 
+function startMountedSpinners(disposables: Disposables, root: HTMLElement): void {
+  let frame: number = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const view: (Window & { MutationObserver?: typeof MutationObserver }) | null = root.ownerDocument.defaultView;
+  const motionQuery: MediaQueryList | undefined = typeof view?.matchMedia === "function"
+    ? view.matchMedia("(prefers-reduced-motion: reduce)")
+    : undefined;
+  const stop = (): void => {
+    if (timer) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  };
+  const tick = (): void => {
+    frame = (frame + 1) % SPINNER_FRAME_COUNT;
+
+    for (const spinner of root.querySelectorAll<HTMLElement>(".spinner")) {
+      spinner.dataset.frame = String(frame);
+    }
+  };
+  const update = (): void => {
+    const spinners: NodeListOf<HTMLElement> = root.querySelectorAll<HTMLElement>(".spinner");
+
+    if (motionQuery?.matches || spinners.length === 0) {
+      stop();
+      frame = 0;
+
+      for (const spinner of spinners) {
+        spinner.dataset.frame = "0";
+      }
+
+      return;
+    }
+
+    if (!timer) {
+      timer = setInterval(tick, SPINNER_INTERVAL_MS);
+    }
+  };
+  const observer = new (view?.MutationObserver || MutationObserver)(update);
+  observer.observe(root, { childList: true, subtree: true });
+  motionQuery?.addEventListener("change", update);
+  update();
+  disposables.add({
+    remove: () => {
+      observer.disconnect();
+      motionQuery?.removeEventListener("change", update);
+      stop();
+    },
+  });
+}
+
+function createTerminalSpinner(): HTMLElement {
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  spinner.dataset.frame = "0";
+  spinner.setAttribute("aria-hidden", "true");
+
+  for (let index: number = 0; index < SPINNER_FRAME_COUNT; index += 1) {
+    spinner.append(document.createElement("span"));
+  }
+
+  return spinner;
+}
+
 function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, tool: ChatToolCall, toolKey: string): void {
   const body = card.querySelector<HTMLElement>(".tc-body");
   const collapsed: boolean = body !== null;
@@ -1815,9 +1882,7 @@ function toolMeta(tool: ChatToolCall, collapsed: boolean): HTMLElement {
   meta.className = "tc-meta";
 
   if (tool.status === "running") {
-    const spinner = document.createElement("span");
-    spinner.className = "spinner";
-    spinner.textContent = "⠇";
+    const spinner = createTerminalSpinner();
     const label = document.createElement("span");
     label.className = "running";
     label.textContent = "running";

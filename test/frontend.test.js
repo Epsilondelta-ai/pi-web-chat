@@ -1250,7 +1250,8 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards[1].querySelector(".tc-args").textContent, JSON.stringify({ command: "git status" }));
     assert.equal(cards[2].querySelector(".tc-glyph").textContent, "●");
     assert.ok(cards[3].querySelector("[data-tool-icon='circle-check']"));
-    assert.equal(cards[3].querySelector(".tc-meta .spinner").textContent, "⠇");
+    assert.equal(cards[3].querySelectorAll(".tc-meta .spinner span").length, 6);
+    assert.match(cards[3].querySelector(".tc-meta .spinner").dataset.frame, /^[0-5]$/);
     assert.equal(cards[3].querySelector(".tc-meta .running").textContent, "running");
     assert.equal(cards[3].querySelector(".tc-meta .ok"), null);
     assert.equal(cards[3].querySelector(".tc-toggle-label").textContent, "show");
@@ -1307,6 +1308,59 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(remountedFirstCard.querySelector(".tc-head").getAttribute("aria-expanded"), "false");
     assert.equal(remountedFirstCard.querySelector(".tc-body"), null);
     remountCleanup();
+  });
+});
+
+test("mounted terminal spinner respects reduced motion", async () => {
+  await withWindow(async ({ window }) => {
+    const previousSetInterval = globalThis.setInterval;
+    let intervalCount = 0;
+    globalThis.setInterval = ((handler, timeout, ...args) => {
+      intervalCount += 1;
+      return previousSetInterval(handler, timeout, ...args);
+    });
+    window.matchMedia = (query) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    });
+
+    try {
+      const app = window.document.querySelector("pi-app");
+      app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "reduced-motion-session" }) };
+      const cleanup = activate({
+        app,
+        backend: async (method) => {
+          if (method === "chatState") {
+            return {
+              activeSessionId: "reduced-motion-session",
+              messages: [{
+                id: "a1",
+                role: "assistant",
+                text: "",
+                createdAt: 1,
+                toolCalls: [{ id: "t1", name: "bash", text: "running", status: "running" }],
+              }],
+            };
+          }
+
+          return {};
+        },
+        mount: createMount(window, app),
+      });
+
+      await tick();
+      await tick(200);
+
+      const spinner = window.document.querySelector(".tc-meta .spinner");
+      assert.equal(spinner.dataset.frame, "0");
+      assert.equal(spinner.querySelectorAll("span").length, 6);
+      assert.equal(intervalCount, 0);
+      cleanup();
+    } finally {
+      globalThis.setInterval = previousSetInterval;
+    }
   });
 });
 
