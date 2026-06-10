@@ -145,6 +145,10 @@ process.stdin.on('end', () => {
   console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
   console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think' } }));
   console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't0', name: 'read', arguments: { path: 'README.md' } } } }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id: 't0', name: 'read' } } }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't2', name: 'edit', arguments: { patch: 'x'.repeat(2000) } } } }));
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't3', name: 'edit', arguments: { patch: '漢'.repeat(400) } } } }));
   console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pwd' } }));
   console.log(JSON.stringify({ type: 'tool_execution_update', toolCallId: 't1', toolName: 'bash', partialResult: { content: [{ type: 'text', text: 'out' }] } }));
   console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));
@@ -168,6 +172,16 @@ process.stdin.on('end', () => {
   assert.ok(types.includes("tool.start"));
   assert.ok(types.includes("tool.delta"));
   assert.ok(types.includes("tool.end"));
+  assert.deepEqual(events.find((event) => event.toolCallId === "t0" && event.type === "tool.start").args, { path: "README.md" });
+  assert.equal(events.find((event) => event.toolCallId === "t0" && event.type === "tool.start").argsStatus, "present");
+  assert.equal(events.find((event) => event.toolCallId === "t0" && event.type === "tool.end").argsStatus, "unavailable");
+  assert.equal(events.find((event) => event.toolCallId === "t2" && event.type === "tool.start").argsStatus, "truncated");
+  assert.equal(events.find((event) => event.toolCallId === "t2" && event.type === "tool.start").args._truncated, true);
+  assert.equal(events.find((event) => event.toolCallId === "t2" && event.type === "tool.start").args._preview, undefined);
+  assert.equal(events.find((event) => event.toolCallId === "t3" && event.type === "tool.start").argsStatus, "truncated");
+  assert.equal(events.find((event) => event.toolCallId === "t3" && event.type === "tool.start").args._truncated, true);
+  assert.deepEqual(events.find((event) => event.toolCallId === "t1" && event.type === "tool.start").args, { command: "pwd" });
+  assert.equal(events.find((event) => event.toolCallId === "t1" && event.type === "tool.start").argsStatus, "present");
   assert.equal(stream.isStreaming, false);
   assert.equal(events.some((event) => event.type === "run.end"), true);
 });
@@ -581,7 +595,7 @@ test("chatState parses pi JSONL session fixtures", async () => {
   assert.equal(result.activeSessionId, "pi-session-1");
   assert.equal(result.isStreaming, false);
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["a2", "assistant", ""]]);
-  assert.deepEqual(result.messages.at(-1).toolCalls, [{ id: "call-1", name: "bash", args: { command: "bun test" }, text: "done", status: "ok" }]);
+  assert.deepEqual(result.messages.at(-1).toolCalls, [{ id: "call-1", name: "bash", args: { command: "bun test" }, argsStatus: "present", text: "done", status: "ok" }]);
 
   const selected = await callBackend("chatState", root, { sessionId: "pi-session-2" }, { HOME: home });
   assert.equal(selected.activeSessionId, "pi-session-2");
@@ -615,8 +629,9 @@ test("chatState caps large tool call arguments and generates stable fallback ids
   assert.equal(result.messages[0].toolCalls.length, 2);
   assert.notEqual(result.messages[0].toolCalls[0].id, result.messages[0].toolCalls[1].id);
   assert.equal(result.messages[0].toolCalls[0].args._truncated, true);
-  assert.equal(typeof result.messages[0].toolCalls[0].args._preview, "string");
-  assert.ok(result.messages[0].toolCalls[0].args._preview.length <= 1100);
+  assert.equal(result.messages[0].toolCalls[0].args._preview, undefined);
+  assert.equal(result.messages[0].toolCalls[0].argsStatus, "truncated");
+  assert.equal(result.messages[0].toolCalls[1].argsStatus, "present");
   assert.ok(JSON.stringify(result).length < 70000);
 });
 
@@ -693,6 +708,7 @@ test("chatState caps response session ids and synthesized tool ids", async () =>
   assert.equal(result.messages[0].toolCalls[0].id.length, 160);
   assert.equal(result.messages[0].toolCalls[0].name.length, 120);
   assert.equal(result.messages[0].toolCalls[0].status, "running");
+  assert.equal(result.messages[0].toolCalls[0].argsStatus, "empty");
   assert.equal(result.messages.at(-1).role, "tool");
   assert.ok(JSON.stringify(result).length < 70000);
 });

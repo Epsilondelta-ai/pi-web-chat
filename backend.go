@@ -80,11 +80,12 @@ type chatMessage struct {
 }
 
 type chatToolCall struct {
-	ID     string         `json:"id"`
-	Name   string         `json:"name"`
-	Args   map[string]any `json:"args,omitempty"`
-	Text   string         `json:"text"`
-	Status string         `json:"status"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	Args       map[string]any `json:"args,omitempty"`
+	ArgsStatus string         `json:"argsStatus,omitempty"`
+	Text       string         `json:"text"`
+	Status     string         `json:"status"`
 }
 
 type textFile struct {
@@ -714,11 +715,13 @@ func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) {
 			emitGoStreamEvent(eventsPath, statePath, mapped)
 		}
 	case "tool_execution_start":
+		args, argsStatus := trimmedToolArgsFromMaps(event)
 		emitGoStreamEvent(eventsPath, statePath, streamEvent{
 			"type":       "tool.start",
 			"toolCallId": stringFromAny(event["toolCallId"]),
 			"toolName":   stringFromAny(event["toolName"]),
-			"args":       event["args"],
+			"args":       args,
+			"argsStatus": argsStatus,
 		})
 	case "tool_execution_update":
 		emitGoStreamEvent(eventsPath, statePath, streamEvent{
@@ -743,6 +746,10 @@ func mapAssistantMessageEvent(raw any) streamEvent {
 		return nil
 	}
 	typeName, _ := event["type"].(string)
+	if typeName == "toolcall_start" || typeName == "toolcall_end" {
+		return mapAssistantToolCallEvent(event, typeName)
+	}
+
 	delta, _ := event["delta"].(string)
 	if delta == "" {
 		return nil
@@ -754,6 +761,29 @@ func mapAssistantMessageEvent(raw any) streamEvent {
 		return streamEvent{"type": "thinking.delta", "delta": delta}
 	}
 	return nil
+}
+
+func mapAssistantToolCallEvent(event map[string]any, typeName string) streamEvent {
+	toolCall, _ := event["toolCall"].(map[string]any)
+	toolID := stringFromAny(toolCall["id"])
+	if toolID == "" {
+		toolID = stringFromAny(event["id"])
+	}
+	toolName := stringFromAny(toolCall["name"])
+	if toolName == "" {
+		toolName = stringFromAny(event["name"])
+	}
+	if toolName == "" {
+		toolName = "tool"
+	}
+
+	args, argsStatus := trimmedToolArgsFromMaps(toolCall, event)
+	mappedType := "tool.start"
+	if typeName == "toolcall_end" {
+		mappedType = "tool.end"
+	}
+
+	return streamEvent{"type": mappedType, "toolCallId": toolID, "toolName": toolName, "args": args, "argsStatus": argsStatus}
 }
 
 func completeGoStreamRunWithError(eventsPath, statePath string, err error) {
@@ -1259,6 +1289,7 @@ func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 			for toolIndex := range message.ToolCalls {
 				message.ToolCalls[toolIndex].Text = ""
 				message.ToolCalls[toolIndex].Args = nil
+				message.ToolCalls[toolIndex].ArgsStatus = "omitted"
 			}
 			messageBytes = chatMessageResponseBytes(message)
 		}
@@ -1350,16 +1381,46 @@ func piToolCall(block map[string]any, messageID string, blockIndex int) chatTool
 		id = limitString(fmt.Sprintf("%s-tool-%d-%s", limitString(messageID, 80), blockIndex, name), 160)
 	}
 
-	args := map[string]any{}
-	if input, ok := block["input"].(map[string]any); ok {
-		args = input
-	} else if arguments, ok := block["arguments"].(map[string]any); ok {
-		args = arguments
-	} else if rawArgs, ok := block["args"].(map[string]any); ok {
-		args = rawArgs
+	args, argsStatus := trimmedToolArgsFromMaps(block)
+
+	return chatToolCall{ID: id, Name: name, Args: args, ArgsStatus: argsStatus, Text: "", Status: "running"}
+}
+
+func trimmedToolArgsFromMaps(maps ...map[string]any) (map[string]any, string) {
+	args, argsStatus := toolArgsFromMaps(maps...)
+	args = trimToolArgs(args)
+	if isTruncatedToolArgs(args) {
+		argsStatus = "truncated"
 	}
 
-	return chatToolCall{ID: id, Name: name, Args: trimToolArgs(args), Text: "", Status: "running"}
+	return args, argsStatus
+}
+
+func toolArgsFromMaps(maps ...map[string]any) (map[string]any, string) {
+	for _, candidate := range maps {
+		if candidate == nil {
+			continue
+		}
+		if input, ok := candidate["input"].(map[string]any); ok {
+			return input, toolArgsStatus(input)
+		}
+		if arguments, ok := candidate["arguments"].(map[string]any); ok {
+			return arguments, toolArgsStatus(arguments)
+		}
+		if rawArgs, ok := candidate["args"].(map[string]any); ok {
+			return rawArgs, toolArgsStatus(rawArgs)
+		}
+	}
+
+	return map[string]any{}, "unavailable"
+}
+
+func toolArgsStatus(args map[string]any) string {
+	if len(args) == 0 {
+		return "empty"
+	}
+
+	return "present"
 }
 
 func trimToolArgs(args map[string]any) map[string]any {
@@ -1369,16 +1430,19 @@ func trimToolArgs(args map[string]any) map[string]any {
 
 	data, err := json.Marshal(args)
 	if err != nil {
-		return map[string]any{"_truncated": true, "_preview": "[unserializable tool arguments]"}
+		return map[string]any{"_truncated": true}
 	}
 	if len(data) <= maxChatToolArgsBytes {
 		return args
 	}
 
-	return map[string]any{
-		"_truncated": true,
-		"_preview":   limitString(string(data), maxChatToolArgsBytes),
-	}
+	return map[string]any{"_truncated": true}
+}
+
+func isTruncatedToolArgs(args map[string]any) bool {
+	truncated, _ := args["_truncated"].(bool)
+
+	return truncated
 }
 
 func unixMillis(value any) int64 {

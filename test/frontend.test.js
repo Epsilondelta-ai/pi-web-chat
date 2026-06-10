@@ -59,6 +59,36 @@ test("AG-UI-like adapter maps internal chat events without runtime dependency", 
   assert.equal(events[2].toolCallId, "t1");
 });
 
+test("legacy renderMessages respects tool argument status labels", () => {
+  const window = new Window();
+  const previousDocument = globalThis.document;
+  globalThis.document = window.document;
+  try {
+    const container = window.document.createElement("div");
+    renderMessages(container, [{
+      id: "a1",
+      role: "assistant",
+      text: "",
+      createdAt: 1,
+      toolCalls: [
+        { id: "t1", name: "read", args: { _truncated: true }, argsStatus: "truncated", text: "", status: "ok" },
+        { id: "t2", name: "legacy", argsStatus: "unavailable", text: "", status: "ok" },
+        { id: "t3", name: "noop", argsStatus: "empty", text: "", status: "ok" },
+        { id: "t4", name: "huge", argsStatus: "omitted", text: "", status: "ok" },
+      ],
+    }]);
+
+    assert.deepEqual(Array.from(container.getElementsByTagName("pre")).slice(1).map((item) => item.textContent), [
+      "arguments truncated: too large to display",
+      "arguments unavailable",
+      "no arguments",
+      "arguments omitted: response too large",
+    ]);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test("command utilities keep chat command behavior", () => {
   assert.equal(commandName({ command: "/a" }), "/a");
   assert.equal(commandName({ cmd: "/b" }), "/b");
@@ -1043,6 +1073,8 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
           return new ReadableStream({
             start(controller) {
               controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"streamed answer"}\n\n'));
+              controller.enqueue(encoder.encode('event: tool.start\ndata: {"type":"tool.start","toolCallId":"t1","toolName":"read","args":{"path":"README.md"},"argsStatus":"present"}\n\n'));
+              controller.enqueue(encoder.encode('event: tool.end\ndata: {"type":"tool.end","toolCallId":"t1","toolName":"read","args":{},"argsStatus":"unavailable"}\n\n'));
               controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end","exitCode":0}\n\n'));
               controller.close();
             },
@@ -1073,6 +1105,7 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
     assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
     assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
     assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
+    assert.equal(window.document.querySelector(".tool-card .tc-args").textContent, JSON.stringify({ path: "README.md" }));
     cleanup();
   });
 });
@@ -1308,6 +1341,58 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(remountedFirstCard.querySelector(".tc-head").getAttribute("aria-expanded"), "false");
     assert.equal(remountedFirstCard.querySelector(".tc-body"), null);
     remountCleanup();
+  });
+});
+
+test("mounted tool calls label argument availability states", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "tool-args-state-session" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return {
+            activeSessionId: "tool-args-state-session",
+            messages: [{
+              id: "a1",
+              role: "assistant",
+              text: "",
+              createdAt: 1,
+              toolCalls: [
+                { id: "empty", name: "noop", argsStatus: "empty", text: "", status: "ok" },
+                { id: "missing", name: "legacy", argsStatus: "unavailable", text: "", status: "ok" },
+                { id: "large", name: "edit", args: { _truncated: true }, argsStatus: "truncated", text: "", status: "ok" },
+                { id: "omitted", name: "read", argsStatus: "omitted", text: "", status: "ok" },
+              ],
+            }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const cards = [...window.document.querySelectorAll(".tool-card")];
+    assert.deepEqual(cards.map((card) => card.querySelector(".tc-args").textContent), [
+      "no arguments",
+      "arguments unavailable",
+      "arguments truncated",
+      "arguments omitted",
+    ]);
+
+    cards.forEach((card) => card.querySelector(".tc-head").click());
+    assert.deepEqual(cards.map((card) => card.querySelector(".tc-body").textContent), [
+      "no arguments",
+      "arguments unavailable",
+      "arguments truncated: too large to display",
+      "arguments omitted: response too large",
+    ]);
+    cleanup();
   });
 });
 

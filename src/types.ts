@@ -135,6 +135,7 @@ export type ChatEvent = {
   toolCallId?: string;
   toolName?: string;
   args?: JsonRecord;
+  argsStatus?: ToolArgsStatus;
   result?: string;
   isError?: boolean;
   message?: string;
@@ -155,10 +156,13 @@ export type ChatMessage = {
   meta?: JsonRecord;
 };
 
+export type ToolArgsStatus = "present" | "empty" | "unavailable" | "truncated" | "omitted";
+
 export type ChatToolCall = {
   id: string;
   name: string;
   args?: JsonRecord;
+  argsStatus?: ToolArgsStatus;
   text: string;
   status: "running" | "ok" | "err";
 };

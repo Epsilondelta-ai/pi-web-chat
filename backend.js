@@ -27,6 +27,7 @@ const workspaceRoot = process.argv[3] || ".";
 const completedRunTtlMs = 15 * 60 * 1000;
 const staleRunTtlMs = 60 * 60 * 1000;
 const maxResponseSessionIdLength = 160;
+const maxToolArgsBytes = 1000;
 
 if (method === "__streamRunner") {
   await runStreamRunner(process.argv.slice(3));
@@ -344,18 +345,50 @@ function mapRpcLine(line, emit) {
     const delta = event.assistantMessageEvent || {};
     if (delta.type === "text_delta") emit({ type: "text.delta", delta: String(delta.delta || "") });
     else if (delta.type === "thinking_delta") emit({ type: "thinking.delta", delta: String(delta.delta || "") });
-    else if (delta.type === "toolcall_start") emit({ type: "tool.start", toolCallId: delta.toolCall?.id || delta.id || "", toolName: delta.toolCall?.name || delta.name || "tool", args: delta.toolCall?.arguments || {} });
+    else if (delta.type === "toolcall_start") emit(toolCallStreamEvent("tool.start", delta));
     else if (delta.type === "toolcall_delta") emit({ type: "tool.delta", toolCallId: delta.toolCallId || delta.id || "", delta: String(delta.delta || "") });
-    else if (delta.type === "toolcall_end") emit({ type: "tool.end", toolCallId: delta.toolCall?.id || delta.id || "", toolName: delta.toolCall?.name || delta.name || "tool", args: delta.toolCall?.arguments || {} });
+    else if (delta.type === "toolcall_end") emit(toolCallStreamEvent("tool.end", delta));
     else emit({ type: "message.event", event: delta.type || "update" });
     return;
   }
 
-  if (event.type === "tool_execution_start") emit({ type: "tool.start", toolCallId: event.toolCallId, toolName: event.toolName, args: event.args || {} });
+  if (event.type === "tool_execution_start") {
+    const { args, argsStatus } = toolArgsFromSources(event);
+    emit({ type: "tool.start", toolCallId: event.toolCallId, toolName: event.toolName, args, argsStatus });
+  }
   else if (event.type === "tool_execution_update") emit({ type: "tool.delta", toolCallId: event.toolCallId, toolName: event.toolName, delta: toolResultText(event.partialResult) });
   else if (event.type === "tool_execution_end") emit({ type: "tool.end", toolCallId: event.toolCallId, toolName: event.toolName, result: toolResultText(event.result), isError: Boolean(event.isError) });
   else if (event.type === "agent_start") emit({ type: "run.agent.start" });
   else if (event.type === "agent_end") emit({ type: "run.agent.end" });
+}
+
+function toolCallStreamEvent(type, delta) {
+  const toolCall = delta.toolCall && typeof delta.toolCall === "object" ? delta.toolCall : {};
+  const { args, argsStatus } = toolArgsFromSources(toolCall, delta);
+  return { type, toolCallId: toolCall.id || delta.id || "", toolName: toolCall.name || delta.name || "tool", args, argsStatus };
+}
+
+function toolArgsFromSources(...sources) {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const key of ["input", "arguments", "args"]) {
+      if (source[key] && typeof source[key] === "object" && !Array.isArray(source[key])) return trimToolArgs(source[key]);
+    }
+  }
+
+  return { args: {}, argsStatus: "unavailable" };
+}
+
+function trimToolArgs(args) {
+  if (Object.keys(args).length === 0) return { args, argsStatus: "empty" };
+  let data = "";
+  try {
+    data = JSON.stringify(args);
+  } catch {
+    return { args: { _truncated: true }, argsStatus: "truncated" };
+  }
+  if (Buffer.byteLength(data, "utf8") <= maxToolArgsBytes) return { args, argsStatus: "present" };
+  return { args: { _truncated: true }, argsStatus: "truncated" };
 }
 
 function toolResultText(result) {
