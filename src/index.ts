@@ -497,6 +497,16 @@ export async function backendCall(
   return isRecord(response) ? response : {};
 }
 
+function emitBackendWarnings(response: BackendResponse): void {
+  const warnings = Array.isArray(response.warnings)
+    ? response.warnings.filter((warning): warning is string => typeof warning === "string" && warning.trim().length > 0)
+    : [];
+
+  for (const warning of warnings) {
+    globalThis.piWeb?.subject<ToastRequest>("toast.requested").next({ level: "warning", message: warning });
+  }
+}
+
 function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
   disposables.listen(dom.textarea, "input", () => {
     state.channels.input$.next(dom.textarea.value);
@@ -607,6 +617,7 @@ async function submitPromptWithStreaming(
   let targetSessionId: string = sessionId;
   const targetWorkspace = activeWorkspaceSelection(state.context);
   const start = await startStreamingPrompt(state.context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+  emitBackendWarnings(start);
   if (typeof start.activeSessionId === "string" && start.activeSessionId) {
     const previousSessionId = targetSessionId;
     const shouldAdoptActiveSession = state.store.activeSessionId === previousSessionId;
@@ -621,6 +632,7 @@ async function submitPromptWithStreaming(
 
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(state.context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+    emitBackendWarnings(response);
     applyBackendResponseToSession(state.store, response, targetSessionId, state.store.activeSessionId === targetSessionId);
     render(state, dom);
 
@@ -679,6 +691,7 @@ async function submitMountedPromptWithStreaming(
   renderMountedBackendMessages(chatSurface, submitSession.messages, targetSessionId);
 
   const start = await startStreamingPrompt(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+  emitBackendWarnings(start);
 
   if (typeof start.activeSessionId === "string" && start.activeSessionId) {
     const previousSessionId = targetSessionId;
@@ -702,6 +715,7 @@ async function submitMountedPromptWithStreaming(
 
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+    emitBackendWarnings(response);
     const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId);
 
     if (store.activeSessionId === targetSessionId) {

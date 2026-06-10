@@ -150,8 +150,7 @@ function startPrompt(root, data) {
   child.unref();
 
   writeJsonAtomic(statePath, { ...readJson(statePath), pid: child.pid, status: "running", updatedAt: Date.now() });
-  return { accepted: true, runId, activeSessionId: responseSessionId(session.sessionId), isStreaming: true };
-}
+  return { accepted: true, runId, activeSessionId: responseSessionId(session.sessionId), isStreaming: true, warnings: session.warnings };}
 
 function streamEvents(data) {
   const state = readRunState(String(data.runId || ""));
@@ -409,22 +408,22 @@ function mergePromptAttachments(text, raw) {
 }
 
 function resolveSession(root, requestedSessionId) {
-  const primaryDir = configuredSessionDir(root);
+  const sessionDir = configuredSessionDirResult(root);
+  const primaryDir = sessionDir.path;
   if (!primaryDir) throw new Error("session directory escapes workspace");
   const dirs = sessionDirs(root);
   mkdirSync(primaryDir, { recursive: true, mode: 0o700 });
   if (requestedSessionId) {
     for (const dirPath of dirs) {
       const existing = findSessionFile(dirPath, requestedSessionId);
-      if (existing) return { sessionId: requestedSessionId, sessionFile: existing };
+      if (existing) return { sessionId: requestedSessionId, sessionFile: existing, warnings: sessionDir.warnings };
     }
   }
   const sessionId = randomUUID();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const sessionFile = join(primaryDir, `${stamp}_${sessionId}.jsonl`);
   writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: root })}\n`, { mode: 0o600 });
-  return { sessionId, sessionFile };
-}
+  return { sessionId, sessionFile, warnings: sessionDir.warnings };}
 
 function findSessionFile(dirPath, sessionId) {
   try {
@@ -491,17 +490,33 @@ function sessionDirs(root) {
 }
 
 function configuredSessionDir(root) {
+  return configuredSessionDirResult(root).path;
+}
+
+function configuredSessionDirResult(root) {
   const fallback = safeSessionDir(root, join(root, ".pi", "sessions"));
   try {
     const settings = JSON.parse(readFileSync(join(root, ".pi", "settings.json"), "utf8"));
     const hasSessionDir = settings && Object.prototype.hasOwnProperty.call(settings, "sessionDir");
     const sessionDir = hasSessionDir ? settings.sessionDir : "";
-    if (typeof sessionDir !== "string" || !sessionDir.trim()) return fallback;
+    if (!hasSessionDir) return { path: fallback, warnings: [] };
+    if (typeof sessionDir !== "string" || !sessionDir.trim()) {
+      return { path: fallback, warnings: [invalidSessionDirWarning()] };
+    }
     const resolved = isAbsolute(sessionDir) ? resolve(sessionDir) : resolve(root, sessionDir);
-    return safeSessionDir(root, resolved) || fallback;
+    const safe = safeSessionDir(root, resolved);
+    return safe ? { path: safe, warnings: [] } : { path: fallback, warnings: [unsafeSessionDirWarning()] };
   } catch {
-    return fallback;
+    return { path: fallback, warnings: [] };
   }
+}
+
+function invalidSessionDirWarning() {
+  return ".pi/settings.json sessionDir must be a non-empty string; using the default session directory";
+}
+
+function unsafeSessionDirWarning() {
+  return ".pi/settings.json sessionDir escapes the workspace; using the default session directory";
 }
 
 function safeSessionDir(root, path) {

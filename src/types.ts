@@ -122,6 +122,7 @@ export type BackendResponse = {
   aborted?: boolean;
   isStreaming?: boolean;
   errors?: unknown[];
+  warnings?: unknown[];
   exitCode?: number;
   durationMs?: number;
   output?: string;

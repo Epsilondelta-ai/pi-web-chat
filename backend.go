@@ -370,6 +370,10 @@ func submitPiPrompt(workspaceRoot string, input request) (any, error) {
 	}
 	sessionID := strings.TrimSpace(stringInput(input, "sessionId"))
 	sessionFile := ""
+	warnings, err := ensureConfiguredSessionDir(root)
+	if err != nil {
+		return nil, err
+	}
 	if sessionID != "" {
 		if path, ok := piSessionFileByID(root, sessionID); ok {
 			sessionFile = path
@@ -379,7 +383,7 @@ func submitPiPrompt(workspaceRoot string, input request) (any, error) {
 	}
 	if sessionFile == "" {
 		var createErr error
-		sessionID, sessionFile, createErr = createPiSessionFile(root)
+		sessionID, sessionFile, warnings, createErr = createPiSessionFile(root)
 		if createErr != nil {
 			return nil, createErr
 		}
@@ -394,7 +398,7 @@ func submitPiPrompt(workspaceRoot string, input request) (any, error) {
 	if parsedID != "" {
 		sessionID = parsedID
 	}
-	return map[string]any{"accepted": true, "activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": false}, nil
+	return map[string]any{"accepted": true, "activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": false, "warnings": warnings}, nil
 }
 
 type streamRunState struct {
@@ -426,6 +430,10 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 
 	sessionID := strings.TrimSpace(stringInput(input, "sessionId"))
 	sessionFile := ""
+	warnings, err := ensureConfiguredSessionDir(root)
+	if err != nil {
+		return nil, err
+	}
 	if sessionID != "" {
 		if path, ok := piSessionFileByID(root, sessionID); ok {
 			sessionFile = path
@@ -435,7 +443,7 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 	}
 	if sessionFile == "" {
 		var createErr error
-		sessionID, sessionFile, createErr = createPiSessionFile(root)
+		sessionID, sessionFile, warnings, createErr = createPiSessionFile(root)
 		if createErr != nil {
 			return nil, createErr
 		}
@@ -488,7 +496,7 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 	}
 	_ = cmd.Process.Release()
 
-	return map[string]any{"accepted": true, "runId": runID, "activeSessionId": responseSessionID(sessionID), "isStreaming": true}, nil
+	return map[string]any{"accepted": true, "runId": runID, "activeSessionId": responseSessionID(sessionID), "isStreaming": true, "warnings": warnings}, nil
 }
 
 func streamPiEvents(input request) (any, error) {
@@ -937,27 +945,39 @@ func mergePromptAttachments(text string, raw any) string {
 	return builder.String()
 }
 
-func createPiSessionFile(workspaceRoot string) (string, string, error) {
+func createPiSessionFile(workspaceRoot string) (string, string, []string, error) {
 	sessionID := createSessionID()
 	now := time.Now().UTC()
-	dir := piSessionDir(workspaceRoot)
+	sessionDir := piSessionDirResult(workspaceRoot)
+	dir := sessionDir.Path
 	if dir == "" {
-		return "", "", errors.New("session directory escapes workspace")
+		return "", "", nil, errors.New("session directory escapes workspace")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	stamp := strings.NewReplacer(":", "-", ".", "-").Replace(now.Format(time.RFC3339Nano))
 	path := filepath.Join(dir, fmt.Sprintf("%s_%s.jsonl", stamp, sessionID))
 	header := map[string]any{"type": "session", "version": 3, "id": sessionID, "timestamp": now.Format(time.RFC3339Nano), "cwd": workspaceRoot}
 	line, err := json.Marshal(header)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	return sessionID, path, nil
+	return sessionID, path, sessionDir.Warnings, nil
+}
+
+func ensureConfiguredSessionDir(workspaceRoot string) ([]string, error) {
+	sessionDir := piSessionDirResult(workspaceRoot)
+	if sessionDir.Path == "" {
+		return nil, errors.New("session directory escapes workspace")
+	}
+	if err := os.MkdirAll(sessionDir.Path, 0o700); err != nil {
+		return nil, err
+	}
+	return sessionDir.Warnings, nil
 }
 
 func createSessionID() string {
@@ -1017,21 +1037,34 @@ func piSessionFileInDir(dir, sessionID string) (string, bool) {
 	return foundPath, errors.Is(walkErr, foundErr)
 }
 
+type sessionDirResult struct {
+	Path     string
+	Warnings []string
+}
+
 func piSessionDir(workspaceRoot string) string {
+	return piSessionDirResult(workspaceRoot).Path
+}
+
+func piSessionDirResult(workspaceRoot string) sessionDirResult {
 	fallback := safeSessionDir(workspaceRoot, filepath.Join(workspaceRoot, ".pi", "sessions"))
 	data, err := os.ReadFile(filepath.Join(workspaceRoot, ".pi", "settings.json"))
 	if err != nil {
-		return fallback
+		return sessionDirResult{Path: fallback, Warnings: []string{}}
 	}
 
 	var settings map[string]any
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return fallback
+		return sessionDirResult{Path: fallback, Warnings: []string{}}
 	}
 
-	sessionDir, ok := settings["sessionDir"].(string)
+	rawSessionDir, hasSessionDir := settings["sessionDir"]
+	sessionDir, ok := rawSessionDir.(string)
+	if !hasSessionDir {
+		return sessionDirResult{Path: fallback, Warnings: []string{}}
+	}
 	if !ok || strings.TrimSpace(sessionDir) == "" {
-		return fallback
+		return sessionDirResult{Path: fallback, Warnings: []string{invalidSessionDirWarning()}}
 	}
 
 	resolved := ""
@@ -1042,10 +1075,18 @@ func piSessionDir(workspaceRoot string) string {
 	}
 
 	if safe := safeSessionDir(workspaceRoot, resolved); safe != "" {
-		return safe
+		return sessionDirResult{Path: safe, Warnings: []string{}}
 	}
 
-	return fallback
+	return sessionDirResult{Path: fallback, Warnings: []string{unsafeSessionDirWarning()}}
+}
+
+func invalidSessionDirWarning() string {
+	return ".pi/settings.json sessionDir must be a non-empty string; using the default session directory"
+}
+
+func unsafeSessionDirWarning() string {
+	return ".pi/settings.json sessionDir escapes the workspace; using the default session directory"
 }
 
 func safeSessionDir(root, target string) string {

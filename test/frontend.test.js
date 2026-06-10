@@ -860,6 +860,45 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
+test("mounted submit emits backend warnings as toasts", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const toasts = [];
+    globalThis.piWeb.subject("toast.requested").subscribe((toast) => toasts.push(toast));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return {
+            activeSessionId: input.data.sessionId,
+            warnings: [".pi/settings.json sessionDir escapes the workspace; using the default session directory", 7, ""],
+          };
+        }
+
+        if (method === "submitPrompt") {
+          return { activeSessionId: input.data.sessionId, messages: [] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "warn me";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.deepEqual(toasts, [{
+      level: "warning",
+      message: ".pi/settings.json sessionDir escapes the workspace; using the default session directory",
+    }]);
+    cleanup();
+  });
+});
+
 test("mounted submit sends selected workspace path with prompt", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
