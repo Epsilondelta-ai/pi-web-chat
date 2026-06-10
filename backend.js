@@ -393,11 +393,16 @@ function resolveSession(root, requestedSessionId) {
 
 function findSessionFile(dirPath, sessionId) {
   try {
-    for (const name of readdirSync(dirPath)) {
-      if (!name.endsWith(".jsonl")) continue;
+    for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+      const path = join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        const nested = findSessionFile(path, sessionId);
+        if (nested) return nested;
+        continue;
+      }
+      if (!entry.name.endsWith(".jsonl")) continue;
 
       try {
-        const path = join(dirPath, name);
         const header = JSON.parse(readFirstLine(path));
         if (header?.type === "session" && header?.id === sessionId) return path;
       } catch {

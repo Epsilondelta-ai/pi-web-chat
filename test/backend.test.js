@@ -474,6 +474,25 @@ test("chatState reads selected session files directly", async () => {
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "from file"]]);
 });
 
+test("chatState reads nested subagent session files by id", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const childDir = join(root, ".pi", "sessions", "parent-session", "run-abc", "run-0");
+  await mkdir(childDir, { recursive: true });
+  await writeFile(join(childDir, "session.jsonl"), [
+    JSON.stringify({ type: "session", id: "child-session" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "from subagent" } }),
+    JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:06.000Z", message: { role: "assistant", content: "child answer" } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "child-session" });
+
+  assert.equal(result.activeSessionId, "child-session");
+  assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [
+    ["u1", "user", "from subagent"],
+    ["a1", "assistant", "child answer"],
+  ]);
+});
+
 test("chatState finds sidebar-selected sessions from an explicit workspace path", async () => {
   const activeRoot = await mkdtemp(join(tmpdir(), "pi-web-chat-active-workspace-"));
   const selectedRoot = await mkdtemp(join(tmpdir(), "pi-web-chat-selected-workspace-"));
