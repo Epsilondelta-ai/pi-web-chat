@@ -698,6 +698,42 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
   });
 });
 
+test("mounted tool-only assistant messages omit empty pi row", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "tool-only-session", activeWorkspaceId: "workspace-1" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return {
+            activeSessionId: "tool-only-session",
+            messages: [{
+              id: "a1",
+              role: "assistant",
+              text: "   ",
+              createdAt: 1,
+              toolCalls: [{ id: "t1", name: "bash", args: { command: "pwd" }, text: "done", status: "ok" }],
+            }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.equal(window.document.querySelector('.msg[data-kind="pi"]'), null);
+    assert.equal(window.document.querySelectorAll(".tool-card").length, 1);
+    assert.equal(window.document.querySelector(".tc-name").textContent, "bash");
+    cleanup();
+  });
+});
+
 test("mounted activation follows sidebar new-session DOM event", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

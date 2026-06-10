@@ -1136,7 +1136,10 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   body.textContent = message.text;
 
   row.append(prefix, body);
-  item.append(row);
+
+  if (shouldRenderMountedMessageRow(message)) {
+    item.append(row);
+  }
 
   if (message.thinking) {
     item.append(renderMountedThinking(message.thinking, Boolean(message.streaming)));
@@ -1151,6 +1154,13 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   }
 
   return item;
+}
+
+function shouldRenderMountedMessageRow(message: ChatMessage): boolean {
+  const hasToolCalls: boolean = Boolean(message.toolCalls?.length);
+  const hasText: boolean = message.text.trim().length > 0;
+
+  return message.role !== "assistant" || hasText || !hasToolCalls;
 }
 
 function renderMountedThinking(text: string, open: boolean): HTMLElement {
