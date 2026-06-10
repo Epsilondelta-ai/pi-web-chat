@@ -443,6 +443,12 @@ function persistSidebarSelection(context: PluginContext, selected: SidebarSelect
   }
 }
 
+function clearSidebarActiveSession(context: PluginContext): void {
+  context.app?.removeAttribute("data-active-session-id");
+  removeStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
+  globalThis.piWeb?.behaviorSubject<string | null>("session.activeId", null).next(null);
+}
+
 function publishSidebarEvent(context: PluginContext, type: string, detail: JsonRecord = {}): void {
   const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
   const event: SidebarActionEvent = { type, detail, snapshot };
@@ -464,6 +470,14 @@ function publishSidebarActiveSession(context: PluginContext, sessionId: string, 
 function storeString(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
+  } catch {
+    // Sidebar persistence is best effort.
+  }
+}
+
+function removeStoredString(key: string): void {
+  try {
+    localStorage.removeItem(key);
   } catch {
     // Sidebar persistence is best effort.
   }
@@ -1308,6 +1322,10 @@ function bindMountedSidebarSelection(
   };
 
   const onSidebarEvent = (event: SidebarActionEvent): void => {
+    if (handleMountedDeletedSession(context, chatSurface, store, mountedState, event)) {
+      return;
+    }
+
     const selected = selectedSessionFromSidebarEvent(context, event);
 
     if (selected) {
@@ -1378,13 +1396,51 @@ function isMountedSelectionActive(context: PluginContext, store: ChatStore, sele
   return store.activeSessionId === selected.sessionId && (!selectedWorkspaceId || selectedWorkspaceId === currentWorkspaceId);
 }
 
+function handleMountedDeletedSession(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+  event: SidebarActionEvent,
+): boolean {
+  if (event.type !== "session.deleted") {
+    return false;
+  }
+
+  const deletedSessionId = sessionIdFromSidebarEvent(event);
+
+  if (!deletedSessionId) {
+    return true;
+  }
+
+  const wasActive = store.activeSessionId === deletedSessionId;
+  const beforeCount = store.sessions.length;
+  store.sessions = store.sessions.filter((session: ChatSession): boolean => session.id !== deletedSessionId);
+
+  if (wasActive) {
+    store.activeSessionId = "";
+    mountedState.runEventsAbort?.abort();
+    mountedState.sessionEventsAbort?.abort();
+    clearSidebarActiveSession(context);
+    saveStore(store);
+    renderMountedDocumentation(chatSurface);
+    return true;
+  }
+
+  if (store.sessions.length !== beforeCount) {
+    saveStore(store);
+  }
+
+  return true;
+}
+
 function selectedSessionFromSidebarEvent(context: PluginContext, event: SidebarActionEvent): SidebarSelectedSession | null {
   if (!isSidebarSessionSelectionEvent(event.type)) {
     return null;
   }
 
   const detail = event.detail || {};
-  const sessionId = typeof detail.sessionId === "string" ? detail.sessionId : event.snapshot?.activeSessionId || "";
+  const sessionId = sessionIdFromSidebarEvent(event) || event.snapshot?.activeSessionId || "";
   const workspaceId = typeof detail.workspaceId === "string"
     ? detail.workspaceId
     : event.snapshot?.activeWorkspaceId || context.app?.dataset.activeWorkspaceId || "";
@@ -1394,6 +1450,20 @@ function selectedSessionFromSidebarEvent(context: PluginContext, event: SidebarA
   }
 
   return { sessionId, workspaceId: workspaceId || undefined };
+}
+
+function sessionIdFromSidebarEvent(event: SidebarActionEvent): string {
+  const detail = event.detail || {};
+
+  if (typeof detail.sessionId === "string") {
+    return detail.sessionId;
+  }
+
+  if (typeof detail.id === "string") {
+    return detail.id;
+  }
+
+  return "";
 }
 
 function isSidebarSessionSelectionEvent(type: string): boolean {

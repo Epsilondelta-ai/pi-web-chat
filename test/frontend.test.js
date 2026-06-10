@@ -522,6 +522,85 @@ test("mounted activation ignores duplicate sidebar selection events", async () =
   });
 });
 
+test("mounted activation shows guide when viewed sidebar session is deleted", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const events$ = new Subject();
+    app.piWebSidebar = {
+      channels: { events$ },
+      getSnapshot: () => ({ activeSessionId: "delete-me", activeWorkspaceId: "workspace-1" }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.sessionId === "delete-me") {
+          return { activeSessionId: "delete-me", messages: [{ id: "m1", role: "assistant", text: "delete transcript", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+    assert.match(window.document.querySelector(".term-inner").textContent, /delete transcript/);
+
+    events$.next({ type: "session.deleted", detail: { sessionId: "delete-me", workspaceId: "workspace-1" } });
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "");
+    assert.equal(store.sessions.some((session) => session.id === "delete-me"), false);
+    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), null);
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    cleanup();
+  });
+});
+
+test("mounted activation keeps current view when another sidebar session is deleted", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const events$ = new Subject();
+    app.piWebSidebar = {
+      channels: { events$ },
+      getSnapshot: () => ({ activeSessionId: "keep-me", activeWorkspaceId: "workspace-1" }),
+    };
+
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "keep-me",
+      sessions: [
+        { id: "keep-me", title: "Keep", createdAt: 1, updatedAt: 2, messages: [] },
+        { id: "delete-other", title: "Other", createdAt: 1, updatedAt: 1, messages: [] },
+      ],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.sessionId === "keep-me") {
+          return { activeSessionId: "keep-me", messages: [{ id: "m1", role: "assistant", text: "keep transcript", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+    events$.next({ type: "session.deleted", detail: { sessionId: "delete-other", workspaceId: "workspace-1" } });
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "keep-me");
+    assert.equal(store.sessions.some((session) => session.id === "delete-other"), false);
+    assert.match(window.document.querySelector(".term-inner").textContent, /keep transcript/);
+    cleanup();
+  });
+});
+
 test("mounted activation follows sidebar session.activeId clicks after mount", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
