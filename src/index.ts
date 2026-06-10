@@ -1415,6 +1415,12 @@ function switchMountedStoreToSession(store: ChatStore, sessionId: string): ChatS
 
 function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[], sessionId: string): void {
   pruneMountedExpandedToolCards(messages, sessionId);
+
+  if (!messages.length) {
+    renderMountedDocumentation(chatSurface);
+    return;
+  }
+
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
   container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
   syncMountedScrollAfterRender(chatSurface);

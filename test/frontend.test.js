@@ -231,6 +231,55 @@ test("mounted activation loads stored session instead of guide", async () => {
   });
 });
 
+test("mounted activation shows guide for empty stored session", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "empty-stored-session",
+      sessions: [{
+        id: "empty-stored-session",
+        title: "Empty",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.match(window.document.querySelector(".term-inner").textContent, /Select or create a session/);
+    cleanup();
+  });
+});
+
+test("mounted activation shows guide for empty selected session", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "empty-selected-session" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({ activeSessionId: "empty-selected-session", messages: [] }),
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.match(window.document.querySelector(".term-inner").textContent, /Select or create a session/);
+    cleanup();
+  });
+});
+
 test("mounted activation loads sidebar-selected session and sends chatState for it", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
