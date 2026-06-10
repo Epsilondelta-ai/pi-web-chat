@@ -2,11 +2,15 @@
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
+  statSync,
   renameSync,
   rmSync,
   unlinkSync,
@@ -111,6 +115,7 @@ function parseInput(value) {
 }
 
 function startPrompt(root, data) {
+  root = promptWorkspaceRoot(root, data);
   const text = mergePromptAttachments(String(data.text || ""), data.attachments);
   if (!text.trim()) throw new Error("text is required");
 
@@ -371,31 +376,78 @@ function mergePromptAttachments(text, raw) {
 }
 
 function resolveSession(root, requestedSessionId) {
-  const dirPath = sessionDir(root);
-  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  const dirs = sessionDirs(root);
+  mkdirSync(dirs[0], { recursive: true, mode: 0o700 });
   if (requestedSessionId) {
-    const existing = findSessionFile(dirPath, requestedSessionId);
-    if (existing) return { sessionId: requestedSessionId, sessionFile: existing };
+    for (const dirPath of dirs) {
+      const existing = findSessionFile(dirPath, requestedSessionId);
+      if (existing) return { sessionId: requestedSessionId, sessionFile: existing };
+    }
   }
   const sessionId = randomUUID();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const sessionFile = join(dirPath, `${stamp}_${sessionId}.jsonl`);
+  const sessionFile = join(dirs[0], `${stamp}_${sessionId}.jsonl`);
   writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: root })}\n`, { mode: 0o600 });
   return { sessionId, sessionFile };
 }
 
 function findSessionFile(dirPath, sessionId) {
   try {
-    const name = readdirSync(dirPath).find((item) => item.endsWith(".jsonl") && item.includes(sessionId));
-    return name ? join(dirPath, name) : null;
+    for (const name of readdirSync(dirPath)) {
+      if (!name.endsWith(".jsonl")) continue;
+
+      try {
+        const path = join(dirPath, name);
+        const header = JSON.parse(readFirstLine(path));
+        if (header?.type === "session" && header?.id === sessionId) return path;
+      } catch {
+        // Ignore malformed session files and keep scanning.
+      }
+    }
   } catch {
     return null;
   }
+  return null;
 }
 
-function sessionDir(root) {
+function readFirstLine(path) {
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(4096);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytes).toString("utf8").split("\n", 1)[0] || "";
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function promptWorkspaceRoot(root, data) {
+  const workspacePath = typeof data.workspacePath === "string" ? data.workspacePath.trim() : "";
+  if (!workspacePath) return root;
+
+  try {
+    if (!statSync(workspacePath).isDirectory()) return root;
+    if (realpathSync(workspacePath) === realpathSync(root)) return workspacePath;
+  } catch {
+    return root;
+  }
+
+  const requestedSessionId = String(data.sessionId || "");
+  if (!requestedSessionId) return root;
+
+  for (const dirPath of sessionDirs(workspacePath)) {
+    if (findSessionFile(dirPath, requestedSessionId)) return workspacePath;
+  }
+
+  return root;
+}
+
+function sessionDirs(root) {
   const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
-  return join(homeDir(), ".pi", "agent", "sessions", safe);
+  return [
+    join(root, ".pi", "sessions"),
+    join(homeDir(), ".pi", "agent", "sessions", safe),
+  ];
 }
 
 function runRoot() {

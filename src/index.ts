@@ -49,6 +49,7 @@ const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
 const MOUNTED_CHAT_POLL_MS = 250;
+const STREAM_RENDER_MIN_MS = 250;
 const mountedExpandedToolCards: Set<string> = new Set<string>();
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
@@ -451,9 +452,13 @@ function storeString(key: string, value: string): void {
   }
 }
 
-export async function backendCall(context: PluginContext, method: string, data: JsonRecord = {}): Promise<BackendResponse> {
+export async function backendCall(
+  context: PluginContext,
+  method: string,
+  data: JsonRecord = {},
+  workspaceId = getActiveWorkspaceId(context),
+): Promise<BackendResponse> {
   if (!context.backend) return {};
-  const workspaceId = getActiveWorkspaceId(context);
   const response = await context.backend(method, { workspaceId, data });
   return isRecord(response) ? response : {};
 }
@@ -496,7 +501,13 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
   }));
 
   disposables.add(state.channels.activeSessionId$.subscribe((id) => {
-    if (id) switchToSession(state, dom, id);
+    if (id) {
+      persistSidebarSelection(state.context, {
+        sessionId: id,
+        workspaceId: state.context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(state.context) || undefined,
+      });
+      switchToSession(state, dom, id);
+    }
   }));
 
   disposables.add(state.channels.sidebarSelectedSession$.subscribe((selected) => {
@@ -505,10 +516,6 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
     }
 
     if (selected?.sessionId) {
-      if (selected.sessionId !== state.store.activeSessionId) {
-        state.runEventsAbort?.abort();
-      }
-
       switchToSession(state, dom, selected.sessionId);
       void openSessionEvents(state, dom, selected.sessionId);
     }
@@ -528,6 +535,7 @@ function submitCurrentInput(state: State): void {
 async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmitted): Promise<void> {
   const text = event.text.trim();
   if (!text) return;
+  const sessionId = syncStateToViewedSession(state, dom);
   renderAttachmentChips(dom.attachments, []);
 
   if (text.startsWith("!")) {
@@ -539,40 +547,73 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   }
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
-  addMessage(state, { role: "user", text, attachments });
+  const pendingUserMessage = addMessageToSession(state.store, sessionId, { role: "user", text, attachments });
   render(state, dom);
   try {
-    await submitPromptWithStreaming(state, dom, text, attachments);
+    await submitPromptWithStreaming(state, dom, text, attachments, sessionId, pendingUserMessage);
   } catch (error) {
     state.channels.toastRequested$.next({ level: "error", message: `prompt failed: ${errorText(error)}` });
   }
   clearPendingAttachments(state);
 }
 
-async function submitPromptWithStreaming(state: State, dom: ChatDom, text: string, attachments: FileAttachment[]): Promise<void> {
+async function submitPromptWithStreaming(
+  state: State,
+  dom: ChatDom,
+  text: string,
+  attachments: FileAttachment[],
+  sessionId: string,
+  pendingUserMessage: ChatMessage,
+): Promise<void> {
   state.backendChatToken += 1;
   state.runEventsAbort?.abort();
-  state.runEventsAbort = new AbortController();
+  const runController = new AbortController();
+  state.runEventsAbort = runController;
   state.sessionEventsAbort?.abort();
-  const start = await startStreamingPrompt(state.context, text, attachments, state.store.activeSessionId);
+  let targetSessionId: string = sessionId;
+  const targetWorkspace = activeWorkspaceSelection(state.context);
+  const start = await startStreamingPrompt(state.context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+  if (typeof start.activeSessionId === "string" && start.activeSessionId) {
+    const previousSessionId = targetSessionId;
+    const shouldAdoptActiveSession = state.store.activeSessionId === previousSessionId;
+    targetSessionId = start.activeSessionId;
+
+    if (shouldAdoptActiveSession) {
+      state.store.activeSessionId = targetSessionId;
+    }
+
+    moveMessageBetweenSessions(state.store, previousSessionId, targetSessionId, pendingUserMessage.id);
+  }
+
   if (typeof start.runId !== "string" || !start.runId) {
-    const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
-    applyBackendResponseToStore(state.store, response);
+    const response = await submitPromptToPluginBackend(state.context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+    applyBackendResponseToSession(state.store, response, targetSessionId, state.store.activeSessionId === targetSessionId);
     render(state, dom);
+
+    if (state.runEventsAbort === runController) {
+      state.runEventsAbort = undefined;
+    }
+
     return;
   }
 
-  if (typeof start.activeSessionId === "string" && start.activeSessionId) {
-    state.store.activeSessionId = start.activeSessionId;
+  const session = sessionById(state.store, targetSessionId);
+  const assistant = ensureStreamingAssistant(session);
+  try {
+    await consumeStreamingRun(state.context, state.store, session, start.runId, targetWorkspace.path, targetWorkspace.id, assistant, (): void => {
+      if (state.store.activeSessionId === targetSessionId) {
+        render(state, dom);
+      }
+    }, runController.signal);
+  } finally {
+    if (state.runEventsAbort === runController) {
+      state.runEventsAbort = undefined;
+    }
   }
 
-  const assistant = ensureStreamingAssistant(state.store);
-  try {
-    await consumeStreamingRun(state.context, state.store, start.runId, assistant, (): void => render(state, dom), state.runEventsAbort.signal);
-  } finally {
-    state.runEventsAbort = undefined;
+  if (state.store.activeSessionId === targetSessionId) {
+    void openSessionEvents(state, dom, targetSessionId, targetWorkspace.path, targetWorkspace.id);
   }
-  void openSessionEvents(state, dom, state.store.activeSessionId);
 }
 
 async function submitMountedPromptWithStreaming(
@@ -583,9 +624,12 @@ async function submitMountedPromptWithStreaming(
   text: string,
   attachments: FileAttachment[],
 ): Promise<void> {
+  let targetSessionId: string = syncMountedStoreToViewedSession(context, store);
+  const targetWorkspace = activeWorkspaceSelection(context);
   mountedState.backendChatToken += 1;
   mountedState.runEventsAbort?.abort();
-  mountedState.runEventsAbort = new AbortController();
+  const runController = new AbortController();
+  mountedState.runEventsAbort = runController;
   mountedState.sessionEventsAbort?.abort();
   const pendingUserMessage: ChatMessage = {
     id: id(),
@@ -594,84 +638,143 @@ async function submitMountedPromptWithStreaming(
     attachments: sanitizeAttachmentsForStorage(attachments),
     createdAt: Date.now(),
   };
-  const session = activeSession(store);
-  session.messages.push(pendingUserMessage);
-  session.updatedAt = Date.now();
+  const submitSession = sessionById(store, targetSessionId);
+  submitSession.messages.push(pendingUserMessage);
+  submitSession.updatedAt = Date.now();
   saveStore(store);
-  renderMountedBackendMessages(chatSurface, session.messages, store.activeSessionId);
+  renderMountedBackendMessages(chatSurface, submitSession.messages, targetSessionId);
 
-  const start = await startStreamingPrompt(context, text, attachments, store.activeSessionId);
+  const start = await startStreamingPrompt(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
 
   if (typeof start.activeSessionId === "string" && start.activeSessionId) {
-    const previousSessionId = store.activeSessionId;
-    const active = switchMountedStoreToSession(store, start.activeSessionId);
+    const previousSessionId = targetSessionId;
+    const shouldAdoptActiveSession = store.activeSessionId === previousSessionId;
+    targetSessionId = start.activeSessionId;
 
-    if (previousSessionId !== active.id && !active.messages.some((message) => message.id === pendingUserMessage.id)) {
-      active.messages.push(pendingUserMessage);
-      active.updatedAt = Date.now();
+    if (shouldAdoptActiveSession) {
+      switchMountedStoreToSession(store, targetSessionId);
+      persistSidebarSelection(context, {
+        sessionId: start.activeSessionId,
+        workspaceId: targetWorkspace.id || undefined,
+      });
+      publishSidebarEvent(context, "chat-session", { reason: "startPrompt", sessionId: start.activeSessionId });
+      publishSidebarActiveSession(context, start.activeSessionId, "startPrompt");
+    } else {
+      sessionById(store, targetSessionId);
     }
 
-    persistSidebarSelection(context, {
-      sessionId: start.activeSessionId,
-      workspaceId: context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(context) || undefined,
-    });
-    publishSidebarEvent(context, "chat-session", { reason: "startPrompt", sessionId: start.activeSessionId });
-    publishSidebarActiveSession(context, start.activeSessionId, "startPrompt");
+    moveMessageBetweenSessions(store, previousSessionId, targetSessionId, pendingUserMessage.id);
   }
 
   if (typeof start.runId !== "string" || !start.runId) {
-    const response = await submitPromptToPluginBackend(context, text, attachments, store.activeSessionId);
-    const messages = applyBackendResponseToMountedStore(context, store, response, "submitPrompt");
-    renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
+    const response = await submitPromptToPluginBackend(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+    const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId);
+
+    if (store.activeSessionId === targetSessionId) {
+      renderMountedBackendMessages(chatSurface, messages, targetSessionId);
+    }
+
+    if (mountedState.runEventsAbort === runController) {
+      mountedState.runEventsAbort = undefined;
+    }
+
     return;
   }
 
-  const assistant = ensureStreamingAssistant(store);
+  const session = sessionById(store, targetSessionId);
+  const assistant = ensureStreamingAssistant(session);
   try {
     await consumeStreamingRun(
       context,
       store,
+      session,
       start.runId,
+      targetWorkspace.path,
+      targetWorkspace.id,
       assistant,
-      (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages, store.activeSessionId),
-      mountedState.runEventsAbort.signal,
+      (): void => {
+        if (store.activeSessionId === targetSessionId) {
+          renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
+        }
+      },
+      runController.signal,
     );
   } finally {
-    mountedState.runEventsAbort = undefined;
+    if (mountedState.runEventsAbort === runController) {
+      mountedState.runEventsAbort = undefined;
+    }
   }
-  void openMountedSessionEvents(context, chatSurface, store, mountedState, store.activeSessionId);
+
+  if (store.activeSessionId === targetSessionId) {
+    void openMountedSessionEvents(context, chatSurface, store, mountedState, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+  }
 }
 
 async function consumeStreamingRun(
   context: PluginContext,
   store: ChatStore,
+  session: ChatSession,
   runId: string,
+  workspacePath: string,
+  workspaceId: string,
   assistant: ChatMessage,
   renderCurrent: () => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const stream = await backendSseStream(context, "streamEventsSse", { runId, cursor: 0 }, signal);
+  const stream = await backendSseStream(context, "streamEventsSse", { runId, cursor: 0, workspacePath }, signal, workspaceId);
 
   if (!stream) {
     throw new Error("SSE streaming backend did not return a stream");
   }
 
+  const render = throttledRender(renderCurrent);
   assistant.streaming = true;
-  renderCurrent();
+  render.flush();
 
   try {
     await readSseChatEvents(stream, (event: ChatEvent): void => {
       applyChatEvents(assistant, [event]);
       assistant.streaming = event.type !== "run.end";
-      activeSession(store).updatedAt = Date.now();
+      session.updatedAt = Date.now();
       saveStore(store);
-      renderCurrent();
+      render.request();
     });
   } finally {
     assistant.streaming = false;
     saveStore(store);
-    renderCurrent();
+    render.flush();
   }
+}
+
+function throttledRender(renderNow: () => void): { request: () => void; flush: () => void; cancel: () => void } {
+  let lastRender = 0;
+  let pending: ReturnType<typeof setTimeout> | undefined;
+
+  const cancel = (): void => {
+    if (pending) {
+      clearTimeout(pending);
+      pending = undefined;
+    }
+  };
+
+  const flush = (): void => {
+    cancel();
+    lastRender = Date.now();
+    renderNow();
+  };
+
+  const request = (): void => {
+    const delay = STREAM_RENDER_MIN_MS - (Date.now() - lastRender);
+
+    if (delay <= 0) {
+      flush();
+      return;
+    }
+
+    pending ||= setTimeout(flush, delay);
+  };
+
+  return { request, flush, cancel };
 }
 
 async function backendSseStream(
@@ -679,12 +782,11 @@ async function backendSseStream(
   method: string,
   data: JsonRecord = {},
   signal?: AbortSignal,
+  workspaceId = getActiveWorkspaceId(context),
 ): Promise<ReadableStream<Uint8Array> | null> {
   if (!context.backendStream) {
     throw new Error("SSE streaming backend is unavailable");
   }
-
-  const workspaceId = getActiveWorkspaceId(context);
 
   const response = await context.backendStream(method, { workspaceId, data }, { signal });
   return readableStreamFromBackendResponse(response);
@@ -800,9 +902,16 @@ function publishChatInputSubmitted(text: string, attachments: FileAttachment[]):
   });
 }
 
-async function startStreamingPrompt(context: PluginContext, text: string, attachments: FileAttachment[], sessionId: string): Promise<BackendResponse> {
+async function startStreamingPrompt(
+  context: PluginContext,
+  text: string,
+  attachments: FileAttachment[],
+  sessionId: string,
+  workspacePath = activeWorkspaceSelection(context).path,
+  workspaceId = activeWorkspaceSelection(context).id,
+): Promise<BackendResponse> {
   try {
-    return await backendCall(context, "startPrompt", { text, attachments, sessionId });
+    return await backendCall(context, "startPrompt", promptRequestData(text, attachments, sessionId, workspacePath), workspaceId);
   } catch (error) {
     if (isUnsupportedStreamingBackend(error)) return {};
     throw error;
@@ -813,24 +922,66 @@ function isUnsupportedStreamingBackend(error: unknown): boolean {
   return /unknown method: (startPrompt|streamEventsSse)|unsupported method: (startPrompt|streamEventsSse)|(startPrompt|streamEventsSse) unsupported/i.test(errorText(error));
 }
 
-async function submitPromptToPluginBackend(context: PluginContext, text: string, attachments: FileAttachment[], sessionId = ""): Promise<BackendResponse> {
-  const response = await backendCall(context, "submitPrompt", { text, attachments, sessionId });
+async function submitPromptToPluginBackend(
+  context: PluginContext,
+  text: string,
+  attachments: FileAttachment[],
+  sessionId = "",
+  workspacePath = activeWorkspaceSelection(context).path,
+  workspaceId = activeWorkspaceSelection(context).id,
+): Promise<BackendResponse> {
+  const response = await backendCall(context, "submitPrompt", promptRequestData(text, attachments, sessionId, workspacePath), workspaceId);
   return response;
 }
 
-function applyBackendResponseToStore(store: ChatStore, response: BackendResponse): void {
-  if (typeof response.activeSessionId === "string" && response.activeSessionId) {
-    store.activeSessionId = response.activeSessionId;
+function promptRequestData(text: string, attachments: FileAttachment[], sessionId: string, workspacePath: string): JsonRecord {
+  const data: JsonRecord = { text, attachments, sessionId };
+
+  if (workspacePath) {
+    data.workspacePath = workspacePath;
   }
+
+  return data;
+}
+
+function applyBackendResponseToStore(store: ChatStore, response: BackendResponse): void {
+  const fallbackSessionId = typeof response.activeSessionId === "string" && response.activeSessionId
+    ? response.activeSessionId
+    : store.activeSessionId;
+
+  applyBackendResponseToSession(store, response, fallbackSessionId, true);
+}
+
+function applyBackendResponseToSession(
+  store: ChatStore,
+  response: BackendResponse,
+  fallbackSessionId: string,
+  shouldAdoptActiveSession: boolean,
+): void {
+  const sessionId = typeof response.activeSessionId === "string" && response.activeSessionId ? response.activeSessionId : fallbackSessionId;
+
+  if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+    sessionById(store, response.activeSessionId);
+
+    if (shouldAdoptActiveSession) {
+      store.activeSessionId = response.activeSessionId;
+    }
+  }
+
   if (Array.isArray(response.messages)) {
-    activeSession(store).messages = sanitizeChatMessages(response.messages).slice(-MAX_MESSAGES_PER_SESSION);
-    activeSession(store).updatedAt = Date.now();
+    const session = sessionById(store, sessionId);
+    const nextMessages = sanitizeChatMessages(response.messages).slice(-MAX_MESSAGES_PER_SESSION);
+    if (!sessionMessagesChanged(session.messages, nextMessages)) {
+      return;
+    }
+
+    session.messages = nextMessages;
+    session.updatedAt = Date.now();
     saveStore(store);
   }
 }
 
-function ensureStreamingAssistant(store: ChatStore): ChatMessage {
-  const session = activeSession(store);
+function ensureStreamingAssistant(session: ChatSession): ChatMessage {
   const existing = [...session.messages].reverse().find((message) => message.role === "assistant" && message.streaming);
   if (existing) return existing;
   const message: ChatMessage = { id: id(), role: "assistant", text: "", createdAt: Date.now(), streaming: true };
@@ -881,9 +1032,11 @@ async function openMountedSessionEvents(
   store: ChatStore,
   mountedState: MountedState,
   sessionId = "",
+  workspacePath = activeWorkspacePath(context),
+  workspaceId = activeWorkspaceSelection(context).id,
 ): Promise<void> {
   if (!context.backendStream) {
-    await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId);
+    await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId, workspacePath);
     return;
   }
 
@@ -891,9 +1044,12 @@ async function openMountedSessionEvents(
   mountedState.sessionEventsAbort?.abort();
   const controller = new AbortController();
   mountedState.sessionEventsAbort = controller;
+  const render = throttledRender((): void => {
+    renderMountedBackendMessages(chatSurface, activeSession(store).messages, store.activeSessionId);
+  });
 
   try {
-    const stream = await backendSseStream(context, "sessionEventsSse", chatStateRequestData(context, sessionId), controller.signal);
+    const stream = await backendSseStream(context, "sessionEventsSse", chatStateRequestData(context, sessionId, workspacePath), controller.signal, workspaceId);
 
     if (!stream) {
       throw new Error("session SSE backend did not return a stream");
@@ -906,14 +1062,16 @@ async function openMountedSessionEvents(
 
       const messages = applyBackendResponseToMountedStore(context, store, chatStateEventResponse(event), "chatState");
       if (messages.length) {
-        renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
+        render.request();
       }
     });
   } catch (error) {
     if (!controller.signal.aborted) {
-      await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId);
+      await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId, workspacePath);
     }
   } finally {
+    render.cancel();
+
     if (mountedState.sessionEventsAbort === controller) {
       mountedState.sessionEventsAbort = undefined;
     }
@@ -926,11 +1084,12 @@ async function refreshMountedBackendChatState(
   store: ChatStore,
   mountedState: MountedState,
   sessionId = "",
+  workspacePath = activeWorkspacePath(context),
 ): Promise<void> {
   const token = ++mountedState.backendChatToken;
 
   try {
-    const response = await backendCall(context, "chatState", chatStateRequestData(context, sessionId));
+    const response = await backendCall(context, "chatState", chatStateRequestData(context, sessionId, workspacePath));
 
     if (token !== mountedState.backendChatToken) {
       return;
@@ -945,9 +1104,12 @@ async function refreshMountedBackendChatState(
   }
 }
 
-function chatStateRequestData(context: PluginContext, sessionId: string): JsonRecord {
+function chatStateRequestData(
+  context: PluginContext,
+  sessionId: string,
+  workspacePath = activeWorkspacePath(context),
+): JsonRecord {
   const data: JsonRecord = sessionId ? { sessionId } : {};
-  const workspacePath = activeWorkspacePath(context);
 
   if (workspacePath) {
     data.workspacePath = workspacePath;
@@ -965,9 +1127,14 @@ function chatStateEventResponse(event: ChatEvent): BackendResponse {
 }
 
 function activeWorkspacePath(context: PluginContext): string {
+  return activeWorkspaceSelection(context).path;
+}
+
+function activeWorkspaceSelection(context: PluginContext): { id: string; path: string } {
   const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
-  const workspaceId = context.app?.dataset.activeWorkspaceId || snapshot?.activeWorkspaceId || "";
-  return snapshot?.workspaces?.find((workspace) => workspace.id === workspaceId)?.path || "";
+  const workspaceId = snapshot?.activeWorkspaceId || context.app?.dataset.activeWorkspaceId || "";
+  const path = snapshot?.workspaces?.find((workspace) => workspace.id === workspaceId)?.path || "";
+  return { id: workspaceId, path };
 }
 
 function applyBackendResponseToMountedStore(
@@ -997,20 +1164,90 @@ function applyBackendResponseToMountedStore(
 
   const session = activeSession(store);
 
-  if (responseMessages.length) {
-    session.messages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
-
-    if (session.title === "New chat") {
-      const firstUser = session.messages.find((message) => message.role === "user");
-
-      if (firstUser) {
-        session.title = firstUser.text.slice(0, 48) || session.title;
-      }
-    }
-
-    session.updatedAt = Date.now();
+  if (!responseMessages.length) {
+    return [];
   }
 
+  const nextMessages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
+  if (!sessionMessagesChanged(session.messages, nextMessages)) {
+    return [];
+  }
+
+  session.messages = nextMessages;
+
+  if (session.title === "New chat") {
+    const firstUser = session.messages.find((message) => message.role === "user");
+
+    if (firstUser) {
+      session.title = firstUser.text.slice(0, 48) || session.title;
+    }
+  }
+
+  session.updatedAt = Date.now();
+  saveStore(store);
+  return session.messages;
+}
+
+function sessionMessagesChanged(current: ChatMessage[], next: ChatMessage[]): boolean {
+  if (current.length !== next.length) {
+    return true;
+  }
+
+  return current.some((message, index) => messageSignature(message) !== messageSignature(next[index]));
+}
+
+function messageSignature(message: ChatMessage): string {
+  return JSON.stringify({
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    thinking: message.thinking,
+    streaming: message.streaming,
+    toolCalls: message.toolCalls,
+    attachments: message.attachments,
+  });
+}
+
+function applyBackendResponseToMountedSession(
+  context: PluginContext,
+  store: ChatStore,
+  response: BackendResponse,
+  reason: string,
+  fallbackSessionId: string,
+): ChatMessage[] {
+  const responseMessages = sanitizeChatMessages(response.messages);
+  const responseSessionId = typeof response.activeSessionId === "string" && response.activeSessionId
+    ? response.activeSessionId
+    : fallbackSessionId;
+  const shouldAdoptActiveSession = store.activeSessionId === fallbackSessionId;
+
+  if (responseSessionId !== fallbackSessionId) {
+    if (shouldAdoptActiveSession) {
+      switchMountedStoreToSession(store, responseSessionId);
+      persistSidebarSelection(context, {
+        sessionId: responseSessionId,
+        workspaceId: activeWorkspaceSelection(context).id || undefined,
+      });
+      publishSidebarEvent(context, "chat-session", { reason, sessionId: responseSessionId });
+      publishSidebarActiveSession(context, responseSessionId, reason);
+    } else {
+      sessionById(store, responseSessionId);
+    }
+  }
+
+  const session = sessionById(store, responseSessionId);
+
+  if (!responseMessages.length) {
+    return [];
+  }
+
+  const nextMessages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
+  if (!sessionMessagesChanged(session.messages, nextMessages)) {
+    return [];
+  }
+
+  session.messages = nextMessages;
+  session.updatedAt = Date.now();
   saveStore(store);
   return session.messages;
 }
@@ -1027,8 +1264,8 @@ function bindMountedSidebarSelection(
       return;
     }
 
-    if (selected.sessionId !== store.activeSessionId) {
-      mountedState.runEventsAbort?.abort();
+    if (isMountedSelectionActive(context, store, selected)) {
+      return;
     }
 
     persistSidebarSelection(context, selected);
@@ -1078,6 +1315,34 @@ function bindMountedSidebarSelection(
       onSelected({ sessionId, workspaceId: context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || undefined });
     }));
   }
+}
+
+function syncStateToViewedSession(state: State, dom: ChatDom): string {
+  const selected = readSidebarSelection(state.context);
+
+  if (selected?.sessionId) {
+    persistSidebarSelection(state.context, selected);
+    switchToSession(state, dom, selected.sessionId);
+  }
+
+  return state.store.activeSessionId;
+}
+
+function syncMountedStoreToViewedSession(context: PluginContext, store: ChatStore): string {
+  const selected = readSidebarSelection(context);
+
+  if (selected?.sessionId && !isMountedSelectionActive(context, store, selected)) {
+    persistSidebarSelection(context, selected);
+    switchMountedStoreToSession(store, selected.sessionId);
+  }
+
+  return store.activeSessionId;
+}
+
+function isMountedSelectionActive(context: PluginContext, store: ChatStore, selected: SidebarSelectedSession): boolean {
+  const selectedWorkspaceId = selected.workspaceId || "";
+  const currentWorkspaceId = context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || "";
+  return store.activeSessionId === selected.sessionId && (!selectedWorkspaceId || selectedWorkspaceId === currentWorkspaceId);
 }
 
 function selectedSessionFromSidebarEvent(context: PluginContext, event: SidebarActionEvent): SidebarSelectedSession | null {
@@ -1521,9 +1786,15 @@ function updateComposerMode(dom: ChatDom, value: string): void {
   else setComposerMode(dom, "normal");
 }
 
-async function openSessionEvents(state: State, dom: ChatDom, sessionId = ""): Promise<void> {
+async function openSessionEvents(
+  state: State,
+  dom: ChatDom,
+  sessionId = "",
+  workspacePath = activeWorkspacePath(state.context),
+  workspaceId = activeWorkspaceSelection(state.context).id,
+): Promise<void> {
   if (!state.context.backendStream) {
-    await refreshBackendChatState(state, dom, sessionId);
+    await refreshBackendChatState(state, dom, sessionId, workspacePath);
     return;
   }
 
@@ -1531,9 +1802,11 @@ async function openSessionEvents(state: State, dom: ChatDom, sessionId = ""): Pr
   state.sessionEventsAbort?.abort();
   const controller = new AbortController();
   state.sessionEventsAbort = controller;
+  const renderState = throttledRender((): void => render(state, dom));
 
   try {
-    const stream = await backendSseStream(state.context, "sessionEventsSse", sessionId ? { sessionId } : {}, controller.signal);
+    const data = chatStateRequestData(state.context, sessionId, workspacePath);
+    const stream = await backendSseStream(state.context, "sessionEventsSse", data, controller.signal, workspaceId);
 
     if (!stream) {
       throw new Error("session SSE backend did not return a stream");
@@ -1544,44 +1817,58 @@ async function openSessionEvents(state: State, dom: ChatDom, sessionId = ""): Pr
         return;
       }
 
-      applySessionStateEvent(state, dom, event);
+      if (applySessionStateEvent(state, event)) {
+        renderState.request();
+      }
     });
   } catch (error) {
     if (!controller.signal.aborted) {
-      await refreshBackendChatState(state, dom, sessionId);
+      await refreshBackendChatState(state, dom, sessionId, workspacePath);
     }
   } finally {
+    renderState.cancel();
+
     if (state.sessionEventsAbort === controller) {
       state.sessionEventsAbort = undefined;
     }
   }
 }
 
-function applySessionStateEvent(state: State, dom: ChatDom, event: ChatEvent): void {
+function applySessionStateEvent(state: State, event: ChatEvent): boolean {
   const messages = sanitizeChatMessages(event.messages);
   if (!messages.length) {
-    return;
+    return false;
   }
 
   const session = sessionForBackendState(state.store, typeof event.activeSessionId === "string" ? event.activeSessionId : null);
-  session.messages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
+  const nextMessages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
+  if (!sessionMessagesChanged(session.messages, nextMessages)) {
+    return false;
+  }
+
+  session.messages = nextMessages;
   session.updatedAt = Date.now();
   saveStore(state.store);
-  render(state, dom);
+  return true;
 }
 
-async function refreshBackendChatState(state: State, dom: ChatDom, sessionId = ""): Promise<void> {
+async function refreshBackendChatState(state: State, dom: ChatDom, sessionId = "", workspacePath = activeWorkspacePath(state.context)): Promise<void> {
   const token = ++state.backendChatToken;
 
   try {
-    const response = await backendCall(state.context, "chatState", sessionId ? { sessionId } : {});
+    const response = await backendCall(state.context, "chatState", chatStateRequestData(state.context, sessionId, workspacePath));
     if (token !== state.backendChatToken) return;
 
     if (Array.isArray(response.messages)) {
       const messages = sanitizeChatMessages(response.messages);
       if (messages.length) {
         const session = sessionForBackendState(state.store, typeof response.activeSessionId === "string" ? response.activeSessionId : null);
-        session.messages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
+        const nextMessages = mergeChatMessages(session.messages, messages).slice(-MAX_MESSAGES_PER_SESSION);
+        if (!sessionMessagesChanged(session.messages, nextMessages)) {
+          return;
+        }
+
+        session.messages = nextMessages;
         session.updatedAt = Date.now();
         saveStore(state.store);
         render(state, dom);
@@ -1656,14 +1943,72 @@ function replaceLastRunningTool(state: State, text: string, status: "ok" | "err"
 }
 
 function activeSession(store: ChatStore): ChatSession {
-  let session = store.sessions.find((item) => item.id === store.activeSessionId);
+  return sessionById(store, store.activeSessionId, true);
+}
+
+function sessionById(store: ChatStore, sessionId: string, makeActive = false): ChatSession {
+  let session = store.sessions.find((item) => item.id === sessionId);
+
   if (!session) {
-    session = createSession();
+    session = createSession(sessionId || undefined);
     store.sessions.unshift(session);
+    saveStore(store);
+  }
+
+  if (makeActive || !store.activeSessionId) {
     store.activeSessionId = session.id;
     saveStore(store);
   }
+
   return session;
+}
+
+function addMessageToSession(
+  store: ChatStore,
+  sessionId: string,
+  message: Omit<ChatMessage, "id" | "createdAt">,
+): ChatMessage {
+  const session = sessionById(store, sessionId);
+  const storedMessage: ChatMessage = {
+    id: id(),
+    createdAt: Date.now(),
+    ...message,
+    attachments: sanitizeAttachmentsForStorage(message.attachments),
+  };
+
+  session.messages.push(storedMessage);
+  if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
+    session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
+  }
+  if (session.title === "New chat" && message.role === "user") session.title = message.text.slice(0, 48) || session.title;
+  session.updatedAt = Date.now();
+  pruneStore(store);
+  saveStore(store);
+  return storedMessage;
+}
+
+function moveMessageBetweenSessions(store: ChatStore, fromSessionId: string, toSessionId: string, messageId: string): void {
+  if (fromSessionId === toSessionId) {
+    return;
+  }
+
+  const fromSession = store.sessions.find((item) => item.id === fromSessionId);
+  const messageIndex = fromSession?.messages.findIndex((message) => message.id === messageId) ?? -1;
+
+  if (!fromSession || messageIndex < 0) {
+    return;
+  }
+
+  const [message] = fromSession.messages.splice(messageIndex, 1);
+  const toSession = sessionById(store, toSessionId);
+
+  if (!toSession.messages.some((item) => item.id === message.id)) {
+    toSession.messages.push(message);
+  }
+
+  fromSession.updatedAt = Date.now();
+  toSession.updatedAt = Date.now();
+  saveStore(store);
 }
 
 function switchToSession(state: State, dom: ChatDom, sessionId: string): void {

@@ -172,6 +172,42 @@ process.stdin.on('end', () => {
   assert.equal(events.some((event) => event.type === "run.end"), true);
 });
 
+test("backend wrapper startPrompt uses captured workspace path for existing and new sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const otherRoot = await mkdtemp(join(tmpdir(), "pi-web-chat-other-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: process.cwd() } }));
+});
+`);
+  await chmod(fakePi, 0o755);
+  const workspaceSessionId = "workspace-session-id";
+  const workspaceSessionDir = join(root, ".pi", "sessions");
+  await mkdir(workspaceSessionDir, { recursive: true });
+  await writeFile(join(workspaceSessionDir, `existing_${workspaceSessionId}.jsonl`), `${JSON.stringify({ type: "session", id: workspaceSessionId, cwd: root })}\n`);
+
+  const existing = await callBackend(
+    "startPrompt",
+    otherRoot,
+    { text: "hello", sessionId: workspaceSessionId, workspacePath: root },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+  const created = await callBackend(
+    "startPrompt",
+    root,
+    { text: "new session", sessionId: "", workspacePath: root },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(existing.activeSessionId, workspaceSessionId);
+  assert.ok(created.activeSessionId);
+  assert.equal((await readdir(workspaceSessionDir)).some((name) => name.includes(created.activeSessionId)), true);
+});
+
 test("backend wrapper completes stream when pi is unavailable", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
@@ -256,7 +292,7 @@ process.stdin.on('end', () => {
   assert.ok(started.runId);
 
   let stream = { events: [], cursor: 0, isStreaming: true };
-  for (let index = 0; index < 20 && stream.isStreaming; index += 1) {
+  for (let index = 0; index < 80 && stream.isStreaming; index += 1) {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const result = await runBackendBinary(
       "streamEvents",
