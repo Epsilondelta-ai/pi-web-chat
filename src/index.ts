@@ -204,10 +204,16 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
   const selected = readSidebarSelection(context);
   persistSidebarSelection(context, selected || undefined);
+  const shouldShowDocumentation: boolean = !selected?.sessionId && !hasStoredSessions();
   const mountedStore = loadStore(selected?.sessionId || "");
   const mountedState: MountedState = { backendChatToken: 0 };
-  renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages, mountedStore.activeSessionId);
-  void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
+
+  if (shouldShowDocumentation) {
+    renderMountedDocumentation(chatSurface);
+  } else {
+    renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages, mountedStore.activeSessionId);
+    void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
+  }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
   const badge = app ? disposables.add(installBadge(app)) : undefined;
@@ -1409,8 +1415,46 @@ function switchMountedStoreToSession(store: ChatStore, sessionId: string): ChatS
 
 function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[], sessionId: string): void {
   pruneMountedExpandedToolCards(messages, sessionId);
+
+  if (!messages.length) {
+    renderMountedDocumentation(chatSurface);
+    return;
+  }
+
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
   container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
+  syncMountedScrollAfterRender(chatSurface);
+}
+
+function renderMountedDocumentation(chatSurface: HTMLElement): void {
+  const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
+  const guide = document.createElement("article");
+  guide.className = "pi-web-chat-docs";
+  guide.setAttribute("aria-label", "pi-web-chat guide");
+
+  const title = document.createElement("h1");
+  title.textContent = "pi-web-chat guide";
+
+  const summary = document.createElement("p");
+  summary.textContent = [
+    "Select or create a session in the sidebar to load chat history,",
+    "or type below to start a new session.",
+  ].join(" ");
+
+  const list = document.createElement("ul");
+
+  for (const text of [
+    "Ask pi in the prompt box and press Cmd/Ctrl+Enter to send.",
+    "Use / for slash commands, @ for file references, and ! for shell commands.",
+    "Chats are cached locally after you start or select a session.",
+  ]) {
+    const item = document.createElement("li");
+    item.textContent = text;
+    list.append(item);
+  }
+
+  guide.append(title, summary, list);
+  container.replaceChildren(guide);
   syncMountedScrollAfterRender(chatSurface);
 }
 
@@ -2185,6 +2229,15 @@ function loadStore(preferredSessionId = ""): ChatStore {
   }
   const session = createSession(preferredSessionId || undefined);
   return { activeSessionId: session.id, sessions: [session] };
+}
+
+function hasStoredSessions(): boolean {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
+    return Boolean(parsed && Array.isArray(parsed.sessions) && parsed.sessions.some(isSession));
+  } catch {
+    return false;
+  }
 }
 
 function saveStore(store: ChatStore): void {

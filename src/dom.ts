@@ -276,6 +276,36 @@ export function pluginStyleText(): string {
       overflow-anchor: none;
     }
 
+    .pi-web-chat-surface .pi-web-chat-docs {
+      border: 1px solid var(--border, #24313a);
+      border-radius: var(--radius-2, 10px);
+      background: var(--bg-2, #111111);
+      color: var(--fg-1, #d4d4d4);
+      margin: 0 auto;
+      max-width: 720px;
+      padding: var(--space-4, 16px);
+    }
+
+    .pi-web-chat-surface .pi-web-chat-docs h1 {
+      color: var(--accent, #00ff88);
+      font-size: var(--text-lg, 18px);
+      margin: 0 0 var(--space-2, 8px);
+    }
+
+    .pi-web-chat-surface .pi-web-chat-docs p {
+      color: var(--fg-2, #b9c0c7);
+      margin: 0 0 var(--space-3, 12px);
+    }
+
+    .pi-web-chat-surface .pi-web-chat-docs ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .pi-web-chat-surface .pi-web-chat-docs li + li {
+      margin-top: 6px;
+    }
+
     .pi-web-chat-surface .scroll-bottom-btn {
       position: absolute;
       right: var(--space-4, 16px);
