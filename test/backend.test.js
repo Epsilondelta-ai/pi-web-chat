@@ -314,6 +314,61 @@ process.stdin.on('end', () => {
   assert.equal(fallbackFiles.some((name) => name.includes(parsed.activeSessionId)), true);
 });
 
+test("js and compiled startPrompt agree on settings sessionDir warnings", async () => {
+  const invalidWarning = ".pi/settings.json sessionDir must be a non-empty string; using the default session directory";
+  const unsafeWarning = ".pi/settings.json sessionDir escapes the workspace; using the default session directory";
+  const cases = [
+    { name: "blank", warning: invalidWarning, settings: () => ({ sessionDir: "" }) },
+    { name: "outside", warning: unsafeWarning, settings: (outside) => ({ sessionDir: outside }) },
+    { name: "symlink", warning: unsafeWarning, settings: () => ({ sessionDir: "link-sessions" }), symlink: true },
+  ];
+
+  for (const item of cases) {
+    const roots = [
+      await mkdtemp(join(tmpdir(), `pi-web-chat-js-${item.name}-`)),
+      await mkdtemp(join(tmpdir(), `pi-web-chat-go-${item.name}-`)),
+    ];
+    const home = await mkdtemp(join(tmpdir(), `pi-web-chat-home-${item.name}-`));
+    const bin = await mkdtemp(join(tmpdir(), `pi-web-chat-bin-${item.name}-`));
+    const outside = await mkdtemp(join(tmpdir(), `pi-web-chat-outside-${item.name}-`));
+    const fakePi = join(bin, "pi");
+    await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+    await chmod(fakePi, 0o755);
+
+    const outputs = [];
+    for (const root of roots) {
+      await mkdir(join(root, ".pi"), { recursive: true });
+
+      if (item.symlink) {
+        await symlink(outside, join(root, "link-sessions"));
+      }
+
+      await writeFile(join(root, ".pi", "settings.json"), JSON.stringify(item.settings(outside)));
+    }
+
+    outputs.push(await callBackend(
+      "startPrompt",
+      roots[0],
+      { text: "hello pi" },
+      { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    ));
+
+    const compiled = await runBackendBinary(
+      "startPrompt",
+      roots[1],
+      { text: "hello pi" },
+      { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    );
+    assert.equal(compiled.code, 0, compiled.stderr);
+    outputs.push(JSON.parse(compiled.stdout));
+
+    assert.deepEqual(outputs.map((output) => output.warnings), [[item.warning], [item.warning]]);
+  }
+});
+
 test("startPrompt fails closed when fallback session dir symlinks outside workspace", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
