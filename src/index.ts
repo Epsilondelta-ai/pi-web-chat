@@ -1052,8 +1052,22 @@ function upsertToolCall(message: ChatMessage, event: ChatEvent, status: "running
     message.toolCalls.push(tool);
   }
   tool.status = status;
-  if (event.args) tool.args = event.args;
+  if (shouldUpdateToolArgs(tool, event)) {
+    tool.args = event.args;
+    tool.argsStatus = event.argsStatus;
+  }
   return tool;
+}
+
+function shouldUpdateToolArgs(tool: ChatToolCall, event: ChatEvent): boolean {
+  if (!event.argsStatus) {
+    return Boolean(event.args);
+  }
+  if (event.argsStatus === "unavailable") {
+    return !tool.argsStatus;
+  }
+
+  return true;
 }
 
 function isChatEvent(value: unknown): value is ChatEvent {
@@ -1757,7 +1771,7 @@ function renderMountedToolCard(tool: ChatToolCall, toolKey: string): HTMLElement
 function renderMountedToolBody(tool: ChatToolCall): HTMLElement {
   const body = document.createElement("pre");
   body.className = "tc-body";
-  body.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
+  body.textContent = tool.text || mountedToolBodyArgsText(tool);
   return body;
 }
 
@@ -1913,11 +1927,43 @@ function toolCaret(collapsed: boolean): HTMLElement {
 }
 
 function mountedToolArgsText(tool: ChatToolCall): string {
+  if (tool.argsStatus === "truncated") {
+    return "arguments truncated";
+  }
+  if (tool.argsStatus === "omitted") {
+    return "arguments omitted";
+  }
+  if (tool.argsStatus === "unavailable") {
+    return "arguments unavailable";
+  }
+  if (tool.argsStatus === "empty") {
+    return "no arguments";
+  }
   if (!tool.args) {
     return "";
   }
 
   return JSON.stringify(tool.args);
+}
+
+function mountedToolBodyArgsText(tool: ChatToolCall): string {
+  if (tool.argsStatus === "truncated") {
+    return "arguments truncated: too large to display";
+  }
+  if (tool.argsStatus === "omitted") {
+    return "arguments omitted: response too large";
+  }
+  if (tool.argsStatus === "unavailable") {
+    return "arguments unavailable";
+  }
+  if (tool.argsStatus === "empty") {
+    return "no arguments";
+  }
+  if (!tool.args) {
+    return "arguments unavailable";
+  }
+
+  return JSON.stringify(tool.args, null, 2);
 }
 
 function toolIconName(tool: ChatToolCall): ToolIconName | undefined {
@@ -2475,7 +2521,16 @@ function isChatToolCall(value: unknown): value is ChatToolCall {
     return false;
   }
 
-  return typeof value.text === "string" && isToolStatus(value.status);
+  return typeof value.text === "string" && isToolStatus(value.status) && isToolArgsStatus(value.argsStatus);
+}
+
+function isToolArgsStatus(value: unknown): value is ChatToolCall["argsStatus"] {
+  return value === undefined
+    || value === "present"
+    || value === "empty"
+    || value === "unavailable"
+    || value === "truncated"
+    || value === "omitted";
 }
 
 function isToolStatus(value: unknown): value is ChatToolCall["status"] {
