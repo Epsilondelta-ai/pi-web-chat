@@ -698,24 +698,28 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
   });
 });
 
-test("mounted tool-only assistant messages omit empty pi row", async () => {
+test("mounted empty assistant messages omit pi row", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
-    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "tool-only-session", activeWorkspaceId: "workspace-1" }) };
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "empty-assistant-session", activeWorkspaceId: "workspace-1" }) };
 
     const cleanup = activate({
       app,
       backend: async (method) => {
         if (method === "chatState") {
           return {
-            activeSessionId: "tool-only-session",
-            messages: [{
-              id: "a1",
-              role: "assistant",
-              text: "   ",
-              createdAt: 1,
-              toolCalls: [{ id: "t1", name: "bash", args: { command: "pwd" }, text: "done", status: "ok" }],
-            }],
+            activeSessionId: "empty-assistant-session",
+            messages: [
+              { id: "a1", role: "assistant", text: "   ", createdAt: 1 },
+              {
+                id: "a2",
+                role: "assistant",
+                text: "",
+                createdAt: 2,
+                toolCalls: [{ id: "t1", name: "bash", args: { command: "pwd" }, text: "done", status: "ok" }],
+              },
+              { id: "a3", role: "assistant", text: "visible", createdAt: 3 },
+            ],
           };
         }
 
@@ -727,7 +731,9 @@ test("mounted tool-only assistant messages omit empty pi row", async () => {
     await tick();
     await tick();
 
-    assert.equal(window.document.querySelector('.msg[data-kind="pi"]'), null);
+    const piMessages = window.document.querySelectorAll('.msg[data-kind="pi"]');
+    assert.equal(piMessages.length, 1);
+    assert.equal(piMessages[0].textContent, "pi >visible");
     assert.equal(window.document.querySelectorAll(".tool-card").length, 1);
     assert.equal(window.document.querySelector(".tc-name").textContent, "bash");
     cleanup();

@@ -1157,10 +1157,9 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
 }
 
 function shouldRenderMountedMessageRow(message: ChatMessage): boolean {
-  const hasToolCalls: boolean = Boolean(message.toolCalls?.length);
   const hasText: boolean = message.text.trim().length > 0;
 
-  return message.role !== "assistant" || hasText || !hasToolCalls;
+  return message.role !== "assistant" || hasText;
 }
 
 function renderMountedThinking(text: string, open: boolean): HTMLElement {
