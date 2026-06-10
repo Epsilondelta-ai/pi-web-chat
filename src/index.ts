@@ -496,7 +496,13 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
   }));
 
   disposables.add(state.channels.activeSessionId$.subscribe((id) => {
-    if (id) switchToSession(state, dom, id);
+    if (id) {
+      persistSidebarSelection(state.context, {
+        sessionId: id,
+        workspaceId: state.context.app?.dataset.activeWorkspaceId || getActiveWorkspaceId(state.context) || undefined,
+      });
+      switchToSession(state, dom, id);
+    }
   }));
 
   disposables.add(state.channels.sidebarSelectedSession$.subscribe((selected) => {
@@ -505,10 +511,6 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
     }
 
     if (selected?.sessionId) {
-      if (selected.sessionId !== state.store.activeSessionId) {
-        state.runEventsAbort?.abort();
-      }
-
       switchToSession(state, dom, selected.sessionId);
       void openSessionEvents(state, dom, selected.sessionId);
     }
@@ -528,6 +530,7 @@ function submitCurrentInput(state: State): void {
 async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmitted): Promise<void> {
   const text = event.text.trim();
   if (!text) return;
+  const sessionId = syncStateToViewedSession(state, dom);
   renderAttachmentChips(dom.attachments, []);
 
   if (text.startsWith("!")) {
@@ -539,40 +542,59 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   }
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
-  addMessage(state, { role: "user", text, attachments });
+  const pendingUserMessage = addMessageToSession(state.store, sessionId, { role: "user", text, attachments });
   render(state, dom);
   try {
-    await submitPromptWithStreaming(state, dom, text, attachments);
+    await submitPromptWithStreaming(state, dom, text, attachments, sessionId, pendingUserMessage);
   } catch (error) {
     state.channels.toastRequested$.next({ level: "error", message: `prompt failed: ${errorText(error)}` });
   }
   clearPendingAttachments(state);
 }
 
-async function submitPromptWithStreaming(state: State, dom: ChatDom, text: string, attachments: FileAttachment[]): Promise<void> {
+async function submitPromptWithStreaming(
+  state: State,
+  dom: ChatDom,
+  text: string,
+  attachments: FileAttachment[],
+  sessionId: string,
+  pendingUserMessage: ChatMessage,
+): Promise<void> {
   state.backendChatToken += 1;
   state.runEventsAbort?.abort();
   state.runEventsAbort = new AbortController();
   state.sessionEventsAbort?.abort();
-  const start = await startStreamingPrompt(state.context, text, attachments, state.store.activeSessionId);
+  let targetSessionId: string = sessionId;
+  const start = await startStreamingPrompt(state.context, text, attachments, targetSessionId);
   if (typeof start.runId !== "string" || !start.runId) {
-    const response = await submitPromptToPluginBackend(state.context, text, attachments, state.store.activeSessionId);
-    applyBackendResponseToStore(state.store, response);
+    const response = await submitPromptToPluginBackend(state.context, text, attachments, targetSessionId);
+    applyBackendResponseToSession(state.store, response, targetSessionId);
     render(state, dom);
     return;
   }
 
   if (typeof start.activeSessionId === "string" && start.activeSessionId) {
-    state.store.activeSessionId = start.activeSessionId;
+    const previousSessionId = targetSessionId;
+    targetSessionId = start.activeSessionId;
+    state.store.activeSessionId = targetSessionId;
+    moveMessageBetweenSessions(state.store, previousSessionId, targetSessionId, pendingUserMessage.id);
   }
 
-  const assistant = ensureStreamingAssistant(state.store);
+  const session = sessionById(state.store, targetSessionId);
+  const assistant = ensureStreamingAssistant(session);
   try {
-    await consumeStreamingRun(state.context, state.store, start.runId, assistant, (): void => render(state, dom), state.runEventsAbort.signal);
+    await consumeStreamingRun(state.context, state.store, session, start.runId, assistant, (): void => {
+      if (state.store.activeSessionId === targetSessionId) {
+        render(state, dom);
+      }
+    }, state.runEventsAbort.signal);
   } finally {
     state.runEventsAbort = undefined;
   }
-  void openSessionEvents(state, dom, state.store.activeSessionId);
+
+  if (state.store.activeSessionId === targetSessionId) {
+    void openSessionEvents(state, dom, targetSessionId);
+  }
 }
 
 async function submitMountedPromptWithStreaming(
@@ -583,6 +605,7 @@ async function submitMountedPromptWithStreaming(
   text: string,
   attachments: FileAttachment[],
 ): Promise<void> {
+  let targetSessionId: string = syncMountedStoreToViewedSession(context, store);
   mountedState.backendChatToken += 1;
   mountedState.runEventsAbort?.abort();
   mountedState.runEventsAbort = new AbortController();
@@ -594,22 +617,19 @@ async function submitMountedPromptWithStreaming(
     attachments: sanitizeAttachmentsForStorage(attachments),
     createdAt: Date.now(),
   };
-  const session = activeSession(store);
-  session.messages.push(pendingUserMessage);
-  session.updatedAt = Date.now();
+  const submitSession = sessionById(store, targetSessionId);
+  submitSession.messages.push(pendingUserMessage);
+  submitSession.updatedAt = Date.now();
   saveStore(store);
-  renderMountedBackendMessages(chatSurface, session.messages, store.activeSessionId);
+  renderMountedBackendMessages(chatSurface, submitSession.messages, targetSessionId);
 
-  const start = await startStreamingPrompt(context, text, attachments, store.activeSessionId);
+  const start = await startStreamingPrompt(context, text, attachments, targetSessionId);
 
   if (typeof start.activeSessionId === "string" && start.activeSessionId) {
-    const previousSessionId = store.activeSessionId;
-    const active = switchMountedStoreToSession(store, start.activeSessionId);
-
-    if (previousSessionId !== active.id && !active.messages.some((message) => message.id === pendingUserMessage.id)) {
-      active.messages.push(pendingUserMessage);
-      active.updatedAt = Date.now();
-    }
+    const previousSessionId = targetSessionId;
+    targetSessionId = start.activeSessionId;
+    switchMountedStoreToSession(store, targetSessionId);
+    moveMessageBetweenSessions(store, previousSessionId, targetSessionId, pendingUserMessage.id);
 
     persistSidebarSelection(context, {
       sessionId: start.activeSessionId,
@@ -620,31 +640,45 @@ async function submitMountedPromptWithStreaming(
   }
 
   if (typeof start.runId !== "string" || !start.runId) {
-    const response = await submitPromptToPluginBackend(context, text, attachments, store.activeSessionId);
-    const messages = applyBackendResponseToMountedStore(context, store, response, "submitPrompt");
-    renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
+    const response = await submitPromptToPluginBackend(context, text, attachments, targetSessionId);
+    const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId);
+
+    if (store.activeSessionId === targetSessionId) {
+      renderMountedBackendMessages(chatSurface, messages, targetSessionId);
+    }
+
     return;
   }
 
-  const assistant = ensureStreamingAssistant(store);
+  const session = sessionById(store, targetSessionId);
+  const assistant = ensureStreamingAssistant(session);
   try {
     await consumeStreamingRun(
       context,
       store,
+      session,
       start.runId,
       assistant,
-      (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages, store.activeSessionId),
+      (): void => {
+        if (store.activeSessionId === targetSessionId) {
+          renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
+        }
+      },
       mountedState.runEventsAbort.signal,
     );
   } finally {
     mountedState.runEventsAbort = undefined;
   }
-  void openMountedSessionEvents(context, chatSurface, store, mountedState, store.activeSessionId);
+
+  if (store.activeSessionId === targetSessionId) {
+    void openMountedSessionEvents(context, chatSurface, store, mountedState, targetSessionId);
+  }
 }
 
 async function consumeStreamingRun(
   context: PluginContext,
   store: ChatStore,
+  session: ChatSession,
   runId: string,
   assistant: ChatMessage,
   renderCurrent: () => void,
@@ -663,7 +697,7 @@ async function consumeStreamingRun(
     await readSseChatEvents(stream, (event: ChatEvent): void => {
       applyChatEvents(assistant, [event]);
       assistant.streaming = event.type !== "run.end";
-      activeSession(store).updatedAt = Date.now();
+      session.updatedAt = Date.now();
       saveStore(store);
       renderCurrent();
     });
@@ -819,18 +853,29 @@ async function submitPromptToPluginBackend(context: PluginContext, text: string,
 }
 
 function applyBackendResponseToStore(store: ChatStore, response: BackendResponse): void {
+  const fallbackSessionId = typeof response.activeSessionId === "string" && response.activeSessionId
+    ? response.activeSessionId
+    : store.activeSessionId;
+
+  applyBackendResponseToSession(store, response, fallbackSessionId);
+}
+
+function applyBackendResponseToSession(store: ChatStore, response: BackendResponse, fallbackSessionId: string): void {
+  const sessionId = typeof response.activeSessionId === "string" && response.activeSessionId ? response.activeSessionId : fallbackSessionId;
+
   if (typeof response.activeSessionId === "string" && response.activeSessionId) {
     store.activeSessionId = response.activeSessionId;
   }
+
   if (Array.isArray(response.messages)) {
-    activeSession(store).messages = sanitizeChatMessages(response.messages).slice(-MAX_MESSAGES_PER_SESSION);
-    activeSession(store).updatedAt = Date.now();
+    const session = sessionById(store, sessionId);
+    session.messages = sanitizeChatMessages(response.messages).slice(-MAX_MESSAGES_PER_SESSION);
+    session.updatedAt = Date.now();
     saveStore(store);
   }
 }
 
-function ensureStreamingAssistant(store: ChatStore): ChatMessage {
-  const session = activeSession(store);
+function ensureStreamingAssistant(session: ChatSession): ChatMessage {
   const existing = [...session.messages].reverse().find((message) => message.role === "assistant" && message.streaming);
   if (existing) return existing;
   const message: ChatMessage = { id: id(), role: "assistant", text: "", createdAt: Date.now(), streaming: true };
@@ -1015,6 +1060,29 @@ function applyBackendResponseToMountedStore(
   return session.messages;
 }
 
+function applyBackendResponseToMountedSession(
+  context: PluginContext,
+  store: ChatStore,
+  response: BackendResponse,
+  reason: string,
+  fallbackSessionId: string,
+): ChatMessage[] {
+  if (typeof response.activeSessionId === "string" && response.activeSessionId) {
+    return applyBackendResponseToMountedStore(context, store, response, reason);
+  }
+
+  const responseMessages = sanitizeChatMessages(response.messages);
+  const session = sessionById(store, fallbackSessionId);
+
+  if (responseMessages.length) {
+    session.messages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
+    session.updatedAt = Date.now();
+  }
+
+  saveStore(store);
+  return session.messages;
+}
+
 function bindMountedSidebarSelection(
   disposables: Disposables,
   context: PluginContext,
@@ -1025,10 +1093,6 @@ function bindMountedSidebarSelection(
   const onSelected = (selected: SidebarSelectedSession | null): void => {
     if (!selected?.sessionId) {
       return;
-    }
-
-    if (selected.sessionId !== store.activeSessionId) {
-      mountedState.runEventsAbort?.abort();
     }
 
     persistSidebarSelection(context, selected);
@@ -1078,6 +1142,28 @@ function bindMountedSidebarSelection(
       onSelected({ sessionId, workspaceId: context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || undefined });
     }));
   }
+}
+
+function syncStateToViewedSession(state: State, dom: ChatDom): string {
+  const selected = readSidebarSelection(state.context);
+
+  if (selected?.sessionId) {
+    persistSidebarSelection(state.context, selected);
+    switchToSession(state, dom, selected.sessionId);
+  }
+
+  return state.store.activeSessionId;
+}
+
+function syncMountedStoreToViewedSession(context: PluginContext, store: ChatStore): string {
+  const selected = readSidebarSelection(context);
+
+  if (selected?.sessionId) {
+    persistSidebarSelection(context, selected);
+    switchMountedStoreToSession(store, selected.sessionId);
+  }
+
+  return store.activeSessionId;
 }
 
 function selectedSessionFromSidebarEvent(context: PluginContext, event: SidebarActionEvent): SidebarSelectedSession | null {
@@ -1656,14 +1742,72 @@ function replaceLastRunningTool(state: State, text: string, status: "ok" | "err"
 }
 
 function activeSession(store: ChatStore): ChatSession {
-  let session = store.sessions.find((item) => item.id === store.activeSessionId);
+  return sessionById(store, store.activeSessionId, true);
+}
+
+function sessionById(store: ChatStore, sessionId: string, makeActive = false): ChatSession {
+  let session = store.sessions.find((item) => item.id === sessionId);
+
   if (!session) {
-    session = createSession();
+    session = createSession(sessionId || undefined);
     store.sessions.unshift(session);
+    saveStore(store);
+  }
+
+  if (makeActive || !store.activeSessionId) {
     store.activeSessionId = session.id;
     saveStore(store);
   }
+
   return session;
+}
+
+function addMessageToSession(
+  store: ChatStore,
+  sessionId: string,
+  message: Omit<ChatMessage, "id" | "createdAt">,
+): ChatMessage {
+  const session = sessionById(store, sessionId);
+  const storedMessage: ChatMessage = {
+    id: id(),
+    createdAt: Date.now(),
+    ...message,
+    attachments: sanitizeAttachmentsForStorage(message.attachments),
+  };
+
+  session.messages.push(storedMessage);
+  if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
+    session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
+  }
+  if (session.title === "New chat" && message.role === "user") session.title = message.text.slice(0, 48) || session.title;
+  session.updatedAt = Date.now();
+  pruneStore(store);
+  saveStore(store);
+  return storedMessage;
+}
+
+function moveMessageBetweenSessions(store: ChatStore, fromSessionId: string, toSessionId: string, messageId: string): void {
+  if (fromSessionId === toSessionId) {
+    return;
+  }
+
+  const fromSession = store.sessions.find((item) => item.id === fromSessionId);
+  const messageIndex = fromSession?.messages.findIndex((message) => message.id === messageId) ?? -1;
+
+  if (!fromSession || messageIndex < 0) {
+    return;
+  }
+
+  const [message] = fromSession.messages.splice(messageIndex, 1);
+  const toSession = sessionById(store, toSessionId);
+
+  if (!toSession.messages.some((item) => item.id === message.id)) {
+    toSession.messages.push(message);
+  }
+
+  fromSession.updatedAt = Date.now();
+  toSession.updatedAt = Date.now();
+  saveStore(store);
 }
 
 function switchToSession(state: State, dom: ChatDom, sessionId: string): void {

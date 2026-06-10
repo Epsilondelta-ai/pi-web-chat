@@ -436,6 +436,121 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
+test("mounted submit keeps captured viewed session during startPrompt fallback race", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    let viewedSession = "clicked-session";
+    let releaseStart;
+    const startReady = new Promise((resolve) => { releaseStart = resolve; });
+    app.piWebSidebar = { getSnapshot: () => ({ activeWorkspaceId: "workspace-1", activeSessionId: viewedSession }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          await startReady;
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return { messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "race-safe prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    viewedSession = "later-session";
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("later-session");
+    releaseStart();
+    await tick();
+    await tick();
+
+    const startCall = backendCalls.find((call) => call.method === "startPrompt");
+    const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const clicked = store.sessions.find((session) => session.id === "clicked-session");
+    const later = store.sessions.find((session) => session.id === "later-session");
+
+    assert.equal(startCall.input.data.sessionId, "clicked-session");
+    assert.equal(submitCall.input.data.sessionId, "clicked-session");
+    assert.match(JSON.stringify(clicked.messages), /race-safe prompt/);
+    assert.doesNotMatch(JSON.stringify(later.messages), /race-safe prompt/);
+    cleanup();
+  });
+});
+
+test("mounted streaming keeps captured session stream alive during later switch", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let viewedSession = "clicked-stream-session";
+    let releaseStream;
+    const streamReady = new Promise((resolve) => { releaseStream = resolve; });
+    app.piWebSidebar = { getSnapshot: () => ({ activeWorkspaceId: "workspace-1", activeSessionId: viewedSession }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "clicked-stream-session", runId: "run-stream-race", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method, input, options) => {
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({ start() {} });
+        }
+
+        if (method === "streamEventsSse") {
+          await streamReady;
+          return new ReadableStream({
+            start(controller) {
+              assert.equal(options?.signal?.aborted, false);
+              controller.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"captured answer"}\n\n'));
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream race";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    viewedSession = "later-stream-session";
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("later-stream-session");
+    releaseStream();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const clicked = store.sessions.find((session) => session.id === "clicked-stream-session");
+    const later = store.sessions.find((session) => session.id === "later-stream-session");
+
+    assert.match(JSON.stringify(clicked.messages), /captured answer/);
+    assert.doesNotMatch(JSON.stringify(later.messages), /captured answer/);
+    cleanup();
+  });
+});
+
 test("mounted submit streams through SSE and notifies sidebar refresh channel", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
