@@ -16,7 +16,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -482,10 +482,33 @@ function promptWorkspaceRoot(root, data) {
 
 function sessionDirs(root) {
   const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
-  return [
-    join(root, ".pi", "sessions"),
+  return uniquePaths([
+    configuredSessionDir(root),
     join(homeDir(), ".pi", "agent", "sessions", safe),
-  ];
+  ]);
+}
+
+function configuredSessionDir(root) {
+  const fallback = join(root, ".pi", "sessions");
+  try {
+    const settings = JSON.parse(readFileSync(join(root, ".pi", "settings.json"), "utf8"));
+    const hasSessionDir = settings && Object.prototype.hasOwnProperty.call(settings, "sessionDir");
+    const sessionDir = hasSessionDir ? settings.sessionDir : "";
+    if (typeof sessionDir !== "string" || !sessionDir.trim()) return fallback;
+    return isAbsolute(sessionDir) ? resolve(sessionDir) : resolve(root, sessionDir);
+  } catch {
+    return fallback;
+  }
+}
+
+function uniquePaths(paths) {
+  const seen = new Set();
+  return paths.filter((path) => {
+    const key = resolve(path);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function runRoot() {

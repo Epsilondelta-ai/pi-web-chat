@@ -1015,11 +1015,45 @@ func piSessionFileInDir(dir, sessionID string) (string, bool) {
 }
 
 func piSessionDir(workspaceRoot string) string {
-	return filepath.Join(workspaceRoot, ".pi", "sessions")
+	fallback := filepath.Join(workspaceRoot, ".pi", "sessions")
+	data, err := os.ReadFile(filepath.Join(workspaceRoot, ".pi", "settings.json"))
+	if err != nil {
+		return fallback
+	}
+
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return fallback
+	}
+
+	sessionDir, ok := settings["sessionDir"].(string)
+	if !ok || strings.TrimSpace(sessionDir) == "" {
+		return fallback
+	}
+
+	if filepath.IsAbs(sessionDir) {
+		return filepath.Clean(sessionDir)
+	}
+
+	return filepath.Clean(filepath.Join(workspaceRoot, sessionDir))
 }
 
 func piSessionDirs(workspaceRoot string) []string {
-	return []string{piSessionDir(workspaceRoot), piAgentSessionDir(workspaceRoot)}
+	return uniquePaths([]string{piSessionDir(workspaceRoot), piAgentSessionDir(workspaceRoot)})
+}
+
+func uniquePaths(paths []string) []string {
+	seen := map[string]bool{}
+	unique := []string{}
+	for _, path := range paths {
+		cleaned := filepath.Clean(path)
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		unique = append(unique, cleaned)
+	}
+	return unique
 }
 
 func piAgentSessionDir(workspaceRoot string) string {

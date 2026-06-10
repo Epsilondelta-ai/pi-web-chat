@@ -134,6 +134,67 @@ process.stdin.on('end', () => {
   assert.match(content, /attached context/);
 });
 
+test("submitPrompt honors settings sessionDir", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: "custom-sessions" }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+const session = process.argv[process.argv.indexOf('--session') + 1];
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  const message = {
+    type: 'message',
+    id: 'a1',
+    timestamp: '2026-01-02T03:04:06.000Z',
+    message: { role: 'assistant', content: 'answer' },
+  };
+  fs.appendFileSync(session, JSON.stringify(message) + '\\n');
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "submitPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  const files = await readdir(join(root, "custom-sessions"));
+  assert.equal(files.length, 1);
+});
+
+test("startPrompt honors settings sessionDir", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  const sessionDir = join(root, "configured", "sessions");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "startPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  const files = await readdir(sessionDir);
+  assert.equal(files.some((name) => name.includes(result.activeSessionId)), true);
+});
+
 test("streaming methods capture pi rpc text thinking and tool events", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
