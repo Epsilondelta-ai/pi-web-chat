@@ -941,6 +941,9 @@ func createPiSessionFile(workspaceRoot string) (string, string, error) {
 	sessionID := createSessionID()
 	now := time.Now().UTC()
 	dir := piSessionDir(workspaceRoot)
+	if dir == "" {
+		return "", "", errors.New("session directory escapes workspace")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", err
 	}
@@ -1015,7 +1018,7 @@ func piSessionFileInDir(dir, sessionID string) (string, bool) {
 }
 
 func piSessionDir(workspaceRoot string) string {
-	fallback := filepath.Join(workspaceRoot, ".pi", "sessions")
+	fallback := safeSessionDir(workspaceRoot, filepath.Join(workspaceRoot, ".pi", "sessions"))
 	data, err := os.ReadFile(filepath.Join(workspaceRoot, ".pi", "settings.json"))
 	if err != nil {
 		return fallback
@@ -1031,11 +1034,61 @@ func piSessionDir(workspaceRoot string) string {
 		return fallback
 	}
 
+	resolved := ""
 	if filepath.IsAbs(sessionDir) {
-		return filepath.Clean(sessionDir)
+		resolved = filepath.Clean(sessionDir)
+	} else {
+		resolved = filepath.Clean(filepath.Join(workspaceRoot, sessionDir))
 	}
 
-	return filepath.Clean(filepath.Join(workspaceRoot, sessionDir))
+	if safe := safeSessionDir(workspaceRoot, resolved); safe != "" {
+		return safe
+	}
+
+	return fallback
+}
+
+func safeSessionDir(root, target string) string {
+	cleaned := filepath.Clean(target)
+	if !isPathInside(root, cleaned) || !isRealPathInside(root, cleaned) {
+		return ""
+	}
+	return cleaned
+}
+
+func isRealPathInside(root, target string) bool {
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+
+	existing := nearestExistingPath(target)
+	existingReal, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return false
+	}
+
+	rel, err := filepath.Rel(existing, target)
+	if err != nil {
+		return false
+	}
+
+	return isPathInside(rootReal, filepath.Clean(filepath.Join(existingReal, rel)))
+}
+
+func nearestExistingPath(path string) string {
+	current := filepath.Clean(path)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			return current
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return current
+		}
+		current = parent
+	}
 }
 
 func piSessionDirs(workspaceRoot string) []string {
@@ -1046,6 +1099,9 @@ func uniquePaths(paths []string) []string {
 	seen := map[string]bool{}
 	unique := []string{}
 	for _, path := range paths {
+		if path == "" {
+			continue
+		}
 		cleaned := filepath.Clean(path)
 		if seen[cleaned] {
 			continue
