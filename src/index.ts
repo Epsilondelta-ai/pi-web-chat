@@ -49,6 +49,7 @@ const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
 const MOUNTED_CHAT_POLL_MS = 250;
+const mountedExpandedToolCards: Set<string> = new Set<string>();
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
 
@@ -193,7 +194,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   persistSidebarSelection(context, selected || undefined);
   const mountedStore = loadStore(selected?.sessionId || "");
   const mountedState: MountedState = { backendChatToken: 0 };
-  renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages);
+  renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages, mountedStore.activeSessionId);
   void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
@@ -204,6 +205,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     mountedState.runEventsAbort?.abort();
     mountedState.sessionEventsAbort?.abort();
     disposables.dispose();
+    mountedExpandedToolCards.clear();
     badge?.remove();
     style.remove();
     app?.classList.remove(pluginClass());
@@ -277,7 +279,7 @@ function bindMountedComposer(
         fileInput.value = "";
       }
     } catch (error) {
-      renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)]);
+      renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)], store.activeSessionId);
     } finally {
       sendButton.disabled = false;
       sync();
@@ -596,7 +598,7 @@ async function submitMountedPromptWithStreaming(
   session.messages.push(pendingUserMessage);
   session.updatedAt = Date.now();
   saveStore(store);
-  renderMountedBackendMessages(chatSurface, session.messages);
+  renderMountedBackendMessages(chatSurface, session.messages, store.activeSessionId);
 
   const start = await startStreamingPrompt(context, text, attachments, store.activeSessionId);
 
@@ -620,7 +622,7 @@ async function submitMountedPromptWithStreaming(
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(context, text, attachments, store.activeSessionId);
     const messages = applyBackendResponseToMountedStore(context, store, response, "submitPrompt");
-    renderMountedBackendMessages(chatSurface, messages);
+    renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     return;
   }
 
@@ -631,7 +633,7 @@ async function submitMountedPromptWithStreaming(
       store,
       start.runId,
       assistant,
-      (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages),
+      (): void => renderMountedBackendMessages(chatSurface, activeSession(store).messages, store.activeSessionId),
       mountedState.runEventsAbort.signal,
     );
   } finally {
@@ -904,7 +906,7 @@ async function openMountedSessionEvents(
 
       const messages = applyBackendResponseToMountedStore(context, store, chatStateEventResponse(event), "chatState");
       if (messages.length) {
-        renderMountedBackendMessages(chatSurface, messages);
+        renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
       }
     });
   } catch (error) {
@@ -936,7 +938,7 @@ async function refreshMountedBackendChatState(
 
     const messages = applyBackendResponseToMountedStore(context, store, response, "chatState");
     if (messages.length) {
-      renderMountedBackendMessages(chatSurface, messages);
+      renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     }
   } catch {
     // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
@@ -1031,7 +1033,7 @@ function bindMountedSidebarSelection(
 
     persistSidebarSelection(context, selected);
     switchMountedStoreToSession(store, selected.sessionId);
-    renderMountedBackendMessages(chatSurface, activeSession(store).messages);
+    renderMountedBackendMessages(chatSurface, activeSession(store).messages, store.activeSessionId);
     void openMountedSessionEvents(context, chatSurface, store, mountedState, selected.sessionId);
   };
 
@@ -1113,12 +1115,13 @@ function switchMountedStoreToSession(store: ChatStore, sessionId: string): ChatS
   return session;
 }
 
-function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[]): void {
+function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMessage[], sessionId: string): void {
+  pruneMountedExpandedToolCards(messages, sessionId);
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
-  container.replaceChildren(...messages.map(renderMountedBackendMessage));
+  container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
 }
 
-function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
+function renderMountedBackendMessage(message: ChatMessage, sessionId: string): HTMLElement {
   const item = document.createElement("article");
   item.className = "transcript-item";
   item.dataset.messageId = message.id;
@@ -1136,14 +1139,17 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   body.textContent = message.text;
 
   row.append(prefix, body);
-  item.append(row);
+
+  if (shouldRenderMountedMessageRow(message)) {
+    item.append(row);
+  }
 
   if (message.thinking) {
     item.append(renderMountedThinking(message.thinking, Boolean(message.streaming)));
   }
 
   for (const tool of message.toolCalls || []) {
-    item.append(renderMountedToolCard(tool));
+    item.append(renderMountedToolCard(tool, mountedToolKey(sessionId, message, tool)));
   }
 
   if (message.streaming) {
@@ -1151,6 +1157,12 @@ function renderMountedBackendMessage(message: ChatMessage): HTMLElement {
   }
 
   return item;
+}
+
+function shouldRenderMountedMessageRow(message: ChatMessage): boolean {
+  const hasText: boolean = message.text.trim().length > 0;
+
+  return message.role !== "assistant" || hasText;
 }
 
 function renderMountedThinking(text: string, open: boolean): HTMLElement {
@@ -1167,12 +1179,32 @@ function renderMountedThinking(text: string, open: boolean): HTMLElement {
   return details;
 }
 
-function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
+function pruneMountedExpandedToolCards(messages: ChatMessage[], sessionId: string): void {
+  const currentKeys: Set<string> = new Set<string>();
+
+  for (const message of messages) {
+    for (const tool of message.toolCalls || []) {
+      currentKeys.add(mountedToolKey(sessionId, message, tool));
+    }
+  }
+
+  for (const key of mountedExpandedToolCards) {
+    if (!currentKeys.has(key)) {
+      mountedExpandedToolCards.delete(key);
+    }
+  }
+}
+
+function mountedToolKey(sessionId: string, message: ChatMessage, tool: ChatToolCall): string {
+  return `${sessionId}:${message.id}:${tool.id}`;
+}
+
+function renderMountedToolCard(tool: ChatToolCall, toolKey: string): HTMLElement {
   const card = document.createElement("div");
   card.className = "tool-card";
   card.dataset.tool = tool.name || "tool";
   card.dataset.status = tool.status;
-  const collapsed = tool.status !== "running";
+  const collapsed: boolean = !mountedExpandedToolCards.has(toolKey);
   card.dataset.collapsed = collapsed ? "true" : "false";
 
   const head = document.createElement("button");
@@ -1181,13 +1213,13 @@ function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
   head.title = collapsed ? "Show tool output" : "Hide tool output";
   head.setAttribute("aria-expanded", collapsed ? "false" : "true");
   head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${tool.name || "tool"} output`);
-  head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
+  head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool, collapsed));
 
   if (!collapsed) {
     card.append(renderMountedToolBody(tool));
   }
 
-  head.addEventListener("click", () => toggleMountedToolCard(card, head, tool));
+  head.addEventListener("click", () => toggleMountedToolCard(card, head, tool, toolKey));
   card.prepend(head);
   return card;
 }
@@ -1199,14 +1231,16 @@ function renderMountedToolBody(tool: ChatToolCall): HTMLElement {
   return body;
 }
 
-function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, tool: ChatToolCall): void {
+function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, tool: ChatToolCall, toolKey: string): void {
   const body = card.querySelector<HTMLElement>(".tc-body");
-  const collapsed = body !== null;
+  const collapsed: boolean = body !== null;
 
   if (body) {
     body.remove();
+    mountedExpandedToolCards.delete(toolKey);
   } else {
     card.append(renderMountedToolBody(tool));
+    mountedExpandedToolCards.add(toolKey);
   }
 
   card.dataset.collapsed = collapsed ? "true" : "false";
@@ -1249,7 +1283,7 @@ function toolArgs(tool: ChatToolCall): HTMLElement {
   return args;
 }
 
-function toolMeta(tool: ChatToolCall): HTMLElement {
+function toolMeta(tool: ChatToolCall, collapsed: boolean): HTMLElement {
   const meta = document.createElement("span");
   meta.className = "tc-meta";
 
@@ -1260,7 +1294,7 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
     const label = document.createElement("span");
     label.className = "running";
     label.textContent = "running";
-    meta.append(spinner, label, toolCaret(tool.status));
+    meta.append(spinner, label, toolCaret(collapsed));
     return meta;
   }
 
@@ -1269,16 +1303,16 @@ function toolMeta(tool: ChatToolCall): HTMLElement {
   status.textContent = tool.status === "err" ? "✗" : "✓";
   const label = document.createElement("span");
   label.textContent = tool.status === "err" ? " · failed" : " · done";
-  meta.append(status, label, toolCaret());
+  meta.append(status, label, toolCaret(collapsed));
   return meta;
 }
 
-function toolCaret(status: ChatToolCall["status"] = "ok"): HTMLElement {
+function toolCaret(collapsed: boolean): HTMLElement {
   const wrap = document.createElement("span");
   wrap.className = "tc-toggle";
   const label = document.createElement("span");
   label.className = "tc-toggle-label";
-  label.textContent = status === "running" ? "hide" : "show";
+  label.textContent = collapsed ? "show" : "hide";
   const caret = document.createElement("span");
   caret.className = "tc-caret";
   caret.textContent = "▸";
