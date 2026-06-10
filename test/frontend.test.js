@@ -210,6 +210,79 @@ test("mounted activation loads sidebar-selected session and sends chatState for 
   });
 });
 
+test("mounted chat starts at bottom and scroll-bottom button controls pinned scrolling", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    let selectedSession = "initial-scroll-session";
+    app.piWebSidebar = {
+      getSnapshot: () => ({ activeSessionId: selectedSession, activeWorkspaceId: "workspace-2" }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState") {
+          return {
+            activeSessionId: input.data.sessionId || selectedSession,
+            messages: [{
+              id: input.data.sessionId || selectedSession,
+              role: "assistant",
+              text: `transcript ${input.data.sessionId || selectedSession}`,
+              createdAt: 1,
+            }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const term = window.document.querySelector(".term");
+    const button = window.document.querySelector(".scroll-bottom-btn");
+    Object.defineProperty(term, "scrollHeight", { configurable: true, value: 900 });
+
+    await tick();
+    await tick();
+
+    assert.equal(term.scrollTop, 900);
+    assert.equal(button.hidden, false);
+    assert.equal(button.getAttribute("aria-pressed"), "true");
+
+    term.scrollTop = 100;
+    term.dispatchEvent(new window.WheelEvent("wheel", { deltaY: -20, bubbles: true }));
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+
+    selectedSession = "released-scroll-session";
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null)
+      .next({ sessionId: selectedSession, workspaceId: "workspace-2" });
+    await tick();
+    await tick();
+    assert.equal(term.scrollTop, 100);
+
+    button.click();
+    assert.equal(term.scrollTop, 900);
+    assert.equal(button.getAttribute("aria-pressed"), "true");
+
+    const touchStart = new window.Event("touchstart", { bubbles: true });
+    Object.defineProperty(touchStart, "touches", { value: { item: () => ({ clientY: 10 }) } });
+    term.dispatchEvent(touchStart);
+    const touchMove = new window.Event("touchmove", { bubbles: true });
+    Object.defineProperty(touchMove, "touches", { value: { item: () => ({ clientY: 30 }) } });
+    term.dispatchEvent(touchMove);
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+
+    button.click();
+    selectedSession = "pinned-scroll-session";
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null)
+      .next({ sessionId: selectedSession, workspaceId: "workspace-2" });
+    await tick();
+    await tick();
+    assert.equal(term.scrollTop, 900);
+    cleanup();
+  });
+});
+
 test("mounted activation uses session SSE when available", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
