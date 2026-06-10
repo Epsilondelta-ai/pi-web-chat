@@ -946,37 +946,42 @@ func piSessionFileByID(workspaceRoot, sessionID string) (string, bool) {
 }
 
 func piSessionFileInDir(dir, sessionID string) (string, bool) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", false
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
+	foundPath := ""
+	foundErr := errors.New("pi session found")
+	walkErr := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
 		}
 
-		path := filepath.Join(dir, entry.Name())
 		file, openErr := os.Open(path)
 		if openErr != nil {
-			continue
+			return nil
 		}
 		reader := bufio.NewReader(file)
 		firstLine, readErr := reader.ReadString('\n')
 		_ = file.Close()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			continue
+			return nil
 		}
 		var header map[string]any
 		if err := json.Unmarshal([]byte(strings.TrimSpace(firstLine)), &header); err != nil {
-			continue
+			return nil
 		}
 		if header["type"] == "session" && header["id"] == sessionID {
-			return path, true
+			foundPath = path
+			return foundErr
 		}
-	}
 
-	return "", false
+		return nil
+	})
+
+	return foundPath, errors.Is(walkErr, foundErr)
 }
 
 func piSessionDir(workspaceRoot string) string {

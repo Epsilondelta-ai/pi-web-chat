@@ -387,6 +387,48 @@ test("mounted activation follows sidebar session.activeId clicks after mount", a
   });
 });
 
+test("mounted sidebar selection sends selected workspace path even when active snapshot is stale", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.dataset.activeWorkspaceId = "workspace-old";
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-old",
+        workspaces: [
+          { id: "workspace-old", path: "/tmp/workspace-old" },
+          { id: "workspace-selected", path: "/tmp/workspace-selected" },
+        ],
+      }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "chatState" && input.data.sessionId === "selected-session") {
+          return { activeSessionId: "selected-session", messages: [{ id: "m1", role: "assistant", text: "selected transcript", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null)
+      .next({ sessionId: "selected-session", workspaceId: "workspace-selected" });
+    await tick();
+    await tick();
+
+    const selectedCall = backendCalls.find((call) => {
+      return call.method === "chatState" && call.input.data.sessionId === "selected-session";
+    });
+    assert.equal(selectedCall.input.data.workspacePath, "/tmp/workspace-selected");
+    assert.match(window.document.querySelector(".term-inner").textContent, /selected transcript/);
+    cleanup();
+  });
+});
+
 test("mounted activation ignores stale chatState after later sidebar click", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

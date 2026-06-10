@@ -34,6 +34,7 @@ import type {
   Runtime,
   SidebarActionEvent,
   SidebarSelectedSession,
+  SidebarWorkspace,
   ToastRequest,
 } from "./types";
 
@@ -1133,8 +1134,23 @@ function activeWorkspacePath(context: PluginContext): string {
 function activeWorkspaceSelection(context: PluginContext): { id: string; path: string } {
   const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
   const workspaceId = snapshot?.activeWorkspaceId || context.app?.dataset.activeWorkspaceId || "";
-  const path = snapshot?.workspaces?.find((workspace) => workspace.id === workspaceId)?.path || "";
+  const path = snapshot?.workspaces?.find((workspace: SidebarWorkspace): boolean => workspace.id === workspaceId)?.path || "";
   return { id: workspaceId, path };
+}
+
+function workspaceSelectionForSelectedSession(
+  context: PluginContext,
+  selected: SidebarSelectedSession,
+): { id: string; path: string } {
+  const snapshot = context.app?.piWebSidebar?.getSnapshot?.() || globalThis.piWebSidebar?.getSnapshot?.();
+  const workspaceId = selected.workspaceId || snapshot?.activeWorkspaceId || context.app?.dataset.activeWorkspaceId || "";
+  const path = snapshot?.workspaces?.find((workspace: SidebarWorkspace): boolean => workspace.id === workspaceId)?.path || "";
+
+  if (path || workspaceId !== snapshot?.activeWorkspaceId) {
+    return { id: workspaceId, path };
+  }
+
+  return activeWorkspaceSelection(context);
 }
 
 function applyBackendResponseToMountedStore(
@@ -1271,7 +1287,8 @@ function bindMountedSidebarSelection(
     persistSidebarSelection(context, selected);
     switchMountedStoreToSession(store, selected.sessionId);
     renderMountedBackendMessages(chatSurface, activeSession(store).messages, store.activeSessionId);
-    void openMountedSessionEvents(context, chatSurface, store, mountedState, selected.sessionId);
+    const workspace: { id: string; path: string } = workspaceSelectionForSelectedSession(context, selected);
+    void openMountedSessionEvents(context, chatSurface, store, mountedState, selected.sessionId, workspace.path, workspace.id);
   };
 
   const onSidebarEvent = (event: SidebarActionEvent): void => {
