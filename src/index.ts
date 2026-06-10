@@ -83,6 +83,13 @@ type MountedState = {
   sessionEventsAbort?: AbortController;
 };
 
+type MountedScrollLock = {
+  term: HTMLElement;
+  button: HTMLButtonElement;
+  pinned: boolean;
+  touchStartY: number | null;
+};
+
 type ToolIconName =
   | "book-open"
   | "file-plus"
@@ -119,6 +126,8 @@ const TOOL_ICON_PATHS: Record<ToolIconName, string> = {
   hammer: `<path d="m15 12-8.5 8.5a2.1 2.1 0 0 1-3-3L12 9"/><path d="m17.6 5.4 1.8-1.8"/><path d="m14 7 3 3"/><path d="M5 11 2 8l6-6 3 3"/>`,
   package: `<path d="m7.5 4.3 9 5.2"/><path d="M21 8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.7Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>`,
 };
+
+const mountedScrollLocks: WeakMap<HTMLElement, MountedScrollLock> = new WeakMap<HTMLElement, MountedScrollLock>();
 
 const TOOL_ICON_NAMES: Record<string, ToolIconName> = {
   read: "book-open",
@@ -185,6 +194,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const composerSurface = createComposerSurface();
   const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
+  installMountedScrollLock(disposables, chatSurface);
   if (cleanupChat) {
     disposables.add(cleanupChat);
   }
@@ -1401,6 +1411,87 @@ function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMe
   pruneMountedExpandedToolCards(messages, sessionId);
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
   container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
+  syncMountedScrollAfterRender(chatSurface);
+}
+
+function installMountedScrollLock(disposables: Disposables, chatSurface: HTMLElement): void {
+  const term = chatSurface.querySelector<HTMLElement>(".term");
+  const button = chatSurface.querySelector<HTMLButtonElement>("[data-action='scroll-bottom']");
+
+  if (!term || !button) {
+    return;
+  }
+
+  const state: MountedScrollLock = { term, button, pinned: true, touchStartY: null };
+  mountedScrollLocks.set(chatSurface, state);
+  button.hidden = false;
+  updateMountedScrollButton(state);
+
+  disposables.listen(button, "click", (): void => {
+    state.pinned = true;
+    scrollMountedToBottom(state);
+    updateMountedScrollButton(state);
+  });
+
+  disposables.listen(term, "wheel", (event: Event): void => {
+    const wheelEvent = event as WheelEvent;
+
+    if (wheelEvent.deltaY < 0) {
+      releaseMountedScrollLock(state);
+    }
+  });
+
+  disposables.listen(term, "touchstart", (event: Event): void => {
+    const touchEvent = event as TouchEvent;
+    state.touchStartY = touchEvent.touches.item(0)?.clientY ?? null;
+  });
+
+  disposables.listen(term, "touchmove", (event: Event): void => {
+    const touchEvent = event as TouchEvent;
+    const currentY: number | undefined = touchEvent.touches.item(0)?.clientY;
+
+    if (typeof currentY === "number" && state.touchStartY !== null && currentY - state.touchStartY > 8) {
+      releaseMountedScrollLock(state);
+    }
+  });
+
+  disposables.listen(term, "touchend", (): void => {
+    state.touchStartY = null;
+  });
+
+  disposables.add({
+    remove: (): void => {
+      mountedScrollLocks.delete(chatSurface);
+    },
+  });
+}
+
+function syncMountedScrollAfterRender(chatSurface: HTMLElement): void {
+  const state = mountedScrollLocks.get(chatSurface);
+
+  if (!state) {
+    return;
+  }
+
+  if (state.pinned) {
+    scrollMountedToBottom(state);
+  }
+
+  updateMountedScrollButton(state);
+}
+
+function scrollMountedToBottom(state: MountedScrollLock): void {
+  state.term.scrollTop = state.term.scrollHeight;
+}
+
+function releaseMountedScrollLock(state: MountedScrollLock): void {
+  state.pinned = false;
+  updateMountedScrollButton(state);
+}
+
+function updateMountedScrollButton(state: MountedScrollLock): void {
+  state.button.dataset.pinned = state.pinned ? "true" : "false";
+  state.button.setAttribute("aria-pressed", state.pinned ? "true" : "false");
 }
 
 function renderMountedBackendMessage(message: ChatMessage, sessionId: string): HTMLElement {

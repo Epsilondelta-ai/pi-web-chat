@@ -48,7 +48,7 @@ export function createChatSurface(): HTMLElement {
   const surface = document.createElement("main");
   surface.className = "main pi-web-chat-surface";
   surface.dataset.main = "session";
-  surface.innerHTML = `<div class="term"><div class="term-inner" role="log" aria-live="polite" aria-relevant="additions text"></div></div><button type="button" class="scroll-bottom-btn" data-action="scroll-bottom" aria-label="scroll to bottom" title="scroll to bottom" hidden>↓</button>`;
+  surface.innerHTML = `<div class="term"><div class="term-inner" role="log" aria-live="polite" aria-relevant="additions text"></div></div><button type="button" class="scroll-bottom-btn" data-action="scroll-bottom" aria-label="stick to bottom" title="stick to bottom" aria-pressed="true" hidden>↓</button>`;
   return surface;
 }
 
@@ -274,6 +274,45 @@ export function pluginStyleText(): string {
       max-width: 960px;
       min-height: 100%;
       overflow-anchor: none;
+    }
+
+    .pi-web-chat-surface .scroll-bottom-btn {
+      position: absolute;
+      right: var(--space-4, 16px);
+      bottom: var(--space-4, 16px);
+      z-index: 4;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--border, #24313a);
+      border-radius: 999px;
+      background: var(--bg-2, #111111);
+      color: var(--fg-1, #d4d4d4);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 18px;
+      line-height: 1;
+      opacity: .85;
+      box-shadow: 0 8px 24px rgba(0,0,0,.28);
+    }
+
+    .pi-web-chat-surface .scroll-bottom-btn[hidden] {
+      display: none;
+    }
+
+    .pi-web-chat-surface .scroll-bottom-btn:hover,
+    .pi-web-chat-surface .scroll-bottom-btn:focus-visible {
+      border-color: var(--accent, #00ff88);
+      color: var(--accent, #00ff88);
+      opacity: 1;
+    }
+
+    .pi-web-chat-surface .scroll-bottom-btn[data-pinned="true"] {
+      background: var(--accent, #00ff88);
+      border-color: var(--accent, #00ff88);
+      color: #021;
     }
 
     .pi-web-chat-surface .transcript-item {
