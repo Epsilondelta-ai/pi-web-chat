@@ -1418,9 +1418,21 @@ function handleMountedDeletedSession(
   store.sessions = store.sessions.filter((session: ChatSession): boolean => session.id !== deletedSessionId);
 
   if (wasActive) {
-    store.activeSessionId = "";
     mountedState.runEventsAbort?.abort();
     mountedState.sessionEventsAbort?.abort();
+
+    const nextSelected = selectedSessionAfterDeletion(context, event, deletedSessionId);
+
+    if (nextSelected?.sessionId) {
+      persistSidebarSelection(context, nextSelected);
+      switchMountedStoreToSession(store, nextSelected.sessionId);
+      renderMountedSessionSwitch(chatSurface, activeSession(store).messages, store.activeSessionId);
+      const workspace = workspaceSelectionForSelectedSession(context, nextSelected);
+      void openMountedSessionEvents(context, chatSurface, store, mountedState, nextSelected.sessionId, workspace.path, workspace.id);
+      return true;
+    }
+
+    store.activeSessionId = "";
     clearSidebarActiveSession(context);
     saveStore(store);
     renderMountedDocumentation(chatSurface);
@@ -1432,6 +1444,27 @@ function handleMountedDeletedSession(
   }
 
   return true;
+}
+
+function selectedSessionAfterDeletion(
+  context: PluginContext,
+  event: SidebarActionEvent,
+  deletedSessionId: string,
+): SidebarSelectedSession | null {
+  const snapshotSessionId = event.snapshot?.activeSessionId || "";
+  const snapshotWorkspaceId = event.snapshot?.activeWorkspaceId || "";
+
+  if (snapshotSessionId && snapshotSessionId !== deletedSessionId) {
+    return { sessionId: snapshotSessionId, workspaceId: snapshotWorkspaceId || undefined };
+  }
+
+  const selected = readSidebarSelection(context);
+
+  if (selected?.sessionId && selected.sessionId !== deletedSessionId) {
+    return selected;
+  }
+
+  return null;
 }
 
 function selectedSessionFromSidebarEvent(context: PluginContext, event: SidebarActionEvent): SidebarSelectedSession | null {
@@ -1491,6 +1524,13 @@ function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMe
     return;
   }
 
+  const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
+  container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
+  syncMountedScrollAfterRender(chatSurface);
+}
+
+function renderMountedSessionSwitch(chatSurface: HTMLElement, messages: ChatMessage[], sessionId: string): void {
+  pruneMountedExpandedToolCards(messages, sessionId);
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
   container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
   syncMountedScrollAfterRender(chatSurface);

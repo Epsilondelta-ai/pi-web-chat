@@ -559,6 +559,65 @@ test("mounted activation shows guide when viewed sidebar session is deleted", as
   });
 });
 
+test("mounted activation renders next sidebar session when deleted event already selected it", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const events$ = new Subject();
+    const encoder = new TextEncoder();
+    const sessionStreams = [];
+    app.piWebSidebar = {
+      channels: { events$ },
+      getSnapshot: () => ({ activeSessionId: "delete-me", activeWorkspaceId: "workspace-1" }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      backendStream: async (method, input) => {
+        if (method === "sessionEventsSse") {
+          sessionStreams.push(input.data.sessionId);
+          const sessionId = input.data.sessionId;
+          const text = sessionId === "next-session" ? "next transcript" : "delete transcript";
+          const payload = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: sessionId,
+            messages: [{ id: sessionId, role: "assistant", text, createdAt: 1 }],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+    events$.next({
+      type: "session.deleted",
+      detail: { sessionId: "delete-me", workspaceId: "workspace-1" },
+      snapshot: { activeSessionId: "next-session", activeWorkspaceId: "workspace-1" },
+    });
+    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "next-session");
+    assert.equal(store.sessions.some((session) => session.id === "delete-me"), false);
+    assert.deepEqual(sessionStreams, ["delete-me", "next-session"]);
+    assert.match(window.document.querySelector(".term-inner").textContent, /next transcript/);
+    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    cleanup();
+  });
+});
+
 test("mounted activation keeps current view when another sidebar session is deleted", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
