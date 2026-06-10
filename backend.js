@@ -16,7 +16,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -150,8 +150,7 @@ function startPrompt(root, data) {
   child.unref();
 
   writeJsonAtomic(statePath, { ...readJson(statePath), pid: child.pid, status: "running", updatedAt: Date.now() });
-  return { accepted: true, runId, activeSessionId: responseSessionId(session.sessionId), isStreaming: true };
-}
+  return { accepted: true, runId, activeSessionId: responseSessionId(session.sessionId), isStreaming: true, warnings: session.warnings };}
 
 function streamEvents(data) {
   const state = readRunState(String(data.runId || ""));
@@ -409,20 +408,22 @@ function mergePromptAttachments(text, raw) {
 }
 
 function resolveSession(root, requestedSessionId) {
+  const sessionDir = configuredSessionDirResult(root);
+  const primaryDir = sessionDir.path;
+  if (!primaryDir) throw new Error("session directory escapes workspace");
   const dirs = sessionDirs(root);
-  mkdirSync(dirs[0], { recursive: true, mode: 0o700 });
+  mkdirSync(primaryDir, { recursive: true, mode: 0o700 });
   if (requestedSessionId) {
     for (const dirPath of dirs) {
       const existing = findSessionFile(dirPath, requestedSessionId);
-      if (existing) return { sessionId: requestedSessionId, sessionFile: existing };
+      if (existing) return { sessionId: requestedSessionId, sessionFile: existing, warnings: sessionDir.warnings };
     }
   }
   const sessionId = randomUUID();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const sessionFile = join(dirs[0], `${stamp}_${sessionId}.jsonl`);
+  const sessionFile = join(primaryDir, `${stamp}_${sessionId}.jsonl`);
   writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: root })}\n`, { mode: 0o600 });
-  return { sessionId, sessionFile };
-}
+  return { sessionId, sessionFile, warnings: sessionDir.warnings };}
 
 function findSessionFile(dirPath, sessionId) {
   try {
@@ -482,10 +483,86 @@ function promptWorkspaceRoot(root, data) {
 
 function sessionDirs(root) {
   const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
-  return [
-    join(root, ".pi", "sessions"),
+  return uniquePaths([
+    configuredSessionDir(root),
     join(homeDir(), ".pi", "agent", "sessions", safe),
-  ];
+  ]);
+}
+
+function configuredSessionDir(root) {
+  return configuredSessionDirResult(root).path;
+}
+
+function configuredSessionDirResult(root) {
+  const fallback = safeSessionDir(root, join(root, ".pi", "sessions"));
+  try {
+    const settings = JSON.parse(readFileSync(join(root, ".pi", "settings.json"), "utf8"));
+    const hasSessionDir = settings && Object.prototype.hasOwnProperty.call(settings, "sessionDir");
+    const sessionDir = hasSessionDir ? settings.sessionDir : "";
+    if (!hasSessionDir) return { path: fallback, warnings: [] };
+    if (typeof sessionDir !== "string" || !sessionDir.trim()) {
+      return { path: fallback, warnings: [invalidSessionDirWarning()] };
+    }
+    const resolved = isAbsolute(sessionDir) ? resolve(sessionDir) : resolve(root, sessionDir);
+    const safe = safeSessionDir(root, resolved);
+    return safe ? { path: safe, warnings: [] } : { path: fallback, warnings: [unsafeSessionDirWarning()] };
+  } catch {
+    return { path: fallback, warnings: [] };
+  }
+}
+
+function invalidSessionDirWarning() {
+  return ".pi/settings.json sessionDir must be a non-empty string; using the default session directory";
+}
+
+function unsafeSessionDirWarning() {
+  return ".pi/settings.json sessionDir escapes the workspace; using the default session directory";
+}
+
+function safeSessionDir(root, path) {
+  return isPathInside(root, path) && isRealPathInside(root, path) ? resolve(path) : "";
+}
+
+function isPathInside(root, path) {
+  const rel = relative(resolve(root), resolve(path));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${pathSeparator()}`) && !isAbsolute(rel));
+}
+
+function isRealPathInside(root, path) {
+  try {
+    const rootReal = realpathSync(root);
+    const existing = nearestExistingPath(path);
+    const existingReal = realpathSync(existing);
+    const targetReal = resolve(existingReal, relative(existing, path));
+    return isPathInside(rootReal, targetReal);
+  } catch {
+    return false;
+  }
+}
+
+function nearestExistingPath(path) {
+  let current = resolve(path);
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return current;
+}
+
+function pathSeparator() {
+  return process.platform === "win32" ? "\\" : "/";
+}
+
+function uniquePaths(paths) {
+  const seen = new Set();
+  return paths.filter((path) => {
+    if (!path) return false;
+    const key = resolve(path);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function runRoot() {

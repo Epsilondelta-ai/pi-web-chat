@@ -134,6 +134,296 @@ process.stdin.on('end', () => {
   assert.match(content, /attached context/);
 });
 
+test("submitPrompt honors settings sessionDir", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: "custom-sessions" }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+const session = process.argv[process.argv.indexOf('--session') + 1];
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  const message = {
+    type: 'message',
+    id: 'a1',
+    timestamp: '2026-01-02T03:04:06.000Z',
+    message: { role: 'assistant', content: 'answer' },
+  };
+  fs.appendFileSync(session, JSON.stringify(message) + '\\n');
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "submitPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.warnings, []);
+  const files = await readdir(join(root, "custom-sessions"));
+  assert.equal(files.length, 1);
+});
+
+test("startPrompt honors settings sessionDir", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  const sessionDir = join(root, "configured", "sessions");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "startPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.warnings, []);
+  const files = await readdir(sessionDir);
+  assert.equal(files.some((name) => name.includes(result.activeSessionId)), true);
+});
+
+test("startPrompt warns and falls back when settings sessionDir is outside workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-web-chat-outside-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: outside }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "startPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.warnings, [".pi/settings.json sessionDir escapes the workspace; using the default session directory"]);
+  const fallbackFiles = await readdir(join(root, ".pi", "sessions"));
+  const outsideFiles = await readdir(outside);
+  assert.equal(fallbackFiles.some((name) => name.includes(result.activeSessionId)), true);
+  assert.equal(outsideFiles.length, 0);
+});
+
+test("startPrompt warns and falls back when settings sessionDir symlinks outside workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-web-chat-outside-"));
+  const fakePi = join(bin, "pi");
+  await symlink(outside, join(root, "link-sessions"));
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: "link-sessions" }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "startPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.warnings, [".pi/settings.json sessionDir escapes the workspace; using the default session directory"]);
+  const fallbackFiles = await readdir(join(root, ".pi", "sessions"));
+  const outsideFiles = await readdir(outside);
+  assert.equal(fallbackFiles.some((name) => name.includes(result.activeSessionId)), true);
+  assert.equal(outsideFiles.length, 0);
+});
+
+test("startPrompt warns and falls back when settings sessionDir is invalid", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: "" }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "startPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.warnings, [".pi/settings.json sessionDir must be a non-empty string; using the default session directory"]);
+  const fallbackFiles = await readdir(join(root, ".pi", "sessions"));
+  assert.equal(fallbackFiles.some((name) => name.includes(result.activeSessionId)), true);
+});
+
+test("compiled submitPrompt warns and falls back when settings sessionDir is invalid", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: 1 }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+const session = process.argv[process.argv.indexOf('--session') + 1];
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  fs.appendFileSync(session, JSON.stringify({ type: 'message', id: 'a1', message: { role: 'assistant', content: 'ok' } }) + '\\n');
+});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await runBackendBinary(
+    "submitPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+
+  assert.equal(parsed.accepted, true);
+  assert.deepEqual(parsed.warnings, [".pi/settings.json sessionDir must be a non-empty string; using the default session directory"]);
+  const fallbackFiles = await readdir(join(root, ".pi", "sessions"));
+  assert.equal(fallbackFiles.some((name) => name.includes(parsed.activeSessionId)), true);
+});
+
+test("js and compiled startPrompt agree on settings sessionDir warnings", async () => {
+  const invalidWarning = ".pi/settings.json sessionDir must be a non-empty string; using the default session directory";
+  const unsafeWarning = ".pi/settings.json sessionDir escapes the workspace; using the default session directory";
+  const cases = [
+    { name: "blank", warning: invalidWarning, settings: () => ({ sessionDir: "" }) },
+    { name: "outside", warning: unsafeWarning, settings: (outside) => ({ sessionDir: outside }) },
+    { name: "symlink", warning: unsafeWarning, settings: () => ({ sessionDir: "link-sessions" }), symlink: true },
+  ];
+
+  for (const item of cases) {
+    const roots = [
+      await mkdtemp(join(tmpdir(), `pi-web-chat-js-${item.name}-`)),
+      await mkdtemp(join(tmpdir(), `pi-web-chat-go-${item.name}-`)),
+    ];
+    const home = await mkdtemp(join(tmpdir(), `pi-web-chat-home-${item.name}-`));
+    const bin = await mkdtemp(join(tmpdir(), `pi-web-chat-bin-${item.name}-`));
+    const outside = await mkdtemp(join(tmpdir(), `pi-web-chat-outside-${item.name}-`));
+    const fakePi = join(bin, "pi");
+    await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+    await chmod(fakePi, 0o755);
+
+    const outputs = [];
+    for (const root of roots) {
+      await mkdir(join(root, ".pi"), { recursive: true });
+
+      if (item.symlink) {
+        await symlink(outside, join(root, "link-sessions"));
+      }
+
+      await writeFile(join(root, ".pi", "settings.json"), JSON.stringify(item.settings(outside)));
+    }
+
+    outputs.push(await callBackend(
+      "startPrompt",
+      roots[0],
+      { text: "hello pi" },
+      { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    ));
+
+    const compiled = await runBackendBinary(
+      "startPrompt",
+      roots[1],
+      { text: "hello pi" },
+      { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    );
+    assert.equal(compiled.code, 0, compiled.stderr);
+    outputs.push(JSON.parse(compiled.stdout));
+
+    assert.deepEqual(outputs.map((output) => output.warnings), [[item.warning], [item.warning]]);
+  }
+});
+
+test("startPrompt fails closed when fallback session dir symlinks outside workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-web-chat-outside-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await symlink(outside, join(root, ".pi", "sessions"));
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: outside }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await runBackend(
+    backend,
+    "startPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /session directory escapes workspace/);
+  assert.equal((await readdir(outside)).length, 0);
+});
+
+test("compiled submitPrompt fails closed when fallback session dir symlinks outside workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-web-chat-outside-"));
+  const fakePi = join(bin, "pi");
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await symlink(outside, join(root, ".pi", "sessions"));
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: outside }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await runBackendBinary(
+    "submitPrompt",
+    root,
+    { text: "hello pi" },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /session directory escapes workspace/);
+  assert.equal((await readdir(outside)).length, 0);
+});
+
 test("streaming methods capture pi rpc text thinking and tool events", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
@@ -220,6 +510,41 @@ process.stdin.on('end', () => {
   assert.equal(existing.activeSessionId, workspaceSessionId);
   assert.ok(created.activeSessionId);
   assert.equal((await readdir(workspaceSessionDir)).some((name) => name.includes(created.activeSessionId)), true);
+});
+
+test("backend wrapper creates configured sessionDir before using existing session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const fakePi = join(bin, "pi");
+  const configuredDir = join(root, "configured", "sessions");
+  const existingSessionId = "existing-configured-session";
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const agentSessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await mkdir(agentSessionDir, { recursive: true });
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: configuredDir }));
+  await writeFile(join(agentSessionDir, `existing_${existingSessionId}.jsonl`), `${JSON.stringify({
+    type: "session",
+    id: existingSessionId,
+    cwd: root,
+  })}\n`);
+  await writeFile(fakePi, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {});
+`);
+  await chmod(fakePi, 0o755);
+
+  const result = await callBackend(
+    "startPrompt",
+    root,
+    { text: "hello", sessionId: existingSessionId },
+    { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+  );
+
+  assert.equal(result.activeSessionId, existingSessionId);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(await readdir(configuredDir), []);
 });
 
 test("backend wrapper completes stream when pi is unavailable", async () => {
