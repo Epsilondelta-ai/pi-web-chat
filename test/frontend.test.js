@@ -670,9 +670,9 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     const cards = [...window.document.querySelectorAll(".tool-card")];
     assert.equal(cards.length, 4);
     assert.equal(cards.slice(0, 3).every((card) => card.dataset.collapsed === "true"), true);
-    assert.equal(cards.slice(0, 3).every((card) => card.querySelector(".tc-body").hidden === true), true);
+    assert.equal(cards.slice(0, 3).every((card) => card.querySelector(".tc-body") === null), true);
     assert.equal(cards[3].dataset.collapsed, "false");
-    assert.equal(cards[3].querySelector(".tc-body").hidden, false);
+    assert.equal(cards[3].querySelector(".tc-body").textContent, "running");
     assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Show read output");
     assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
     assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
@@ -689,11 +689,11 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards[0].dataset.collapsed, "false");
     assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "true");
     assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Hide read output");
-    assert.equal(cards[0].querySelector(".tc-body").hidden, false);
+    assert.equal(cards[0].querySelector(".tc-body").textContent, "README.md");
     cards[0].querySelector(".tc-head").click();
     assert.equal(cards[0].dataset.collapsed, "true");
     assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "false");
-    assert.equal(cards[0].querySelector(".tc-body").hidden, true);
+    assert.equal(cards[0].querySelector(".tc-body"), null);
     cleanup();
   });
 });

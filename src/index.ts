@@ -1183,19 +1183,32 @@ function renderMountedToolCard(tool: ChatToolCall): HTMLElement {
   head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${tool.name || "tool"} output`);
   head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool));
 
-  const body = document.createElement("pre");
-  body.className = "tc-body";
-  body.hidden = collapsed;
-  body.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
+  if (!collapsed) {
+    card.append(renderMountedToolBody(tool));
+  }
 
-  head.addEventListener("click", () => toggleMountedToolCard(card, head, body));
-  card.append(head, body);
+  head.addEventListener("click", () => toggleMountedToolCard(card, head, tool));
+  card.prepend(head);
   return card;
 }
 
-function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, body: HTMLElement): void {
-  const collapsed = body.hidden === false;
-  body.hidden = collapsed;
+function renderMountedToolBody(tool: ChatToolCall): HTMLElement {
+  const body = document.createElement("pre");
+  body.className = "tc-body";
+  body.textContent = tool.text || JSON.stringify(tool.args || {}, null, 2);
+  return body;
+}
+
+function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, tool: ChatToolCall): void {
+  const body = card.querySelector<HTMLElement>(".tc-body");
+  const collapsed = body !== null;
+
+  if (body) {
+    body.remove();
+  } else {
+    card.append(renderMountedToolBody(tool));
+  }
+
   card.dataset.collapsed = collapsed ? "true" : "false";
   head.setAttribute("aria-expanded", collapsed ? "false" : "true");
   head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${card.dataset.tool || "tool"} output`);
