@@ -637,25 +637,27 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     const app = window.document.querySelector("pi-app");
     app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "tool-session", activeWorkspaceId: "workspace-1" }) };
 
+    let updated = false;
+    const toolMessages = (runningText) => [{
+      id: "a1",
+      role: "assistant",
+      text: "used tools",
+      createdAt: 1,
+      thinking: "**Evaluating git status**\n\nI should inspect the repository before answering.",
+      toolCalls: [
+        { id: "t1", name: "read", text: "README.md", status: "ok" },
+        { id: "t2", name: "bash", args: { command: "git status" }, text: "clean", status: "ok" },
+        { id: "t3", name: "unknown_tool", text: "dot", status: "ok" },
+        { id: "t4", name: "bash", args: { command: "bun test" }, text: runningText, status: "running" },
+      ],
+    }];
     const cleanup = activate({
       app,
-      backend: async (method) => {
+      backend: async (method, input) => {
         if (method === "chatState") {
           return {
-            activeSessionId: "tool-session",
-            messages: [{
-              id: "a1",
-              role: "assistant",
-              text: "used tools",
-              createdAt: 1,
-              thinking: "**Evaluating git status**\n\nI should inspect the repository before answering.",
-              toolCalls: [
-                { id: "t1", name: "read", text: "README.md", status: "ok" },
-                { id: "t2", name: "bash", args: { command: "git status" }, text: "clean", status: "ok" },
-                { id: "t3", name: "unknown_tool", text: "dot", status: "ok" },
-                { id: "t4", name: "bash", args: { command: "bun test" }, text: "running", status: "running" },
-              ],
-            }],
+            activeSessionId: input.data.sessionId || "tool-session",
+            messages: toolMessages(updated ? "running update" : "running"),
           };
         }
 
@@ -669,10 +671,10 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
 
     const cards = [...window.document.querySelectorAll(".tool-card")];
     assert.equal(cards.length, 4);
-    assert.equal(cards.slice(0, 3).every((card) => card.dataset.collapsed === "true"), true);
-    assert.equal(cards.slice(0, 3).every((card) => card.querySelector(".tc-body") === null), true);
-    assert.equal(cards[3].dataset.collapsed, "false");
-    assert.equal(cards[3].querySelector(".tc-body").textContent, "running");
+    assert.equal(cards.every((card) => card.dataset.collapsed === "true"), true);
+    assert.equal(cards.every((card) => card.querySelector(".tc-body") === null), true);
+    assert.equal(cards[3].querySelector(".tc-head").getAttribute("aria-expanded"), "false");
+    assert.equal(cards[3].querySelector(".tc-head").getAttribute("aria-label"), "Show bash output");
     assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Show read output");
     assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
     assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
@@ -682,19 +684,62 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards[3].querySelector(".tc-meta .spinner").textContent, "⠇");
     assert.equal(cards[3].querySelector(".tc-meta .running").textContent, "running");
     assert.equal(cards[3].querySelector(".tc-meta .ok"), null);
+    assert.equal(cards[3].querySelector(".tc-toggle-label").textContent, "show");
+    cards[3].querySelector(".tc-head").click();
+    assert.equal(cards[3].dataset.collapsed, "false");
+    assert.equal(cards[3].querySelector(".tc-body").textContent, "running");
+    assert.equal(cards[3].querySelector(".tc-toggle-label").textContent, "hide");
+
+    updated = true;
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("tool-session");
+    await tick();
+    await tick();
+
+    const updatedRunningCard = window.document.querySelectorAll(".tool-card")[3];
+    assert.equal(updatedRunningCard.dataset.collapsed, "false");
+    assert.equal(updatedRunningCard.querySelector(".tc-head").getAttribute("aria-expanded"), "true");
+    assert.equal(updatedRunningCard.querySelector(".tc-body").textContent, "running update");
+    assert.equal(updatedRunningCard.querySelector(".tc-toggle-label").textContent, "hide");
+
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next("other-tool-session");
+    await tick();
+    await tick();
+
+    const otherCards = [...window.document.querySelectorAll(".tool-card")];
+    const otherRunningCard = otherCards[3];
+    assert.equal(otherRunningCard.dataset.collapsed, "true");
+    assert.equal(otherRunningCard.querySelector(".tc-head").getAttribute("aria-expanded"), "false");
+    assert.equal(otherRunningCard.querySelector(".tc-body"), null);
+    assert.equal(otherRunningCard.querySelector(".tc-toggle-label").textContent, "show");
     assert.equal(window.document.querySelector(".thinking-block .label").textContent, "THINKING");
     assert.match(window.document.querySelector(".thinking-block .body").textContent, /Evaluating git status/);
 
-    cards[0].querySelector(".tc-head").click();
-    assert.equal(cards[0].dataset.collapsed, "false");
-    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "true");
-    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Hide read output");
-    assert.equal(cards[0].querySelector(".tc-body").textContent, "README.md");
-    cards[0].querySelector(".tc-head").click();
-    assert.equal(cards[0].dataset.collapsed, "true");
-    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "false");
-    assert.equal(cards[0].querySelector(".tc-body"), null);
+    otherCards[0].querySelector(".tc-head").click();
+    assert.equal(otherCards[0].dataset.collapsed, "false");
+    assert.equal(otherCards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "true");
+    assert.equal(otherCards[0].querySelector(".tc-head").getAttribute("aria-label"), "Hide read output");
+    assert.equal(otherCards[0].querySelector(".tc-body").textContent, "README.md");
     cleanup();
+
+    const remountCleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState") {
+          return { activeSessionId: input.data.sessionId || "other-tool-session", messages: toolMessages("running") };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    await tick();
+    await tick();
+
+    const remountedFirstCard = window.document.querySelector(".tool-card");
+    assert.equal(remountedFirstCard.dataset.collapsed, "true");
+    assert.equal(remountedFirstCard.querySelector(".tc-head").getAttribute("aria-expanded"), "false");
+    assert.equal(remountedFirstCard.querySelector(".tc-body"), null);
+    remountCleanup();
   });
 });
 
