@@ -90,7 +90,7 @@ Supported prebuilt targets:
 
 - Workspace-relative path resolution rejects traversal and NUL bytes.
 - Binary and oversized files are rejected.
-- Shell execution runs in the workspace root with timeout and output cap.
+- Shell execution runs in the workspace root with timeout and a 64 KiB backend output cap before frontend rendering.
 - Frontend cleanup removes mounted plugin DOM, clears mounted CSS/badge state, and unsubscribes RxJS subscriptions.
 - `npm run security:deps` runs `bun audit`.
 - `npm run security:static` runs the local static scan.

@@ -1070,3 +1070,10 @@ test("runShell captures output and exit code", async () => {
   const failed = await callBackend("runShell", root, { command: "exit 7" });
   assert.equal(failed.exitCode, 7);
 });
+
+test("runShell caps backend output before returning JSON", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
+  const result = await callBackend("runShell", root, { command: "yes x | head -c 70000" });
+  assert.equal(result.truncated, true);
+  assert.ok(Buffer.byteLength(result.output, "utf8") <= 64 * 1024);
+});
