@@ -8,6 +8,7 @@ import activate, {
   commandName,
   createAgUiLikeRunInput,
   createChannels,
+  createChatDom,
   extractRefs,
   formatShellOutput,
   getActiveWorkspaceId,
@@ -16,6 +17,7 @@ import activate, {
   pluginStyleText,
   promptFromAgUiLikeRunInput,
   renderMessages,
+  setComposerMode,
   shellAttachmentNoteVisible,
   submittedAttachmentsForText,
 } from "../index.js";
@@ -129,6 +131,30 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /focus-visible/);
   assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-attachments[\s\S]*display: none/);
   assert.match(styles, /data-composer-mode="shell"\]\[data-shell-attachments\][\s\S]*pi-web-chat-shell-note[\s\S]*display: block/);
+  assert.match(styles, /prompt-bar\.shell-mode \.attach-btn[\s\S]*var\(--warning, #facc15\)/);
+  assert.match(styles, /prompt-bar\.shell-mode \.send-btn[\s\S]*var\(--warning, #facc15\)/);
+  assert.match(styles, /data-composer-mode="shell"\] \.pi-web-chat-send[\s\S]*var\(--warning, #facc15\)/);
+});
+
+test("legacy composer shell mode disables attach and restores normal mode", async () => {
+  await withWindow(async ({ window }) => {
+    const dom = createChatDom();
+    window.document.body.append(dom.root);
+
+    setComposerMode(dom, "shell");
+
+    assert.equal(dom.root.dataset.composerMode, "shell");
+    assert.equal(dom.attachButton.disabled, true);
+    assert.equal(dom.attachButton.title, "shell command mode");
+    assert.notEqual(dom.attachButton.querySelector("[data-material-icon='terminal']"), null);
+
+    setComposerMode(dom, "normal");
+
+    assert.equal(dom.root.dataset.composerMode, "normal");
+    assert.equal(dom.attachButton.disabled, false);
+    assert.equal(dom.attachButton.title, "attach files");
+    assert.notEqual(dom.attachButton.querySelector("[data-material-icon='attach_file']"), null);
+  });
 });
 
 test("legacy chat renderer remains exported", async () => {
@@ -1676,6 +1702,8 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
     textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
     assert.equal(promptBar.classList.contains("shell-mode"), true);
     assert.equal(attachButton.disabled, true);
+    assert.equal(attachButton.title, "shell command mode");
+    assert.notEqual(attachButton.querySelector("[data-material-icon='terminal']"), null);
     assert.equal(textarea.value, "");
     assert.equal(window.document.querySelector(".attach-chips").hidden, true);
     assert.equal(window.document.querySelector(".shell-attachment-note").hidden, false);
@@ -1696,6 +1724,8 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
     assert.ok(window.document.querySelector(".term-inner").textContent.length < 65000);
     assert.equal(promptBar.classList.contains("shell-mode"), false);
     assert.equal(attachButton.disabled, false);
+    assert.equal(attachButton.title, "attach files");
+    assert.notEqual(attachButton.querySelector("[data-material-icon='attach_file']"), null);
     assert.equal(window.document.querySelector(".shell-attachment-note").hidden, true);
     assert.match(window.document.querySelector(".attach-chips").textContent, /note\.txt/);
 
