@@ -12,6 +12,7 @@ import {
   renderFileRefs,
   renderMessages,
   renderSlashCommands,
+  setAttachButtonMode,
   setComposerMode,
   type ChatDom,
 } from "./dom";
@@ -183,7 +184,16 @@ class Disposables {
   }
 }
 
-export { commandName, createChatDom, createChatSurface, createComposerSurface, pluginClass, pluginStyleText, renderMessages };
+export {
+  commandName,
+  createChatDom,
+  createChatSurface,
+  createComposerSurface,
+  pluginClass,
+  pluginStyleText,
+  renderMessages,
+  setComposerMode,
+};
 export { chatEventsToAgUiLikeEvents, createAgUiLikeRunInput, promptFromAgUiLikeRunInput } from "./ag-ui";
 
 export default function activate(context: PluginContext = {}): Cleanup {
@@ -443,8 +453,7 @@ function syncMountedShellUi(
   }
 
   if (attachButton) {
-    attachButton.disabled = triggers.shellMode;
-    attachButton.setAttribute("aria-disabled", triggers.shellMode ? "true" : "false");
+    setAttachButtonMode(attachButton, triggers.shellMode ? "shell" : "normal");
   }
 }
 
@@ -853,7 +862,11 @@ function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
   });
 
   disposables.listen(dom.sendButton, "click", () => submitCurrentInput(state));
-  disposables.listen(dom.attachButton, "click", () => dom.fileInput.click());
+  disposables.listen(dom.attachButton, "click", () => {
+    if (!dom.attachButton.disabled) {
+      dom.fileInput.click();
+    }
+  });
   disposables.listen(dom.fileInput, "change", () => {
     void loadLocalAttachments(state, dom);
   });

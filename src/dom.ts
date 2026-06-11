@@ -16,10 +16,11 @@ const MATERIAL_PATHS: Record<"attachFile" | "stop" | "send" | "terminal" | "file
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 2.5L17.5 8H14V4.5ZM8 13h8v1.5H8V13Zm0 3h8v1.5H8V16Z",
 };
 
-const MATERIAL_ICONS: Record<"attachFile" | "stop" | "send", string> = {
+const MATERIAL_ICONS: Record<"attachFile" | "stop" | "send" | "terminal", string> = {
   attachFile: materialIcon("attach_file", MATERIAL_PATHS.attachFile),
   stop: materialIcon("stop", MATERIAL_PATHS.stop),
   send: materialIcon("send", MATERIAL_PATHS.send),
+  terminal: materialIcon("terminal", MATERIAL_PATHS.terminal),
 };
 
 function materialIcon(name: string, path: string): string {
@@ -234,21 +235,30 @@ export function renderFileRefs(list: HTMLElement, files: FileSearchResult[], onP
 
 export function setComposerMode(dom: Pick<ChatDom, "root" | "attachButton">, mode: "normal" | "shell" | "file-ref"): void {
   dom.root.dataset.composerMode = mode;
+  setAttachButtonMode(dom.attachButton, mode);
+}
+
+export function setAttachButtonMode(attachButton: HTMLButtonElement, mode: "normal" | "shell" | "file-ref"): void {
+  attachButton.disabled = mode === "shell";
+  attachButton.setAttribute("aria-disabled", mode === "shell" ? "true" : "false");
+
   if (mode === "shell") {
-    dom.attachButton.innerHTML = materialIcon("terminal", MATERIAL_PATHS.terminal);
-    dom.attachButton.title = "shell command mode";
-    dom.attachButton.setAttribute("aria-label", "shell command mode");
+    attachButton.innerHTML = MATERIAL_ICONS.terminal;
+    attachButton.title = "shell command mode";
+    attachButton.setAttribute("aria-label", "shell command mode");
     return;
   }
+
   if (mode === "file-ref") {
-    dom.attachButton.innerHTML = materialIcon("file", MATERIAL_PATHS.file);
-    dom.attachButton.title = "file reference mode";
-    dom.attachButton.setAttribute("aria-label", "file reference mode");
+    attachButton.innerHTML = materialIcon("file", MATERIAL_PATHS.file);
+    attachButton.title = "file reference mode";
+    attachButton.setAttribute("aria-label", "file reference mode");
     return;
   }
-  dom.attachButton.innerHTML = materialIcon("attach_file", MATERIAL_PATHS.attachFile);
-  dom.attachButton.title = "attach files";
-  dom.attachButton.setAttribute("aria-label", "attach files");
+
+  attachButton.innerHTML = MATERIAL_ICONS.attachFile;
+  attachButton.title = "attach files";
+  attachButton.setAttribute("aria-label", "attach files");
 }
 
 export function renderAttachmentChips(container: HTMLElement, names: string[]): void {
@@ -481,8 +491,11 @@ export function pluginStyleText(): string {
     }
 
     .pi-web-chat-composer .prompt-bar.shell-mode .attach-btn {
-      opacity: .45;
+      color: var(--warning, #facc15);
+      border-color: var(--warning, #facc15);
       cursor: not-allowed;
+      opacity: 1;
+      pointer-events: none;
     }
 
     .pi-web-chat-composer .attach-btn {
@@ -525,6 +538,11 @@ export function pluginStyleText(): string {
     .pi-web-chat-composer .send-btn {
       background: var(--accent, #00ff88);
       color: #021;
+    }
+
+    .pi-web-chat-composer .prompt-bar.shell-mode .send-btn {
+      background: var(--warning, #facc15);
+      color: #2a1500;
     }
 
     .pi-web-chat-composer .send-btn:disabled,
@@ -902,6 +920,13 @@ export function pluginStyleText(): string {
     .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-icon-btn {
       color: var(--warning, #facc15);
       border-color: var(--warning, #facc15);
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-send {
+      background: var(--warning, #facc15);
+      color: #2a1500;
     }
 
     .${ROOT_CLASS} .pi-web-chat-shell-note {
