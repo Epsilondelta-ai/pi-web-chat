@@ -11,10 +11,12 @@ import activate, {
   extractRefs,
   formatShellOutput,
   getActiveWorkspaceId,
+  hasQueuedAttachmentNames,
   mergeCommands,
   pluginStyleText,
   promptFromAgUiLikeRunInput,
   renderMessages,
+  shellAttachmentNoteVisible,
   submittedAttachmentsForText,
 } from "../index.js";
 
@@ -110,6 +112,11 @@ test("shell command utilities drop submitted attachments and cap output", () => 
   assert.notEqual(normal, attachments);
   assert.match(formatted, /\[exit 0 · 5ms · truncated\]/);
   assert.ok(formatted.length < 65050);
+  assert.equal(hasQueuedAttachmentNames(["note.txt"]), true);
+  assert.equal(hasQueuedAttachmentNames([]), false);
+  assert.equal(shellAttachmentNoteVisible("! pwd", true), true);
+  assert.equal(shellAttachmentNoteVisible("! pwd", false), false);
+  assert.equal(shellAttachmentNoteVisible("ask pi", true), false);
 });
 
 test("plugin styles target mounted chat surfaces", () => {
