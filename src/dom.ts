@@ -915,7 +915,7 @@ export function pluginStyleText(): string {
       display: none;
     }
 
-    .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-shell-note {
+    .${ROOT_CLASS}[data-composer-mode="shell"][data-shell-attachments] .pi-web-chat-shell-note {
       display: block;
     }
 

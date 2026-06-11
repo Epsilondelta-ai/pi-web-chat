@@ -121,7 +121,7 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /resize: none/);
   assert.match(styles, /focus-visible/);
   assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-attachments[\s\S]*display: none/);
-  assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-shell-note[\s\S]*display: block/);
+  assert.match(styles, /data-composer-mode="shell"\]\[data-shell-attachments\][\s\S]*pi-web-chat-shell-note[\s\S]*display: block/);
 });
 
 test("legacy chat renderer remains exported", async () => {

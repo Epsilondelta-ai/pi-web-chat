@@ -816,7 +816,7 @@ function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
     state.channels.input$.next(dom.textarea.value);
     dom.sendButton.setAttribute("aria-disabled", dom.textarea.value.trim() ? "false" : "true");
     saveDraft(dom.textarea.value);
-    updateComposerMode(dom, dom.textarea.value);
+    updateComposerMode(dom, dom.textarea.value, state.selectedAttachmentNames.length > 0);
     void updateAssistPopovers(state, dom, dom.textarea.value);
   });
 
@@ -840,7 +840,7 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
     if (dom.textarea.value !== value) dom.textarea.value = value;
     dom.sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
     saveDraft(value);
-    updateComposerMode(dom, value);
+    updateComposerMode(dom, value, state.selectedAttachmentNames.length > 0);
     void updateAssistPopovers(state, dom, value);
   }));
 
@@ -2396,6 +2396,7 @@ async function loadLocalAttachments(state: State, dom: ChatDom): Promise<void> {
   state.selectedLocalAttachments = attachments;
   state.selectedAttachmentNames = attachments.map((file) => file.name || "attachment");
   renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
+  updateComposerMode(dom, dom.textarea.value, state.selectedAttachmentNames.length > 0);
 }
 
 async function resolveAttachments(state: State, text: string): Promise<FileAttachment[]> {
@@ -2494,7 +2495,9 @@ function currentFileRefQuery(value: string): string | null {
   return match ? match[1] : null;
 }
 
-function updateComposerMode(dom: ChatDom, value: string): void {
+function updateComposerMode(dom: ChatDom, value: string, hasQueuedAttachments = false): void {
+  dom.root.toggleAttribute("data-shell-attachments", value.trim().startsWith("!") && hasQueuedAttachments);
+
   if (value.trim().startsWith("!")) setComposerMode(dom, "shell");
   else if (currentFileRefQuery(value) !== null) setComposerMode(dom, "file-ref");
   else setComposerMode(dom, "normal");
