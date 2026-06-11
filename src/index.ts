@@ -86,6 +86,13 @@ type MountedState = {
   sessionEventsAbort?: AbortController;
 };
 
+type MountedComposerTriggers = {
+  selectedAttachments: FileAttachment[];
+  shellMode: boolean;
+  commands: PluginCommand[];
+  fileSearchTimer?: ReturnType<typeof setTimeout>;
+};
+
 type MountedScrollLock = {
   term: HTMLElement;
   button: HTMLButtonElement;
@@ -263,71 +270,41 @@ function bindMountedComposer(
   const promptBar = composerSurface.querySelector<HTMLElement>(".prompt-bar");
   const slashPopover = composerSurface.querySelector<HTMLElement>(".slash-pop");
   const fileRefPopover = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-pop");
-  let selectedAttachments: FileAttachment[] = [];
-  let shellMode = false;
-  let commands: PluginCommand[] = [];
-  let fileSearchTimer: ReturnType<typeof setTimeout> | undefined;
+  const triggers: MountedComposerTriggers = { selectedAttachments: [], shellMode: false, commands: [] };
 
   const syncAttachments = (): void => {
-    if (!attachmentChips) {
-      return;
-    }
-
-    if (shellMode) {
-      renderAttachmentChips(attachmentChips, []);
-      return;
-    }
-
-    renderAttachmentChips(attachmentChips, [
-      ...selectedAttachments.map((attachment): string => attachment.name || "attachment"),
-      ...extractRefs(textarea.value),
-    ]);
+    syncMountedAttachmentChips(attachmentChips, textarea.value, triggers);
   };
   const syncMode = (): void => {
-    promptBar?.classList.toggle("shell-mode", shellMode);
-    textarea.setAttribute("placeholder", shellMode ? "run shell command in workspace…" : "ask pi to do something…");
-
-    if (shellAttachmentNote) {
-      shellAttachmentNote.hidden = !(shellMode && selectedAttachments.length > 0);
-    }
-
-    if (attachButton) {
-      attachButton.disabled = shellMode;
-      attachButton.setAttribute("aria-disabled", shellMode ? "true" : "false");
-    }
+    syncMountedShellUi(promptBar, textarea, attachButton, shellAttachmentNote, triggers);
   };
   const sync = (): void => {
     const value = textarea.value;
     sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
     syncAttachments();
+    clearMountedFileSearchTimer(triggers);
 
-    if (fileSearchTimer) {
-      clearTimeout(fileSearchTimer);
-    }
-
-    if (shellMode) {
-      slashPopover?.setAttribute("hidden", "");
-      fileRefPopover?.setAttribute("hidden", "");
+    if (triggers.shellMode) {
+      hideMountedAssistPopovers(slashPopover, fileRefPopover);
       return;
     }
 
-    void updateMountedSlashPopover(context, composerSurface, textarea, value, commands, (nextCommands: PluginCommand[]): void => {
-      commands = nextCommands;
+    void updateMountedSlashPopover(context, composerSurface, textarea, value, triggers.commands, (nextCommands: PluginCommand[]): void => {
+      triggers.commands = nextCommands;
     });
 
-    fileSearchTimer = setTimeout((): void => {
+    triggers.fileSearchTimer = setTimeout((): void => {
       void updateMountedFileRefPopover(context, composerSurface, textarea, textarea.value);
     }, 120);
   };
   const enterShellMode = (): void => {
-    shellMode = true;
-    slashPopover?.setAttribute("hidden", "");
-    fileRefPopover?.setAttribute("hidden", "");
+    triggers.shellMode = true;
+    hideMountedAssistPopovers(slashPopover, fileRefPopover);
     syncMode();
     syncAttachments();
   };
   const resetShellMode = (): void => {
-    shellMode = false;
+    triggers.shellMode = false;
     syncMode();
     syncAttachments();
   };
@@ -344,15 +321,15 @@ function bindMountedComposer(
     sendButton.disabled = true;
 
     try {
-      if (shellMode) {
+      if (triggers.shellMode) {
         publishChatInputSubmitted(text, []);
         await submitMountedShellCommand(context, chatSurface, store, text);
         resetShellMode();
       } else {
-        const attachments = [...selectedAttachments, ...(await resolveMountedAttachments(context, text))];
+        const attachments = [...triggers.selectedAttachments, ...(await resolveMountedAttachments(context, text))];
         publishChatInputSubmitted(text, attachments);
         await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
-        selectedAttachments = [];
+        triggers.selectedAttachments = [];
         syncAttachments();
       }
 
@@ -373,7 +350,7 @@ function bindMountedComposer(
   };
 
   disposables.listen(textarea, "input", () => {
-    if (!shellMode && textarea.value.startsWith("! ")) {
+    if (!triggers.shellMode && textarea.value.startsWith("! ")) {
       textarea.value = textarea.value.slice(2);
       enterShellMode();
     }
@@ -383,7 +360,7 @@ function bindMountedComposer(
   disposables.listen(textarea, "keydown", (event) => {
     const keyEvent = event as KeyboardEvent;
 
-    if (keyEvent.key === " " && !shellMode && textarea.value === "!" && textarea.selectionStart === 1 && textarea.selectionEnd === 1) {
+    if (keyEvent.key === " " && !triggers.shellMode && textarea.value === "!" && textarea.selectionStart === 1 && textarea.selectionEnd === 1) {
       keyEvent.preventDefault();
       textarea.value = "";
       enterShellMode();
@@ -391,7 +368,7 @@ function bindMountedComposer(
       return;
     }
 
-    if (keyEvent.key === "Backspace" && shellMode && textarea.value === "") {
+    if (keyEvent.key === "Backspace" && triggers.shellMode && textarea.value === "") {
       keyEvent.preventDefault();
       resetShellMode();
       sync();
@@ -399,8 +376,7 @@ function bindMountedComposer(
     }
 
     if (keyEvent.key === "Escape") {
-      slashPopover?.setAttribute("hidden", "");
-      fileRefPopover?.setAttribute("hidden", "");
+      hideMountedAssistPopovers(slashPopover, fileRefPopover);
       return;
     }
 
@@ -414,26 +390,74 @@ function bindMountedComposer(
 
   if (attachButton && fileInput) {
     disposables.listen(attachButton, "click", () => {
-      if (!shellMode) {
+      if (!triggers.shellMode) {
         fileInput.click();
       }
     });
     disposables.listen(fileInput, "change", () => {
       void loadMountedLocalAttachments(fileInput, (attachments: FileAttachment[]): void => {
-        selectedAttachments = attachments;
+        triggers.selectedAttachments = attachments;
         syncAttachments();
       });
     });
   }
 
   disposables.add({
-    remove: (): void => {
-      if (fileSearchTimer) {
-        clearTimeout(fileSearchTimer);
-      }
-    },
+    remove: (): void => clearMountedFileSearchTimer(triggers),
   });
   syncMode();
+}
+
+function syncMountedAttachmentChips(
+  attachmentChips: HTMLElement | null,
+  value: string,
+  triggers: MountedComposerTriggers,
+): void {
+  if (!attachmentChips) {
+    return;
+  }
+
+  if (triggers.shellMode) {
+    renderAttachmentChips(attachmentChips, []);
+    return;
+  }
+
+  renderAttachmentChips(attachmentChips, [
+    ...triggers.selectedAttachments.map((attachment): string => attachment.name || "attachment"),
+    ...extractRefs(value),
+  ]);
+}
+
+function syncMountedShellUi(
+  promptBar: HTMLElement | null,
+  textarea: HTMLTextAreaElement,
+  attachButton: HTMLButtonElement | null,
+  shellAttachmentNote: HTMLElement | null,
+  triggers: MountedComposerTriggers,
+): void {
+  promptBar?.classList.toggle("shell-mode", triggers.shellMode);
+  textarea.setAttribute("placeholder", triggers.shellMode ? "run shell command in workspace…" : "ask pi to do something…");
+
+  if (shellAttachmentNote) {
+    shellAttachmentNote.hidden = !(triggers.shellMode && triggers.selectedAttachments.length > 0);
+  }
+
+  if (attachButton) {
+    attachButton.disabled = triggers.shellMode;
+    attachButton.setAttribute("aria-disabled", triggers.shellMode ? "true" : "false");
+  }
+}
+
+function clearMountedFileSearchTimer(triggers: MountedComposerTriggers): void {
+  if (triggers.fileSearchTimer) {
+    clearTimeout(triggers.fileSearchTimer);
+    triggers.fileSearchTimer = undefined;
+  }
+}
+
+function hideMountedAssistPopovers(slashPopover: HTMLElement | null, fileRefPopover: HTMLElement | null): void {
+  slashPopover?.setAttribute("hidden", "");
+  fileRefPopover?.setAttribute("hidden", "");
 }
 
 function mountedPromptErrorMessage(error: unknown): ChatMessage {
