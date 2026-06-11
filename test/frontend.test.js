@@ -1615,7 +1615,7 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
         }
 
         if (method === "runShell") {
-          return { output: "ok\n", exitCode: 0, durationMs: 5 };
+          return { output: "x".repeat(70000), exitCode: 0, durationMs: 5 };
         }
 
         if (method === "startPrompt") {
@@ -1634,23 +1634,43 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
       mount: createMount(window, app),
     });
 
+    const submitted = [];
+    globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
     const textarea = window.document.querySelector(".prompt-textarea");
     const promptBar = window.document.querySelector(".prompt-bar");
     const attachButton = window.document.querySelector(".attach-btn");
+    const fileInput = window.document.querySelector("[data-file-input]");
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new window.File(["hello"], "note.txt", { type: "text/plain" })],
+    });
+    fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await tick();
+    assert.match(window.document.querySelector(".attach-chips").textContent, /note\.txt/);
 
     textarea.value = "!";
     textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
     assert.equal(promptBar.classList.contains("shell-mode"), true);
     assert.equal(attachButton.disabled, true);
     assert.equal(textarea.value, "");
+    assert.equal(window.document.querySelector(".attach-chips").hidden, true);
+    textarea.value = "@README.md";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick(150);
+    assert.equal(window.document.querySelector(".attach-chips").hidden, true);
+    assert.equal(window.document.querySelector(".prompt-file-ref-pop").hidden, true);
     textarea.value = "pwd";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
     await tick();
     assert.ok(backendCalls.some((call) => call.method === "runShell" && call.input.data.command === "pwd"));
-    assert.match(window.document.querySelector(".term-inner").textContent, /\$ pwd\nok\n\[exit 0 · 5ms\]/);
+    assert.equal(submitted[0].attachments.length, 0);
+    assert.match(window.document.querySelector(".term-inner").textContent, /\$ pwd\n/);
+    assert.match(window.document.querySelector(".term-inner").textContent, /\[exit 0 · 5ms · truncated\]/);
+    assert.ok(window.document.querySelector(".term-inner").textContent.length < 65000);
     assert.equal(promptBar.classList.contains("shell-mode"), false);
     assert.equal(attachButton.disabled, false);
+    assert.match(window.document.querySelector(".attach-chips").textContent, /note\.txt/);
 
     textarea.value = "/";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
@@ -1672,7 +1692,7 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
     window.document.querySelector(".send-btn").click();
     await tick();
     const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
-    assert.equal(submitCall.input.data.attachments[0].path, "src/index.ts");
+    assert.ok(submitCall.input.data.attachments.some((attachment) => attachment.path === "src/index.ts"));
     cleanup();
   });
 });

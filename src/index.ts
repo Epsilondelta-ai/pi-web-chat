@@ -49,6 +49,7 @@ const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
+const MAX_SHELL_OUTPUT_BYTES = 64_000;
 const MOUNTED_CHAT_POLL_MS = 250;
 const STREAM_RENDER_MIN_MS = 250;
 const SPINNER_FRAME_COUNT = 6;
@@ -271,6 +272,11 @@ function bindMountedComposer(
       return;
     }
 
+    if (shellMode) {
+      renderAttachmentChips(attachmentChips, []);
+      return;
+    }
+
     renderAttachmentChips(attachmentChips, [
       ...selectedAttachments.map((attachment): string => attachment.name || "attachment"),
       ...extractRefs(textarea.value),
@@ -289,21 +295,36 @@ function bindMountedComposer(
     const value = textarea.value;
     sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
     syncAttachments();
-    void updateMountedSlashPopover(context, composerSurface, textarea, value, commands, (nextCommands: PluginCommand[]): void => {
-      commands = nextCommands;
-    });
 
     if (fileSearchTimer) {
       clearTimeout(fileSearchTimer);
     }
 
+    if (shellMode) {
+      slashPopover?.setAttribute("hidden", "");
+      fileRefPopover?.setAttribute("hidden", "");
+      return;
+    }
+
+    void updateMountedSlashPopover(context, composerSurface, textarea, value, commands, (nextCommands: PluginCommand[]): void => {
+      commands = nextCommands;
+    });
+
     fileSearchTimer = setTimeout((): void => {
       void updateMountedFileRefPopover(context, composerSurface, textarea, textarea.value);
     }, 120);
   };
+  const enterShellMode = (): void => {
+    shellMode = true;
+    slashPopover?.setAttribute("hidden", "");
+    fileRefPopover?.setAttribute("hidden", "");
+    syncMode();
+    syncAttachments();
+  };
   const resetShellMode = (): void => {
     shellMode = false;
     syncMode();
+    syncAttachments();
   };
   const submit = async (event?: Event): Promise<void> => {
     event?.preventDefault();
@@ -319,16 +340,16 @@ function bindMountedComposer(
 
     try {
       if (shellMode) {
+        publishChatInputSubmitted(text, []);
         await submitMountedShellCommand(context, chatSurface, store, text);
         resetShellMode();
       } else {
         const attachments = [...selectedAttachments, ...(await resolveMountedAttachments(context, text))];
         publishChatInputSubmitted(text, attachments);
         await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+        selectedAttachments = [];
+        syncAttachments();
       }
-
-      selectedAttachments = [];
-      syncAttachments();
 
       if (textarea.value.trim() === text) {
         textarea.value = "";
@@ -348,9 +369,8 @@ function bindMountedComposer(
 
   disposables.listen(textarea, "input", () => {
     if (!shellMode && textarea.value.startsWith("! ")) {
-      shellMode = true;
       textarea.value = textarea.value.slice(2);
-      syncMode();
+      enterShellMode();
     }
 
     sync();
@@ -360,9 +380,8 @@ function bindMountedComposer(
 
     if (keyEvent.key === " " && !shellMode && textarea.value === "!" && textarea.selectionStart === 1 && textarea.selectionEnd === 1) {
       keyEvent.preventDefault();
-      shellMode = true;
       textarea.value = "";
-      syncMode();
+      enterShellMode();
       sync();
       return;
     }
@@ -464,7 +483,7 @@ async function submitMountedShellCommand(
     const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
     const durationMs = typeof result.durationMs === "number" ? result.durationMs : 0;
     const output = typeof result.output === "string" ? result.output : "";
-    tool.text = `$ ${command}\n${output}${output.endsWith("\n") || !output ? "" : "\n"}[exit ${exitCode} · ${durationMs}ms${result.truncated ? " · truncated" : ""}]`;
+    tool.text = formatShellOutput(command, output, exitCode, durationMs, Boolean(result.truncated));
   } catch (error) {
     tool.text = `$ ${command}\n${errorText(error)}`;
   }
@@ -483,6 +502,30 @@ async function resolveMountedAttachments(context: PluginContext, text: string): 
 
   const response = await backendCall(context, "resolveContext", { text, refs });
   return Array.isArray(response.attachments) ? response.attachments.filter(isRecord) as FileAttachment[] : [];
+}
+
+function formatShellOutput(command: string, output: string, exitCode: number, durationMs: number, truncated: boolean): string {
+  const capped = truncateTextBytes(output, MAX_SHELL_OUTPUT_BYTES);
+  const wasTruncated = truncated || capped.truncated;
+  const newline = capped.text.endsWith("\n") || !capped.text ? "" : "\n";
+  return `$ ${command}\n${capped.text}${newline}[exit ${exitCode} · ${durationMs}ms${wasTruncated ? " · truncated" : ""}]`;
+}
+
+function truncateTextBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(text);
+
+  if (encoded.byteLength <= maxBytes) {
+    return { text, truncated: false };
+  }
+
+  let truncated = new TextDecoder().decode(encoded.slice(0, maxBytes));
+
+  while (truncated && encoder.encode(truncated).byteLength > maxBytes) {
+    truncated = truncated.slice(0, -1);
+  }
+
+  return { text: truncated, truncated: true };
 }
 
 async function updateMountedSlashPopover(
@@ -825,8 +868,13 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
 function submitCurrentInput(state: State): void {
   const text = state.channels.input$.getValue().trim();
   if (!text) return;
-  const attachments = [...state.selectedLocalAttachments];
-  clearLocalAttachments(state);
+  const isShellCommand = text.startsWith("!");
+  const attachments = isShellCommand ? [] : [...state.selectedLocalAttachments];
+
+  if (!isShellCommand) {
+    clearLocalAttachments(state);
+  }
+
   state.channels.submitted$.next({ text, attachments });
   clearDraft();
   state.channels.input$.next("");
@@ -836,15 +884,16 @@ async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmi
   const text = event.text.trim();
   if (!text) return;
   const sessionId = syncStateToViewedSession(state, dom);
-  renderAttachmentChips(dom.attachments, []);
 
   if (text.startsWith("!")) {
-    clearPendingAttachments(state);
     addMessage(state, { role: "user", text });
     render(state, dom);
     await runShell(state, dom, text.slice(1).trim());
+    renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
     return;
   }
+
+  renderAttachmentChips(dom.attachments, []);
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
   const pendingUserMessage = addMessageToSession(state.store, sessionId, { role: "user", text, attachments });
@@ -2310,7 +2359,11 @@ async function runShell(state: State, dom: ChatDom, command: string): Promise<vo
     const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
     const durationMs = typeof result.durationMs === "number" ? result.durationMs : 0;
     const output = typeof result.output === "string" ? result.output : "";
-    replaceLastRunningTool(state, `$ ${command}\n${output}${output.endsWith("\n") || !output ? "" : "\n"}[exit ${exitCode} · ${durationMs}ms${result.truncated ? " · truncated" : ""}]`, exitCode === 0 ? "ok" : "err");
+    replaceLastRunningTool(
+      state,
+      formatShellOutput(command, output, exitCode, durationMs, Boolean(result.truncated)),
+      exitCode === 0 ? "ok" : "err",
+    );
   } catch (error) {
     replaceLastRunningTool(state, `$ ${command}\n${errorText(error)}`, "err");
     state.channels.toastRequested$.next({ level: "error", message: `shell failed: ${errorText(error)}` });
@@ -2365,6 +2418,13 @@ async function refreshCommands(state: State, dom: ChatDom): Promise<void> {
 }
 
 async function updateAssistPopovers(state: State, dom: ChatDom, value: string): Promise<void> {
+  if (value.startsWith("!")) {
+    state.fileSearchToken += 1;
+    dom.slashPopover.hidden = true;
+    dom.refsPopover.hidden = true;
+    return;
+  }
+
   if (currentSlashQuery(value) !== null) {
     if (!state.commands.length) await refreshCommands(state, dom);
     if (dom.textarea.value !== value) return;
