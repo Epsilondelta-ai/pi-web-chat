@@ -57,6 +57,7 @@ export function createComposerSurface(): HTMLElement {
   surface.className = "prompt-region pi-web-chat-composer";
   surface.innerHTML = `
     <div class="slash-pop" hidden><div class="slash-head">slash commands · type to filter</div><div class="slash-list"></div></div>
+    <div class="prompt-file-ref-pop" hidden><div class="slash-head">project files · type to filter</div><div class="prompt-file-ref-list"></div></div>
     <div class="prompt-bar">
       <button class="attach-btn" type="button" aria-label="attach files" title="attach files">${MATERIAL_ICONS.attachFile}</button>
       <input type="file" multiple hidden data-file-input />
@@ -467,6 +468,17 @@ export function pluginStyleText(): string {
       box-shadow: 0 0 0 2px rgba(0,255,136,.25);
     }
 
+    .pi-web-chat-composer .prompt-bar.shell-mode .prompt-textarea {
+      border-color: var(--warning, #facc15);
+      background: rgba(250,204,21,.12);
+      box-shadow: 0 0 0 2px rgba(250,204,21,.25);
+    }
+
+    .pi-web-chat-composer .prompt-bar.shell-mode .attach-btn {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+
     .pi-web-chat-composer .attach-btn {
       width: 38px;
       height: 38px;
@@ -524,6 +536,67 @@ export function pluginStyleText(): string {
       border: 1px solid var(--border, #24313a);
       background: var(--bg-1, #080b0f);
       color: var(--fg-2, #b9c0c7);
+    }
+
+    .pi-web-chat-composer .slash-pop,
+    .pi-web-chat-composer .prompt-file-ref-pop {
+      position: absolute;
+      left: var(--space-3, 12px);
+      right: var(--space-3, 12px);
+      bottom: calc(100% - 2px);
+      z-index: 8;
+      max-height: 240px;
+      overflow: auto;
+      border: 1px solid var(--border, #24313a);
+      border-radius: var(--radius-2, 10px);
+      background: var(--bg-2, #111111);
+      box-shadow: 0 12px 36px rgba(0,0,0,.35);
+    }
+
+    .pi-web-chat-composer .slash-head {
+      color: var(--fg-3, #8b8b8b);
+      font-size: var(--text-xs, 12px);
+      padding: 6px 10px;
+      text-transform: uppercase;
+    }
+
+    .pi-web-chat-composer .slash-list,
+    .pi-web-chat-composer .prompt-file-ref-list {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .pi-web-chat-composer .slash-item,
+    .pi-web-chat-composer .prompt-file-ref-item {
+      border: 0;
+      border-top: 1px solid var(--border-dim, #1f1f1f);
+      background: transparent;
+      color: var(--fg-1, #d4d4d4);
+      cursor: pointer;
+      font: inherit;
+      padding: 8px 10px;
+      text-align: left;
+    }
+
+    .pi-web-chat-composer .slash-item:hover,
+    .pi-web-chat-composer .slash-item:focus-visible,
+    .pi-web-chat-composer .prompt-file-ref-item:hover,
+    .pi-web-chat-composer .prompt-file-ref-item:focus-visible {
+      background: rgba(255,255,255,.06);
+    }
+
+    .pi-web-chat-composer .sl-name,
+    .pi-web-chat-composer .pfr-path {
+      display: block;
+      font-weight: 600;
+    }
+
+    .pi-web-chat-composer .sl-desc,
+    .pi-web-chat-composer .pfr-kind {
+      color: var(--fg-3, #8b8b8b);
+      display: block;
+      font-size: var(--text-xs, 12px);
+      margin-top: 2px;
     }
 
     .pi-web-chat-composer .material-icon,

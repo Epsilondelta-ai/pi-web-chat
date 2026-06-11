@@ -258,20 +258,52 @@ function bindMountedComposer(
     return;
   }
 
+  const promptBar = composerSurface.querySelector<HTMLElement>(".prompt-bar");
+  const slashPopover = composerSurface.querySelector<HTMLElement>(".slash-pop");
+  const fileRefPopover = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-pop");
   let selectedAttachments: FileAttachment[] = [];
+  let shellMode = false;
+  let commands: PluginCommand[] = [];
+  let fileSearchTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const sync = (): void => {
-    const value = textarea.value;
-    sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
-  };
   const syncAttachments = (): void => {
     if (!attachmentChips) {
       return;
     }
 
-    renderAttachmentChips(attachmentChips, selectedAttachments.map((attachment): string => {
-      return attachment.name || "attachment";
-    }));
+    renderAttachmentChips(attachmentChips, [
+      ...selectedAttachments.map((attachment): string => attachment.name || "attachment"),
+      ...extractRefs(textarea.value),
+    ]);
+  };
+  const syncMode = (): void => {
+    promptBar?.classList.toggle("shell-mode", shellMode);
+    textarea.setAttribute("placeholder", shellMode ? "run shell command in workspace…" : "ask pi to do something…");
+
+    if (attachButton) {
+      attachButton.disabled = shellMode;
+      attachButton.setAttribute("aria-disabled", shellMode ? "true" : "false");
+    }
+  };
+  const sync = (): void => {
+    const value = textarea.value;
+    sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
+    syncAttachments();
+    void updateMountedSlashPopover(context, composerSurface, textarea, value, commands, (nextCommands: PluginCommand[]): void => {
+      commands = nextCommands;
+    });
+
+    if (fileSearchTimer) {
+      clearTimeout(fileSearchTimer);
+    }
+
+    fileSearchTimer = setTimeout((): void => {
+      void updateMountedFileRefPopover(context, composerSurface, textarea, textarea.value);
+    }, 120);
+  };
+  const resetShellMode = (): void => {
+    shellMode = false;
+    syncMode();
   };
   const submit = async (event?: Event): Promise<void> => {
     event?.preventDefault();
@@ -283,12 +315,18 @@ function bindMountedComposer(
       return;
     }
 
-    const attachments = [...selectedAttachments];
     sendButton.disabled = true;
 
     try {
-      publishChatInputSubmitted(text, attachments);
-      await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+      if (shellMode) {
+        await submitMountedShellCommand(context, chatSurface, store, text);
+        resetShellMode();
+      } else {
+        const attachments = [...selectedAttachments, ...(await resolveMountedAttachments(context, text))];
+        publishChatInputSubmitted(text, attachments);
+        await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+      }
+
       selectedAttachments = [];
       syncAttachments();
 
@@ -303,13 +341,44 @@ function bindMountedComposer(
       renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)], store.activeSessionId);
     } finally {
       sendButton.disabled = false;
+      syncMode();
       sync();
     }
   };
 
-  disposables.listen(textarea, "input", sync);
+  disposables.listen(textarea, "input", () => {
+    if (!shellMode && textarea.value.startsWith("! ")) {
+      shellMode = true;
+      textarea.value = textarea.value.slice(2);
+      syncMode();
+    }
+
+    sync();
+  });
   disposables.listen(textarea, "keydown", (event) => {
     const keyEvent = event as KeyboardEvent;
+
+    if (keyEvent.key === " " && !shellMode && textarea.value === "!" && textarea.selectionStart === 1 && textarea.selectionEnd === 1) {
+      keyEvent.preventDefault();
+      shellMode = true;
+      textarea.value = "";
+      syncMode();
+      sync();
+      return;
+    }
+
+    if (keyEvent.key === "Backspace" && shellMode && textarea.value === "") {
+      keyEvent.preventDefault();
+      resetShellMode();
+      sync();
+      return;
+    }
+
+    if (keyEvent.key === "Escape") {
+      slashPopover?.setAttribute("hidden", "");
+      fileRefPopover?.setAttribute("hidden", "");
+      return;
+    }
 
     if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) {
       void submit(keyEvent);
@@ -320,7 +389,11 @@ function bindMountedComposer(
   });
 
   if (attachButton && fileInput) {
-    disposables.listen(attachButton, "click", () => fileInput.click());
+    disposables.listen(attachButton, "click", () => {
+      if (!shellMode) {
+        fileInput.click();
+      }
+    });
     disposables.listen(fileInput, "change", () => {
       void loadMountedLocalAttachments(fileInput, (attachments: FileAttachment[]): void => {
         selectedAttachments = attachments;
@@ -328,6 +401,15 @@ function bindMountedComposer(
       });
     });
   }
+
+  disposables.add({
+    remove: (): void => {
+      if (fileSearchTimer) {
+        clearTimeout(fileSearchTimer);
+      }
+    },
+  });
+  syncMode();
 }
 
 function mountedPromptErrorMessage(error: unknown): ChatMessage {
@@ -360,6 +442,180 @@ async function loadMountedLocalAttachments(
   }
 
   onLoaded(attachments);
+}
+
+async function submitMountedShellCommand(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  command: string,
+): Promise<void> {
+  const sessionId = syncMountedStoreToViewedSession(context, store);
+  const session = sessionById(store, sessionId);
+  const user: ChatMessage = { id: id(), role: "user", text: `! ${command}`, createdAt: Date.now() };
+  const tool: ChatMessage = { id: id(), role: "tool", text: `$ ${command}\n(running...)`, createdAt: Date.now() };
+  session.messages.push(user, tool);
+  session.updatedAt = Date.now();
+  saveStore(store);
+  renderMountedBackendMessages(chatSurface, session.messages, sessionId);
+
+  try {
+    const result = await backendCall(context, "runShell", { command });
+    const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
+    const durationMs = typeof result.durationMs === "number" ? result.durationMs : 0;
+    const output = typeof result.output === "string" ? result.output : "";
+    tool.text = `$ ${command}\n${output}${output.endsWith("\n") || !output ? "" : "\n"}[exit ${exitCode} · ${durationMs}ms${result.truncated ? " · truncated" : ""}]`;
+  } catch (error) {
+    tool.text = `$ ${command}\n${errorText(error)}`;
+  }
+
+  session.updatedAt = Date.now();
+  saveStore(store);
+  renderMountedBackendMessages(chatSurface, session.messages, sessionId);
+}
+
+async function resolveMountedAttachments(context: PluginContext, text: string): Promise<FileAttachment[]> {
+  const refs = extractRefs(text);
+
+  if (!refs.length) {
+    return [];
+  }
+
+  const response = await backendCall(context, "resolveContext", { text, refs });
+  return Array.isArray(response.attachments) ? response.attachments.filter(isRecord) as FileAttachment[] : [];
+}
+
+async function updateMountedSlashPopover(
+  context: PluginContext,
+  composerSurface: HTMLElement,
+  textarea: HTMLTextAreaElement,
+  value: string,
+  commands: PluginCommand[],
+  setCommands: (commands: PluginCommand[]) => void,
+): Promise<void> {
+  const slashPopover = composerSurface.querySelector<HTMLElement>(".slash-pop");
+  const slashList = composerSurface.querySelector<HTMLElement>(".slash-list");
+  const query = currentSlashQuery(value);
+
+  if (query === null || !slashList) {
+    slashPopover?.setAttribute("hidden", "");
+    return;
+  }
+
+  let nextCommands = commands;
+
+  if (!nextCommands.length) {
+    const response = await backendCall(context, "commands", {});
+    nextCommands = Array.isArray(response.commands) ? response.commands.filter(isRecord) as PluginCommand[] : [];
+    setCommands(nextCommands);
+  }
+
+  if (textarea.value !== value) {
+    return;
+  }
+
+  const filtered = nextCommands.filter((command: PluginCommand): boolean => {
+    return commandName(command).slice(1).toLowerCase().includes(query);
+  });
+  renderMountedSlashCommands(slashList, filtered, textarea, slashPopover);
+  slashPopover?.toggleAttribute("hidden", filtered.length === 0);
+}
+
+async function updateMountedFileRefPopover(
+  context: PluginContext,
+  composerSurface: HTMLElement,
+  textarea: HTMLTextAreaElement,
+  value: string,
+): Promise<void> {
+  const fileRefPopover = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-pop");
+  const fileRefList = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-list");
+  const query = currentFileRefQuery(value);
+
+  if (query === null || !fileRefList) {
+    fileRefPopover?.setAttribute("hidden", "");
+    return;
+  }
+
+  try {
+    const response = await backendCall(context, "searchFiles", { query, limit: FILE_REF_LIMIT });
+    const files = Array.isArray(response.files) ? response.files.filter(isRecord) as FileSearchResult[] : [];
+
+    if (textarea.value !== value) {
+      return;
+    }
+
+    renderMountedFileRefs(fileRefList, textarea, files, fileRefPopover);
+    fileRefPopover?.toggleAttribute("hidden", files.length === 0);
+  } catch {
+    fileRefPopover?.setAttribute("hidden", "");
+  }
+}
+
+function renderMountedSlashCommands(
+  list: HTMLElement,
+  commands: PluginCommand[],
+  textarea: HTMLTextAreaElement,
+  popover: HTMLElement | null,
+): void {
+  list.replaceChildren(...commands.map((command: PluginCommand): HTMLButtonElement => {
+    const button = document.createElement("button");
+    const name = commandName(command);
+    button.type = "button";
+    button.className = "slash-item";
+    button.dataset.slash = name;
+    button.innerHTML = `<span class="sl-name"></span><span class="sl-desc"></span>`;
+    button.querySelector<HTMLElement>(".sl-name")!.textContent = name;
+    button.querySelector<HTMLElement>(".sl-desc")!.textContent = command.description || "";
+    button.addEventListener("click", (): void => {
+      textarea.value = command.template || `${name} `;
+      popover?.setAttribute("hidden", "");
+      textarea.dispatchEvent(new (textarea.ownerDocument.defaultView?.Event || Event)("input", { bubbles: true }));
+      textarea.focus();
+    });
+    return button;
+  }));
+}
+
+function renderMountedFileRefs(
+  list: HTMLElement,
+  textarea: HTMLTextAreaElement,
+  files: FileSearchResult[],
+  popover: HTMLElement | null,
+): void {
+  list.replaceChildren(...files.map((file: FileSearchResult): HTMLButtonElement => {
+    const path = file.path || file.name || "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-file-ref-item";
+    button.dataset.path = path;
+    button.disabled = !path;
+    button.innerHTML = `<span class="pfr-path"></span><span class="pfr-kind"></span>`;
+    button.querySelector<HTMLElement>(".pfr-path")!.textContent = path;
+    button.querySelector<HTMLElement>(".pfr-kind")!.textContent = typeof file.size === "number" ? `${file.size} bytes` : "file";
+    button.addEventListener("click", (): void => {
+      insertMountedFileRef(textarea, path);
+      popover?.setAttribute("hidden", "");
+    });
+    return button;
+  }));
+}
+
+function insertMountedFileRef(textarea: HTMLTextAreaElement, path: string): void {
+  if (!path) {
+    return;
+  }
+
+  const value = textarea.value;
+  const cursor = textarea.selectionStart;
+  const prefix = value.slice(0, cursor);
+  const match = /(?:^|\s)@([^\s@`]*)$/.exec(prefix);
+  const start = match ? cursor - (match[1] || "").length - 1 : cursor;
+  const insert = `@${path} `;
+  textarea.value = `${value.slice(0, start)}${insert}${value.slice(cursor)}`;
+  const nextCursor = start + insert.length;
+  textarea.setSelectionRange(nextCursor, nextCursor);
+  textarea.dispatchEvent(new (textarea.ownerDocument.defaultView?.Event || Event)("input", { bubbles: true }));
+  textarea.focus();
 }
 
 export function createChannels(pi: PiWebSubjects): Channels {
@@ -1586,7 +1842,9 @@ function renderMountedDocumentation(chatSurface: HTMLElement): void {
 
   for (const text of [
     "Ask pi in the prompt box and press Cmd/Ctrl+Enter to send.",
-    "Use / for slash commands, @ for file references, and ! for shell commands.",
+    "Type ! then Space at the start to turn the prompt yellow and run shell commands in the workspace.",
+    "Type @ to list project files, then pick one to tag it as prompt context.",
+    "Type / at the start to open the slash command list.",
     "Chats are cached locally after you start or select a session.",
   ]) {
     const item = document.createElement("li");

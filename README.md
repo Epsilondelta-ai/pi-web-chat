@@ -14,6 +14,10 @@ This plugin follows the modern pi-web plugin standard: pi-web core supplies `con
 - Mounted chat state follows sidebar selected-session changes through backend `sessionEventsSse` streams.
 - Chat-created/adopted sessions publish sidebar-compatible events without directly mutating sidebar `selectedSession$`.
 - Local chat/session persistence in `localStorage`.
+- Prompt triggers:
+  - Type `!` at the start and press Space to enter yellow shell-command mode for the workspace.
+  - Type `@` to list project files and pick one to tag as prompt context.
+  - Type `/` at the start to open the slash command list.
 
 ## Install
 

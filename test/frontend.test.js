@@ -1594,6 +1594,89 @@ test("mounted submit gracefully works without sidebar plugin", async () => {
   });
 });
 
+test("mounted prompt triggers shell mode, slash commands, and file refs", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "commands") {
+          return { commands: [{ command: "/review", description: "review files", template: "/review " }] };
+        }
+
+        if (method === "searchFiles") {
+          return { files: [{ path: "src/index.ts", name: "index.ts", size: 123 }] };
+        }
+
+        if (method === "resolveContext") {
+          return { attachments: [{ path: "src/index.ts", name: "index.ts", content: "source" }] };
+        }
+
+        if (method === "runShell") {
+          return { output: "ok\n", exitCode: 0, durationMs: 5 };
+        }
+
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: "trigger-session",
+            messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const promptBar = window.document.querySelector(".prompt-bar");
+    const attachButton = window.document.querySelector(".attach-btn");
+
+    textarea.value = "!";
+    textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    assert.equal(promptBar.classList.contains("shell-mode"), true);
+    assert.equal(attachButton.disabled, true);
+    assert.equal(textarea.value, "");
+    textarea.value = "pwd";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    assert.ok(backendCalls.some((call) => call.method === "runShell" && call.input.data.command === "pwd"));
+    assert.match(window.document.querySelector(".term-inner").textContent, /\$ pwd\nok\n\[exit 0 · 5ms\]/);
+    assert.equal(promptBar.classList.contains("shell-mode"), false);
+    assert.equal(attachButton.disabled, false);
+
+    textarea.value = "/";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    assert.equal(window.document.querySelector(".slash-pop").hidden, false);
+    assert.equal(window.document.querySelector(".slash-item").dataset.slash, "/review");
+    window.document.querySelector(".slash-item").click();
+    assert.equal(textarea.value, "/review ");
+
+    textarea.value = "use @";
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick(150);
+    assert.equal(window.document.querySelector(".prompt-file-ref-pop").hidden, false);
+    window.document.querySelector(".prompt-file-ref-item").click();
+    assert.equal(textarea.value, "use @src/index.ts ");
+    assert.match(window.document.querySelector(".attach-chips").textContent, /src\/index\.ts/);
+
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
+    assert.equal(submitCall.input.data.attachments[0].path, "src/index.ts");
+    cleanup();
+  });
+});
+
 test("mounted attach button sends selected files with prompt", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
