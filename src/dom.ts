@@ -898,6 +898,10 @@ export function pluginStyleText(): string {
       border-color: var(--warning, #facc15);
     }
 
+    .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-attachments {
+      display: none;
+    }
+
     .${ROOT_CLASS}[data-composer-mode="file-ref"] .pi-web-chat-prompt-bar {
       border-color: var(--accent, #60a5fa);
     }

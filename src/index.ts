@@ -504,7 +504,7 @@ async function resolveMountedAttachments(context: PluginContext, text: string): 
   return Array.isArray(response.attachments) ? response.attachments.filter(isRecord) as FileAttachment[] : [];
 }
 
-function formatShellOutput(command: string, output: string, exitCode: number, durationMs: number, truncated: boolean): string {
+export function formatShellOutput(command: string, output: string, exitCode: number, durationMs: number, truncated: boolean): string {
   const capped = truncateTextBytes(output, MAX_SHELL_OUTPUT_BYTES);
   const wasTruncated = truncated || capped.truncated;
   const newline = capped.text.endsWith("\n") || !capped.text ? "" : "\n";
@@ -868,16 +868,19 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
 function submitCurrentInput(state: State): void {
   const text = state.channels.input$.getValue().trim();
   if (!text) return;
-  const isShellCommand = text.startsWith("!");
-  const attachments = isShellCommand ? [] : [...state.selectedLocalAttachments];
+  const attachments = submittedAttachmentsForText(text, state.selectedLocalAttachments);
 
-  if (!isShellCommand) {
+  if (!text.startsWith("!")) {
     clearLocalAttachments(state);
   }
 
   state.channels.submitted$.next({ text, attachments });
   clearDraft();
   state.channels.input$.next("");
+}
+
+export function submittedAttachmentsForText(text: string, attachments: FileAttachment[]): FileAttachment[] {
+  return text.trim().startsWith("!") ? [] : [...attachments];
 }
 
 async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmitted): Promise<void> {
@@ -1892,6 +1895,7 @@ function renderMountedDocumentation(chatSurface: HTMLElement): void {
   for (const text of [
     "Ask pi in the prompt box and press Cmd/Ctrl+Enter to send.",
     "Type ! then Space at the start to turn the prompt yellow and run shell commands in the workspace.",
+    "Queued file attachments hide during shell mode and reappear for the next normal prompt.",
     "Type @ to list project files, then pick one to tag it as prompt context.",
     "Type / at the start to open the slash command list.",
     "Chats are cached locally after you start or select a session.",
@@ -2486,7 +2490,7 @@ function currentFileRefQuery(value: string): string | null {
 }
 
 function updateComposerMode(dom: ChatDom, value: string): void {
-  if (value.startsWith("!")) setComposerMode(dom, "shell");
+  if (value.trim().startsWith("!")) setComposerMode(dom, "shell");
   else if (currentFileRefQuery(value) !== null) setComposerMode(dom, "file-ref");
   else setComposerMode(dom, "normal");
 }

@@ -16,6 +16,7 @@ This plugin follows the modern pi-web plugin standard: pi-web core supplies `con
 - Local chat/session persistence in `localStorage`.
 - Prompt triggers:
   - Type `!` at the start and press Space to enter yellow shell-command mode for the workspace.
+    Queued file attachments are hidden while shell mode is active and reappear for the next normal prompt.
   - Type `@` to list project files and pick one to tag as prompt context.
   - Type `/` at the start to open the slash command list.
 

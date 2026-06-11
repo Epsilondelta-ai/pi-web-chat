@@ -9,11 +9,13 @@ import activate, {
   createAgUiLikeRunInput,
   createChannels,
   extractRefs,
+  formatShellOutput,
   getActiveWorkspaceId,
   mergeCommands,
   pluginStyleText,
   promptFromAgUiLikeRunInput,
   renderMessages,
+  submittedAttachmentsForText,
 } from "../index.js";
 
 function createPiWeb() {
@@ -97,6 +99,19 @@ test("command utilities keep chat command behavior", () => {
   assert.deepEqual(extractRefs("use @README.md and `@ignored` @src/app.ts @README.md"), ["README.md", "src/app.ts"]);
 });
 
+test("shell command utilities drop submitted attachments and cap output", () => {
+  const attachments = [{ name: "note.txt", content: "hello" }];
+  const normal = submittedAttachmentsForText("ask pi", attachments);
+  const shell = submittedAttachmentsForText("   ! pwd", attachments);
+  const formatted = formatShellOutput("pwd", "x".repeat(70000), 0, 5, false);
+
+  assert.deepEqual(shell, []);
+  assert.deepEqual(normal, attachments);
+  assert.notEqual(normal, attachments);
+  assert.match(formatted, /\[exit 0 · 5ms · truncated\]/);
+  assert.ok(formatted.length < 65050);
+});
+
 test("plugin styles target mounted chat surfaces", () => {
   const styles = pluginStyleText();
   assert.match(styles, /pi-web-chat-surface/);
@@ -105,6 +120,7 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /body\.sys/);
   assert.match(styles, /resize: none/);
   assert.match(styles, /focus-visible/);
+  assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-attachments[\s\S]*display: none/);
 });
 
 test("legacy chat renderer remains exported", async () => {
