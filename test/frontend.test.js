@@ -121,6 +121,7 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /resize: none/);
   assert.match(styles, /focus-visible/);
   assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-attachments[\s\S]*display: none/);
+  assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-shell-note[\s\S]*display: block/);
 });
 
 test("legacy chat renderer remains exported", async () => {
@@ -1670,6 +1671,8 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
     assert.equal(attachButton.disabled, true);
     assert.equal(textarea.value, "");
     assert.equal(window.document.querySelector(".attach-chips").hidden, true);
+    assert.equal(window.document.querySelector(".shell-attachment-note").hidden, false);
+    assert.match(window.document.querySelector(".shell-attachment-note").textContent, /queued attachments are hidden/);
     textarea.value = "@README.md";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     await tick(150);
@@ -1686,6 +1689,7 @@ test("mounted prompt triggers shell mode, slash commands, and file refs", async 
     assert.ok(window.document.querySelector(".term-inner").textContent.length < 65000);
     assert.equal(promptBar.classList.contains("shell-mode"), false);
     assert.equal(attachButton.disabled, false);
+    assert.equal(window.document.querySelector(".shell-attachment-note").hidden, true);
     assert.match(window.document.querySelector(".attach-chips").textContent, /note\.txt/);
 
     textarea.value = "/";

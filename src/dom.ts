@@ -61,7 +61,7 @@ export function createComposerSurface(): HTMLElement {
     <div class="prompt-bar">
       <button class="attach-btn" type="button" aria-label="attach files" title="attach files">${MATERIAL_ICONS.attachFile}</button>
       <input type="file" multiple hidden data-file-input />
-      <div class="prompt-input-col"><div class="attach-chips" hidden></div><textarea class="prompt-textarea" aria-label="Prompt" placeholder="ask pi to do something…" rows="1"></textarea></div>
+      <div class="prompt-input-col"><div class="attach-chips" hidden></div><div class="shell-attachment-note" aria-live="polite" hidden>queued attachments are hidden during shell mode and will reappear for the next normal prompt</div><textarea class="prompt-textarea" aria-label="Prompt" placeholder="ask pi to do something…" rows="1"></textarea></div>
       <div class="prompt-actions">
         <button class="stop-btn" type="button" aria-label="stop" title="stop" hidden>${MATERIAL_ICONS.stop}</button>
         <button class="mic-btn" type="button" data-action="toggle-speech-input" aria-label="start voice input" title="voice input" hidden>🎙</button>
@@ -97,6 +97,7 @@ export function createChatDom(): ChatDom {
         <div class="pi-web-chat-popover-list" data-refs-list></div>
       </div>
       <div class="pi-web-chat-attachments" data-attachments hidden></div>
+      <div class="pi-web-chat-shell-note" aria-live="polite">queued attachments are hidden during shell mode and will reappear for the next normal prompt</div>
       <div class="pi-web-chat-prompt-bar">
         <button class="pi-web-chat-icon-btn" type="button" data-attach aria-label="attach files" title="attach files">${materialIcon("attach_file", MATERIAL_PATHS.attachFile)}</button>
         <input type="file" multiple hidden data-file-input />
@@ -446,6 +447,11 @@ export function pluginStyleText(): string {
       flex-direction: column;
       gap: 6px;
       min-width: 0;
+    }
+
+    .pi-web-chat-composer .shell-attachment-note {
+      color: var(--fg-3, #8b8b8b);
+      font-size: var(--text-xs, 12px);
     }
 
     .pi-web-chat-composer .prompt-textarea {
@@ -898,8 +904,19 @@ export function pluginStyleText(): string {
       border-color: var(--warning, #facc15);
     }
 
+    .${ROOT_CLASS} .pi-web-chat-shell-note {
+      color: var(--muted, #8a8f98);
+      display: none;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+
     .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-attachments {
       display: none;
+    }
+
+    .${ROOT_CLASS}[data-composer-mode="shell"] .pi-web-chat-shell-note {
+      display: block;
     }
 
     .${ROOT_CLASS}[data-composer-mode="file-ref"] .pi-web-chat-prompt-bar {

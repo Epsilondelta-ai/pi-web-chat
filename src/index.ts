@@ -254,6 +254,7 @@ function bindMountedComposer(
   const attachButton = composerSurface.querySelector<HTMLButtonElement>(".attach-btn");
   const fileInput = composerSurface.querySelector<HTMLInputElement>("[data-file-input]");
   const attachmentChips = composerSurface.querySelector<HTMLElement>(".attach-chips");
+  const shellAttachmentNote = composerSurface.querySelector<HTMLElement>(".shell-attachment-note");
 
   if (!textarea || !sendButton) {
     return;
@@ -285,6 +286,10 @@ function bindMountedComposer(
   const syncMode = (): void => {
     promptBar?.classList.toggle("shell-mode", shellMode);
     textarea.setAttribute("placeholder", shellMode ? "run shell command in workspace…" : "ask pi to do something…");
+
+    if (shellAttachmentNote) {
+      shellAttachmentNote.hidden = !(shellMode && selectedAttachments.length > 0);
+    }
 
     if (attachButton) {
       attachButton.disabled = shellMode;
