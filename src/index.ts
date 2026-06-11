@@ -49,6 +49,7 @@ const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
+const MAX_SHELL_OUTPUT_BYTES = 64_000;
 const MOUNTED_CHAT_POLL_MS = 250;
 const STREAM_RENDER_MIN_MS = 250;
 const SPINNER_FRAME_COUNT = 6;
@@ -83,6 +84,13 @@ type MountedState = {
   backendChatToken: number;
   runEventsAbort?: AbortController;
   sessionEventsAbort?: AbortController;
+};
+
+type MountedComposerTriggers = {
+  selectedAttachments: FileAttachment[];
+  shellMode: boolean;
+  commands: PluginCommand[];
+  fileSearchTimer?: ReturnType<typeof setTimeout>;
 };
 
 type MountedScrollLock = {
@@ -253,25 +261,52 @@ function bindMountedComposer(
   const attachButton = composerSurface.querySelector<HTMLButtonElement>(".attach-btn");
   const fileInput = composerSurface.querySelector<HTMLInputElement>("[data-file-input]");
   const attachmentChips = composerSurface.querySelector<HTMLElement>(".attach-chips");
+  const shellAttachmentNote = composerSurface.querySelector<HTMLElement>(".shell-attachment-note");
 
   if (!textarea || !sendButton) {
     return;
   }
 
-  let selectedAttachments: FileAttachment[] = [];
+  const promptBar = composerSurface.querySelector<HTMLElement>(".prompt-bar");
+  const slashPopover = composerSurface.querySelector<HTMLElement>(".slash-pop");
+  const fileRefPopover = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-pop");
+  const triggers: MountedComposerTriggers = { selectedAttachments: [], shellMode: false, commands: [] };
 
+  const syncAttachments = (): void => {
+    syncMountedAttachmentChips(attachmentChips, textarea.value, triggers);
+  };
+  const syncMode = (): void => {
+    syncMountedShellUi(promptBar, textarea, attachButton, shellAttachmentNote, triggers);
+  };
   const sync = (): void => {
     const value = textarea.value;
     sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
-  };
-  const syncAttachments = (): void => {
-    if (!attachmentChips) {
+    syncAttachments();
+    clearMountedFileSearchTimer(triggers);
+
+    if (triggers.shellMode) {
+      hideMountedAssistPopovers(slashPopover, fileRefPopover);
       return;
     }
 
-    renderAttachmentChips(attachmentChips, selectedAttachments.map((attachment): string => {
-      return attachment.name || "attachment";
-    }));
+    void updateMountedSlashPopover(context, composerSurface, textarea, value, triggers.commands, (nextCommands: PluginCommand[]): void => {
+      triggers.commands = nextCommands;
+    });
+
+    triggers.fileSearchTimer = setTimeout((): void => {
+      void updateMountedFileRefPopover(context, composerSurface, textarea, textarea.value);
+    }, 120);
+  };
+  const enterShellMode = (): void => {
+    triggers.shellMode = true;
+    hideMountedAssistPopovers(slashPopover, fileRefPopover);
+    syncMode();
+    syncAttachments();
+  };
+  const resetShellMode = (): void => {
+    triggers.shellMode = false;
+    syncMode();
+    syncAttachments();
   };
   const submit = async (event?: Event): Promise<void> => {
     event?.preventDefault();
@@ -283,14 +318,20 @@ function bindMountedComposer(
       return;
     }
 
-    const attachments = [...selectedAttachments];
     sendButton.disabled = true;
 
     try {
-      publishChatInputSubmitted(text, attachments);
-      await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
-      selectedAttachments = [];
-      syncAttachments();
+      if (triggers.shellMode) {
+        publishChatInputSubmitted(text, []);
+        await submitMountedShellCommand(context, chatSurface, store, text);
+        resetShellMode();
+      } else {
+        const attachments = [...triggers.selectedAttachments, ...(await resolveMountedAttachments(context, text))];
+        publishChatInputSubmitted(text, attachments);
+        await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+        triggers.selectedAttachments = [];
+        syncAttachments();
+      }
 
       if (textarea.value.trim() === text) {
         textarea.value = "";
@@ -303,13 +344,41 @@ function bindMountedComposer(
       renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)], store.activeSessionId);
     } finally {
       sendButton.disabled = false;
+      syncMode();
       sync();
     }
   };
 
-  disposables.listen(textarea, "input", sync);
+  disposables.listen(textarea, "input", () => {
+    if (!triggers.shellMode && textarea.value.startsWith("! ")) {
+      textarea.value = textarea.value.slice(2);
+      enterShellMode();
+    }
+
+    sync();
+  });
   disposables.listen(textarea, "keydown", (event) => {
     const keyEvent = event as KeyboardEvent;
+
+    if (keyEvent.key === " " && !triggers.shellMode && textarea.value === "!" && textarea.selectionStart === 1 && textarea.selectionEnd === 1) {
+      keyEvent.preventDefault();
+      textarea.value = "";
+      enterShellMode();
+      sync();
+      return;
+    }
+
+    if (keyEvent.key === "Backspace" && triggers.shellMode && textarea.value === "") {
+      keyEvent.preventDefault();
+      resetShellMode();
+      sync();
+      return;
+    }
+
+    if (keyEvent.key === "Escape") {
+      hideMountedAssistPopovers(slashPopover, fileRefPopover);
+      return;
+    }
 
     if (keyEvent.key === "Enter" && (keyEvent.metaKey || keyEvent.ctrlKey)) {
       void submit(keyEvent);
@@ -320,14 +389,75 @@ function bindMountedComposer(
   });
 
   if (attachButton && fileInput) {
-    disposables.listen(attachButton, "click", () => fileInput.click());
+    disposables.listen(attachButton, "click", () => {
+      if (!triggers.shellMode) {
+        fileInput.click();
+      }
+    });
     disposables.listen(fileInput, "change", () => {
       void loadMountedLocalAttachments(fileInput, (attachments: FileAttachment[]): void => {
-        selectedAttachments = attachments;
+        triggers.selectedAttachments = attachments;
         syncAttachments();
       });
     });
   }
+
+  disposables.add({
+    remove: (): void => clearMountedFileSearchTimer(triggers),
+  });
+  syncMode();
+}
+
+function syncMountedAttachmentChips(
+  attachmentChips: HTMLElement | null,
+  value: string,
+  triggers: MountedComposerTriggers,
+): void {
+  if (!attachmentChips) {
+    return;
+  }
+
+  if (triggers.shellMode) {
+    renderAttachmentChips(attachmentChips, []);
+    return;
+  }
+
+  renderAttachmentChips(attachmentChips, [
+    ...triggers.selectedAttachments.map((attachment): string => attachment.name || "attachment"),
+    ...extractRefs(value),
+  ]);
+}
+
+function syncMountedShellUi(
+  promptBar: HTMLElement | null,
+  textarea: HTMLTextAreaElement,
+  attachButton: HTMLButtonElement | null,
+  shellAttachmentNote: HTMLElement | null,
+  triggers: MountedComposerTriggers,
+): void {
+  promptBar?.classList.toggle("shell-mode", triggers.shellMode);
+  textarea.setAttribute("placeholder", triggers.shellMode ? "run shell command in workspace…" : "ask pi to do something…");
+
+  if (shellAttachmentNote) {
+    shellAttachmentNote.hidden = !(triggers.shellMode && triggers.selectedAttachments.length > 0);
+  }
+
+  if (attachButton) {
+    attachButton.disabled = triggers.shellMode;
+    attachButton.setAttribute("aria-disabled", triggers.shellMode ? "true" : "false");
+  }
+}
+
+function clearMountedFileSearchTimer(triggers: MountedComposerTriggers): void {
+  if (triggers.fileSearchTimer) {
+    clearTimeout(triggers.fileSearchTimer);
+    triggers.fileSearchTimer = undefined;
+  }
+}
+
+function hideMountedAssistPopovers(slashPopover: HTMLElement | null, fileRefPopover: HTMLElement | null): void {
+  slashPopover?.setAttribute("hidden", "");
+  fileRefPopover?.setAttribute("hidden", "");
 }
 
 function mountedPromptErrorMessage(error: unknown): ChatMessage {
@@ -360,6 +490,204 @@ async function loadMountedLocalAttachments(
   }
 
   onLoaded(attachments);
+}
+
+async function submitMountedShellCommand(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  command: string,
+): Promise<void> {
+  const sessionId = syncMountedStoreToViewedSession(context, store);
+  const session = sessionById(store, sessionId);
+  const user: ChatMessage = { id: id(), role: "user", text: `! ${command}`, createdAt: Date.now() };
+  const tool: ChatMessage = { id: id(), role: "tool", text: `$ ${command}\n(running...)`, createdAt: Date.now() };
+  session.messages.push(user, tool);
+  session.updatedAt = Date.now();
+  saveStore(store);
+  renderMountedBackendMessages(chatSurface, session.messages, sessionId);
+
+  try {
+    const result = await backendCall(context, "runShell", { command });
+    const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
+    const durationMs = typeof result.durationMs === "number" ? result.durationMs : 0;
+    const output = typeof result.output === "string" ? result.output : "";
+    tool.text = formatShellOutput(command, output, exitCode, durationMs, Boolean(result.truncated));
+  } catch (error) {
+    tool.text = `$ ${command}\n${errorText(error)}`;
+  }
+
+  session.updatedAt = Date.now();
+  saveStore(store);
+  renderMountedBackendMessages(chatSurface, session.messages, sessionId);
+}
+
+async function resolveMountedAttachments(context: PluginContext, text: string): Promise<FileAttachment[]> {
+  const refs = extractRefs(text);
+
+  if (!refs.length) {
+    return [];
+  }
+
+  const response = await backendCall(context, "resolveContext", { text, refs });
+  return Array.isArray(response.attachments) ? response.attachments.filter(isRecord) as FileAttachment[] : [];
+}
+
+export function formatShellOutput(command: string, output: string, exitCode: number, durationMs: number, truncated: boolean): string {
+  const capped = truncateTextBytes(output, MAX_SHELL_OUTPUT_BYTES);
+  const wasTruncated = truncated || capped.truncated;
+  const newline = capped.text.endsWith("\n") || !capped.text ? "" : "\n";
+  return `$ ${command}\n${capped.text}${newline}[exit ${exitCode} · ${durationMs}ms${wasTruncated ? " · truncated" : ""}]`;
+}
+
+function truncateTextBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(text);
+
+  if (encoded.byteLength <= maxBytes) {
+    return { text, truncated: false };
+  }
+
+  let truncated = new TextDecoder().decode(encoded.slice(0, maxBytes));
+
+  while (truncated && encoder.encode(truncated).byteLength > maxBytes) {
+    truncated = truncated.slice(0, -1);
+  }
+
+  return { text: truncated, truncated: true };
+}
+
+async function updateMountedSlashPopover(
+  context: PluginContext,
+  composerSurface: HTMLElement,
+  textarea: HTMLTextAreaElement,
+  value: string,
+  commands: PluginCommand[],
+  setCommands: (commands: PluginCommand[]) => void,
+): Promise<void> {
+  const slashPopover = composerSurface.querySelector<HTMLElement>(".slash-pop");
+  const slashList = composerSurface.querySelector<HTMLElement>(".slash-list");
+  const query = currentSlashQuery(value);
+
+  if (query === null || !slashList) {
+    slashPopover?.setAttribute("hidden", "");
+    return;
+  }
+
+  let nextCommands = commands;
+
+  if (!nextCommands.length) {
+    const response = await backendCall(context, "commands", {});
+    nextCommands = Array.isArray(response.commands) ? response.commands.filter(isRecord) as PluginCommand[] : [];
+    setCommands(nextCommands);
+  }
+
+  if (textarea.value !== value) {
+    return;
+  }
+
+  const filtered = nextCommands.filter((command: PluginCommand): boolean => {
+    return commandName(command).slice(1).toLowerCase().includes(query);
+  });
+  renderMountedSlashCommands(slashList, filtered, textarea, slashPopover);
+  slashPopover?.toggleAttribute("hidden", filtered.length === 0);
+}
+
+async function updateMountedFileRefPopover(
+  context: PluginContext,
+  composerSurface: HTMLElement,
+  textarea: HTMLTextAreaElement,
+  value: string,
+): Promise<void> {
+  const fileRefPopover = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-pop");
+  const fileRefList = composerSurface.querySelector<HTMLElement>(".prompt-file-ref-list");
+  const query = currentFileRefQuery(value);
+
+  if (query === null || !fileRefList) {
+    fileRefPopover?.setAttribute("hidden", "");
+    return;
+  }
+
+  try {
+    const response = await backendCall(context, "searchFiles", { query, limit: FILE_REF_LIMIT });
+    const files = Array.isArray(response.files) ? response.files.filter(isRecord) as FileSearchResult[] : [];
+
+    if (textarea.value !== value) {
+      return;
+    }
+
+    renderMountedFileRefs(fileRefList, textarea, files, fileRefPopover);
+    fileRefPopover?.toggleAttribute("hidden", files.length === 0);
+  } catch {
+    fileRefPopover?.setAttribute("hidden", "");
+  }
+}
+
+function renderMountedSlashCommands(
+  list: HTMLElement,
+  commands: PluginCommand[],
+  textarea: HTMLTextAreaElement,
+  popover: HTMLElement | null,
+): void {
+  list.replaceChildren(...commands.map((command: PluginCommand): HTMLButtonElement => {
+    const button = document.createElement("button");
+    const name = commandName(command);
+    button.type = "button";
+    button.className = "slash-item";
+    button.dataset.slash = name;
+    button.innerHTML = `<span class="sl-name"></span><span class="sl-desc"></span>`;
+    button.querySelector<HTMLElement>(".sl-name")!.textContent = name;
+    button.querySelector<HTMLElement>(".sl-desc")!.textContent = command.description || "";
+    button.addEventListener("click", (): void => {
+      textarea.value = command.template || `${name} `;
+      popover?.setAttribute("hidden", "");
+      textarea.dispatchEvent(new (textarea.ownerDocument.defaultView?.Event || Event)("input", { bubbles: true }));
+      textarea.focus();
+    });
+    return button;
+  }));
+}
+
+function renderMountedFileRefs(
+  list: HTMLElement,
+  textarea: HTMLTextAreaElement,
+  files: FileSearchResult[],
+  popover: HTMLElement | null,
+): void {
+  list.replaceChildren(...files.map((file: FileSearchResult): HTMLButtonElement => {
+    const path = file.path || file.name || "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-file-ref-item";
+    button.dataset.path = path;
+    button.disabled = !path;
+    button.innerHTML = `<span class="pfr-path"></span><span class="pfr-kind"></span>`;
+    button.querySelector<HTMLElement>(".pfr-path")!.textContent = path;
+    button.querySelector<HTMLElement>(".pfr-kind")!.textContent = typeof file.size === "number" ? `${file.size} bytes` : "file";
+    button.addEventListener("click", (): void => {
+      insertMountedFileRef(textarea, path);
+      popover?.setAttribute("hidden", "");
+    });
+    return button;
+  }));
+}
+
+function insertMountedFileRef(textarea: HTMLTextAreaElement, path: string): void {
+  if (!path) {
+    return;
+  }
+
+  const value = textarea.value;
+  const cursor = textarea.selectionStart;
+  const prefix = value.slice(0, cursor);
+  const match = /(?:^|\s)@([^\s@`]*)$/.exec(prefix);
+  const start = match ? cursor - (match[1] || "").length - 1 : cursor;
+  const insert = `@${path} `;
+  textarea.value = `${value.slice(0, start)}${insert}${value.slice(cursor)}`;
+  const nextCursor = start + insert.length;
+  textarea.setSelectionRange(nextCursor, nextCursor);
+  textarea.dispatchEvent(new (textarea.ownerDocument.defaultView?.Event || Event)("input", { bubbles: true }));
+  textarea.focus();
 }
 
 export function createChannels(pi: PiWebSubjects): Channels {
@@ -512,7 +840,7 @@ function bindDom(disposables: Disposables, state: State, dom: ChatDom): void {
     state.channels.input$.next(dom.textarea.value);
     dom.sendButton.setAttribute("aria-disabled", dom.textarea.value.trim() ? "false" : "true");
     saveDraft(dom.textarea.value);
-    updateComposerMode(dom, dom.textarea.value);
+    updateComposerMode(dom, dom.textarea.value, hasQueuedAttachmentNames(state.selectedAttachmentNames));
     void updateAssistPopovers(state, dom, dom.textarea.value);
   });
 
@@ -536,7 +864,7 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
     if (dom.textarea.value !== value) dom.textarea.value = value;
     dom.sendButton.setAttribute("aria-disabled", value.trim() ? "false" : "true");
     saveDraft(value);
-    updateComposerMode(dom, value);
+    updateComposerMode(dom, value, hasQueuedAttachmentNames(state.selectedAttachmentNames));
     void updateAssistPopovers(state, dom, value);
   }));
 
@@ -569,26 +897,35 @@ function bindChannels(disposables: Disposables, state: State, dom: ChatDom): voi
 function submitCurrentInput(state: State): void {
   const text = state.channels.input$.getValue().trim();
   if (!text) return;
-  const attachments = [...state.selectedLocalAttachments];
-  clearLocalAttachments(state);
+  const attachments = submittedAttachmentsForText(text, state.selectedLocalAttachments);
+
+  if (!text.startsWith("!")) {
+    clearLocalAttachments(state);
+  }
+
   state.channels.submitted$.next({ text, attachments });
   clearDraft();
   state.channels.input$.next("");
+}
+
+export function submittedAttachmentsForText(text: string, attachments: FileAttachment[]): FileAttachment[] {
+  return text.trim().startsWith("!") ? [] : [...attachments];
 }
 
 async function handleSubmitted(state: State, dom: ChatDom, event: ChatInputSubmitted): Promise<void> {
   const text = event.text.trim();
   if (!text) return;
   const sessionId = syncStateToViewedSession(state, dom);
-  renderAttachmentChips(dom.attachments, []);
 
   if (text.startsWith("!")) {
-    clearPendingAttachments(state);
     addMessage(state, { role: "user", text });
     render(state, dom);
     await runShell(state, dom, text.slice(1).trim());
+    renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
     return;
   }
+
+  renderAttachmentChips(dom.attachments, []);
 
   const attachments = [...event.attachments, ...(await resolveAttachments(state, text))];
   const pendingUserMessage = addMessageToSession(state.store, sessionId, { role: "user", text, attachments });
@@ -1586,7 +1923,10 @@ function renderMountedDocumentation(chatSurface: HTMLElement): void {
 
   for (const text of [
     "Ask pi in the prompt box and press Cmd/Ctrl+Enter to send.",
-    "Use / for slash commands, @ for file references, and ! for shell commands.",
+    "Type ! then Space at the start to turn the prompt yellow and run shell commands in the workspace.",
+    "Queued file attachments hide during shell mode and reappear for the next normal prompt.",
+    "Type @ to list project files, then pick one to tag it as prompt context.",
+    "Type / at the start to open the slash command list.",
     "Chats are cached locally after you start or select a session.",
   ]) {
     const item = document.createElement("li");
@@ -2052,7 +2392,11 @@ async function runShell(state: State, dom: ChatDom, command: string): Promise<vo
     const exitCode = typeof result.exitCode === "number" ? result.exitCode : 1;
     const durationMs = typeof result.durationMs === "number" ? result.durationMs : 0;
     const output = typeof result.output === "string" ? result.output : "";
-    replaceLastRunningTool(state, `$ ${command}\n${output}${output.endsWith("\n") || !output ? "" : "\n"}[exit ${exitCode} · ${durationMs}ms${result.truncated ? " · truncated" : ""}]`, exitCode === 0 ? "ok" : "err");
+    replaceLastRunningTool(
+      state,
+      formatShellOutput(command, output, exitCode, durationMs, Boolean(result.truncated)),
+      exitCode === 0 ? "ok" : "err",
+    );
   } catch (error) {
     replaceLastRunningTool(state, `$ ${command}\n${errorText(error)}`, "err");
     state.channels.toastRequested$.next({ level: "error", message: `shell failed: ${errorText(error)}` });
@@ -2076,6 +2420,7 @@ async function loadLocalAttachments(state: State, dom: ChatDom): Promise<void> {
   state.selectedLocalAttachments = attachments;
   state.selectedAttachmentNames = attachments.map((file) => file.name || "attachment");
   renderAttachmentChips(dom.attachments, [...state.selectedAttachmentNames, ...state.selectedRefs]);
+  updateComposerMode(dom, dom.textarea.value, hasQueuedAttachmentNames(state.selectedAttachmentNames));
 }
 
 async function resolveAttachments(state: State, text: string): Promise<FileAttachment[]> {
@@ -2107,6 +2452,13 @@ async function refreshCommands(state: State, dom: ChatDom): Promise<void> {
 }
 
 async function updateAssistPopovers(state: State, dom: ChatDom, value: string): Promise<void> {
+  if (value.startsWith("!")) {
+    state.fileSearchToken += 1;
+    dom.slashPopover.hidden = true;
+    dom.refsPopover.hidden = true;
+    return;
+  }
+
   if (currentSlashQuery(value) !== null) {
     if (!state.commands.length) await refreshCommands(state, dom);
     if (dom.textarea.value !== value) return;
@@ -2167,8 +2519,18 @@ function currentFileRefQuery(value: string): string | null {
   return match ? match[1] : null;
 }
 
-function updateComposerMode(dom: ChatDom, value: string): void {
-  if (value.startsWith("!")) setComposerMode(dom, "shell");
+export function hasQueuedAttachmentNames(attachmentNames: string[]): boolean {
+  return attachmentNames.length > 0;
+}
+
+export function shellAttachmentNoteVisible(value: string, hasQueuedAttachments: boolean): boolean {
+  return value.trim().startsWith("!") && hasQueuedAttachments;
+}
+
+function updateComposerMode(dom: ChatDom, value: string, hasQueuedAttachments: boolean = false): void {
+  dom.root.toggleAttribute("data-shell-attachments", shellAttachmentNoteVisible(value, hasQueuedAttachments));
+
+  if (value.trim().startsWith("!")) setComposerMode(dom, "shell");
   else if (currentFileRefQuery(value) !== null) setComposerMode(dom, "file-ref");
   else setComposerMode(dom, "normal");
 }

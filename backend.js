@@ -15,6 +15,7 @@ import {
   rmSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,8 +66,8 @@ if (run.error) {
   process.exit(1);
 }
 
-process.stdout.write(run.stdout || "");
-process.stderr.write(run.stderr || "");
+writeSync(1, run.stdout || "");
+writeSync(2, run.stderr || "");
 process.exit(run.status ?? 1);
 
 function resolveBinary() {

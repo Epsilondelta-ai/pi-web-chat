@@ -27,6 +27,7 @@ import (
 const (
 	maxFileBytes                     = 256 * 1024
 	maxOutputBytes                   = 512 * 1024
+	maxShellOutputBytes              = 64 * 1024
 	defaultTimeoutMs                 = 30000
 	maxSearchResults                 = 30
 	maxChatMessages                  = 200
@@ -1811,11 +1812,11 @@ type cappedWriter struct {
 func (w *cappedWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.buf.Len() >= maxOutputBytes {
+	if w.buf.Len() >= maxShellOutputBytes {
 		w.truncated = true
 		return len(p), nil
 	}
-	remaining := maxOutputBytes - w.buf.Len()
+	remaining := maxShellOutputBytes - w.buf.Len()
 	if len(p) > remaining {
 		w.buf.Write(p[:remaining])
 		w.truncated = true

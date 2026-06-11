@@ -14,6 +14,11 @@ This plugin follows the modern pi-web plugin standard: pi-web core supplies `con
 - Mounted chat state follows sidebar selected-session changes through backend `sessionEventsSse` streams.
 - Chat-created/adopted sessions publish sidebar-compatible events without directly mutating sidebar `selectedSession$`.
 - Local chat/session persistence in `localStorage`.
+- Prompt triggers:
+  - Type `!` at the start and press Space to enter yellow shell-command mode for the workspace.
+    Queued file attachments are hidden while shell mode is active and reappear for the next normal prompt.
+  - Type `@` to list project files and pick one to tag as prompt context.
+  - Type `/` at the start to open the slash command list.
 
 ## Install
 
@@ -85,7 +90,7 @@ Supported prebuilt targets:
 
 - Workspace-relative path resolution rejects traversal and NUL bytes.
 - Binary and oversized files are rejected.
-- Shell execution runs in the workspace root with timeout and output cap.
+- Shell execution runs in the workspace root with timeout and a 64 KiB backend output cap before frontend rendering.
 - Frontend cleanup removes mounted plugin DOM, clears mounted CSS/badge state, and unsubscribes RxJS subscriptions.
 - `npm run security:deps` runs `bun audit`.
 - `npm run security:static` runs the local static scan.

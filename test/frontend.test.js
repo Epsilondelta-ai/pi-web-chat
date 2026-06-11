@@ -9,11 +9,15 @@ import activate, {
   createAgUiLikeRunInput,
   createChannels,
   extractRefs,
+  formatShellOutput,
   getActiveWorkspaceId,
+  hasQueuedAttachmentNames,
   mergeCommands,
   pluginStyleText,
   promptFromAgUiLikeRunInput,
   renderMessages,
+  shellAttachmentNoteVisible,
+  submittedAttachmentsForText,
 } from "../index.js";
 
 function createPiWeb() {
@@ -97,6 +101,24 @@ test("command utilities keep chat command behavior", () => {
   assert.deepEqual(extractRefs("use @README.md and `@ignored` @src/app.ts @README.md"), ["README.md", "src/app.ts"]);
 });
 
+test("shell command utilities drop submitted attachments and cap output", () => {
+  const attachments = [{ name: "note.txt", content: "hello" }];
+  const normal = submittedAttachmentsForText("ask pi", attachments);
+  const shell = submittedAttachmentsForText("   ! pwd", attachments);
+  const formatted = formatShellOutput("pwd", "x".repeat(70000), 0, 5, false);
+
+  assert.deepEqual(shell, []);
+  assert.deepEqual(normal, attachments);
+  assert.notEqual(normal, attachments);
+  assert.match(formatted, /\[exit 0 · 5ms · truncated\]/);
+  assert.ok(formatted.length < 65050);
+  assert.equal(hasQueuedAttachmentNames(["note.txt"]), true);
+  assert.equal(hasQueuedAttachmentNames([]), false);
+  assert.equal(shellAttachmentNoteVisible("! pwd", true), true);
+  assert.equal(shellAttachmentNoteVisible("! pwd", false), false);
+  assert.equal(shellAttachmentNoteVisible("ask pi", true), false);
+});
+
 test("plugin styles target mounted chat surfaces", () => {
   const styles = pluginStyleText();
   assert.match(styles, /pi-web-chat-surface/);
@@ -105,6 +127,8 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /body\.sys/);
   assert.match(styles, /resize: none/);
   assert.match(styles, /focus-visible/);
+  assert.match(styles, /data-composer-mode="shell"[\s\S]*pi-web-chat-attachments[\s\S]*display: none/);
+  assert.match(styles, /data-composer-mode="shell"\]\[data-shell-attachments\][\s\S]*pi-web-chat-shell-note[\s\S]*display: block/);
 });
 
 test("legacy chat renderer remains exported", async () => {
@@ -1590,6 +1614,112 @@ test("mounted submit gracefully works without sidebar plugin", async () => {
     await tick();
 
     assert.match(window.document.querySelector(".term-inner").textContent, /solo/);
+    cleanup();
+  });
+});
+
+test("mounted prompt triggers shell mode, slash commands, and file refs", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "commands") {
+          return { commands: [{ command: "/review", description: "review files", template: "/review " }] };
+        }
+
+        if (method === "searchFiles") {
+          return { files: [{ path: "src/index.ts", name: "index.ts", size: 123 }] };
+        }
+
+        if (method === "resolveContext") {
+          return { attachments: [{ path: "src/index.ts", name: "index.ts", content: "source" }] };
+        }
+
+        if (method === "runShell") {
+          return { output: "x".repeat(70000), exitCode: 0, durationMs: 5 };
+        }
+
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: "trigger-session",
+            messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const submitted = [];
+    globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const promptBar = window.document.querySelector(".prompt-bar");
+    const attachButton = window.document.querySelector(".attach-btn");
+    const fileInput = window.document.querySelector("[data-file-input]");
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new window.File(["hello"], "note.txt", { type: "text/plain" })],
+    });
+    fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await tick();
+    assert.match(window.document.querySelector(".attach-chips").textContent, /note\.txt/);
+
+    textarea.value = "!";
+    textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    assert.equal(promptBar.classList.contains("shell-mode"), true);
+    assert.equal(attachButton.disabled, true);
+    assert.equal(textarea.value, "");
+    assert.equal(window.document.querySelector(".attach-chips").hidden, true);
+    assert.equal(window.document.querySelector(".shell-attachment-note").hidden, false);
+    assert.match(window.document.querySelector(".shell-attachment-note").textContent, /queued attachments are hidden/);
+    textarea.value = "@README.md";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick(150);
+    assert.equal(window.document.querySelector(".attach-chips").hidden, true);
+    assert.equal(window.document.querySelector(".prompt-file-ref-pop").hidden, true);
+    textarea.value = "pwd";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    assert.ok(backendCalls.some((call) => call.method === "runShell" && call.input.data.command === "pwd"));
+    assert.equal(submitted[0].attachments.length, 0);
+    assert.match(window.document.querySelector(".term-inner").textContent, /\$ pwd\n/);
+    assert.match(window.document.querySelector(".term-inner").textContent, /\[exit 0 · 5ms · truncated\]/);
+    assert.ok(window.document.querySelector(".term-inner").textContent.length < 65000);
+    assert.equal(promptBar.classList.contains("shell-mode"), false);
+    assert.equal(attachButton.disabled, false);
+    assert.equal(window.document.querySelector(".shell-attachment-note").hidden, true);
+    assert.match(window.document.querySelector(".attach-chips").textContent, /note\.txt/);
+
+    textarea.value = "/";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick();
+    assert.equal(window.document.querySelector(".slash-pop").hidden, false);
+    assert.equal(window.document.querySelector(".slash-item").dataset.slash, "/review");
+    window.document.querySelector(".slash-item").click();
+    assert.equal(textarea.value, "/review ");
+
+    textarea.value = "use @";
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick(150);
+    assert.equal(window.document.querySelector(".prompt-file-ref-pop").hidden, false);
+    window.document.querySelector(".prompt-file-ref-item").click();
+    assert.equal(textarea.value, "use @src/index.ts ");
+    assert.match(window.document.querySelector(".attach-chips").textContent, /src\/index\.ts/);
+
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    const submitCall = backendCalls.find((call) => call.method === "submitPrompt");
+    assert.ok(submitCall.input.data.attachments.some((attachment) => attachment.path === "src/index.ts"));
     cleanup();
   });
 });
