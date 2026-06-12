@@ -85,6 +85,7 @@ type State = {
 
 type MountedState = {
   backendChatToken: number;
+  pendingPromptEchoIds: Map<string, string>;
   runEventsAbort?: AbortController;
   sessionEventsAbort?: AbortController;
 };
@@ -230,7 +231,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const selected = readSidebarSelection(context);
   persistSidebarSelection(context, selected || undefined);
   const mountedStore = selected?.sessionId ? loadStore(selected.sessionId) : createNoSelectionStore();
-  const mountedState: MountedState = { backendChatToken: 0 };
+  const mountedState: MountedState = { backendChatToken: 0, pendingPromptEchoIds: new Map<string, string>() };
 
   if (!selected?.sessionId) {
     renderMountedDocumentation(chatSurface);
@@ -328,10 +329,19 @@ function bindMountedComposer(
     sync();
 
     if (!text) {
+      textarea.value = "";
+      sync();
       return;
     }
 
     sendButton.disabled = true;
+    textarea.value = "";
+
+    if (fileInput) {
+      fileInput.value = "";
+    }
+
+    sync();
 
     try {
       if (triggers.shellMode) {
@@ -346,13 +356,6 @@ function bindMountedComposer(
         syncAttachments();
       }
 
-      if (textarea.value.trim() === text) {
-        textarea.value = "";
-      }
-
-      if (fileInput) {
-        fileInput.value = "";
-      }
     } catch (error) {
       if (!isAbortError(error)) {
         renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)], store.activeSessionId);
@@ -1045,6 +1048,7 @@ async function submitMountedPromptWithStreaming(
     createdAt: Date.now(),
   };
   const submitSession = sessionById(store, targetSessionId);
+  mountedState.pendingPromptEchoIds.set(targetSessionId, pendingUserMessage.id);
   submitSession.messages.push(pendingUserMessage);
   submitSession.updatedAt = Date.now();
   saveStore(store);
@@ -1077,6 +1081,7 @@ async function submitMountedPromptWithStreaming(
     }
 
     moveMessageBetweenSessions(store, previousSessionId, targetSessionId, pendingUserMessage.id);
+    movePendingPromptEchoId(mountedState.pendingPromptEchoIds, previousSessionId, targetSessionId);
   }
 
   if (typeof start.runId !== "string" || !start.runId) {
@@ -1088,10 +1093,15 @@ async function submitMountedPromptWithStreaming(
     }
 
     emitBackendWarnings(response);
-    const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId);
+    const responseSessionId = typeof response.activeSessionId === "string" && response.activeSessionId
+      ? response.activeSessionId
+      : targetSessionId;
+    const echoId = pendingPromptEchoId(mountedState.pendingPromptEchoIds, targetSessionId);
+    const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId, echoId);
+    clearMatchedPendingPromptEchoId(mountedState.pendingPromptEchoIds, responseSessionId, messages, response.messages, echoId);
 
-    if (store.activeSessionId === targetSessionId) {
-      renderMountedBackendMessages(chatSurface, messages, targetSessionId);
+    if (store.activeSessionId === targetSessionId || store.activeSessionId === responseSessionId) {
+      renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     }
 
     if (mountedState.runEventsAbort === runController) {
@@ -1506,7 +1516,11 @@ async function openMountedSessionEvents(
         return;
       }
 
-      const messages = applyBackendResponseToMountedStore(context, store, chatStateEventResponse(event), "chatState");
+      const response = chatStateEventResponse(event);
+      const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
+      const echoId = pendingPromptEchoId(mountedState.pendingPromptEchoIds, sessionIdForEcho);
+      const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoId);
+      clearMatchedPendingPromptEchoId(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoId);
       if (messages.length) {
         render.request();
       }
@@ -1541,7 +1555,10 @@ async function refreshMountedBackendChatState(
       return;
     }
 
-    const messages = applyBackendResponseToMountedStore(context, store, response, "chatState");
+    const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
+    const echoId = pendingPromptEchoId(mountedState.pendingPromptEchoIds, sessionIdForEcho);
+    const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoId);
+    clearMatchedPendingPromptEchoId(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoId);
     if (messages.length) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     }
@@ -1603,6 +1620,7 @@ function applyBackendResponseToMountedStore(
   store: ChatStore,
   response: BackendResponse,
   reason: string,
+  optimisticEchoId = "",
 ): ChatMessage[] {
   const responseMessages = sanitizeChatMessages(response.messages);
 
@@ -1629,7 +1647,7 @@ function applyBackendResponseToMountedStore(
     return [];
   }
 
-  const nextMessages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
+  const nextMessages = mergeChatMessages(session.messages, responseMessages, optimisticEchoId).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
   }
@@ -1675,6 +1693,7 @@ function applyBackendResponseToMountedSession(
   response: BackendResponse,
   reason: string,
   fallbackSessionId: string,
+  optimisticEchoId = "",
 ): ChatMessage[] {
   const responseMessages = sanitizeChatMessages(response.messages);
   const responseSessionId = typeof response.activeSessionId === "string" && response.activeSessionId
@@ -1696,13 +1715,17 @@ function applyBackendResponseToMountedSession(
     }
   }
 
+  if (optimisticEchoId && responseSessionId !== fallbackSessionId) {
+    moveMessageBetweenSessions(store, fallbackSessionId, responseSessionId, optimisticEchoId);
+  }
+
   const session = sessionById(store, responseSessionId);
 
   if (!responseMessages.length) {
     return [];
   }
 
-  const nextMessages = mergeChatMessages(session.messages, responseMessages).slice(-MAX_MESSAGES_PER_SESSION);
+  const nextMessages = mergeChatMessages(session.messages, responseMessages, optimisticEchoId).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
   }
@@ -2723,11 +2746,78 @@ function sessionForBackendState(store: ChatStore, backendSessionId: string | nul
   return session;
 }
 
-function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMessage[]): ChatMessage[] {
+function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMessage[], optimisticEchoId = ""): ChatMessage[] {
   const merged = new Map<string, ChatMessage>();
   for (const message of localMessages) merged.set(message.id, message);
-  for (const message of backendMessages) merged.set(message.id, { ...merged.get(message.id), ...message });
+
+  for (const message of backendMessages) {
+    const duplicate = findOptimisticEchoMessage(localMessages, message, optimisticEchoId);
+
+    if (duplicate) {
+      merged.delete(duplicate.id);
+      merged.set(message.id, message);
+      continue;
+    }
+
+    merged.set(message.id, { ...merged.get(message.id), ...message });
+  }
+
   return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function findOptimisticEchoMessage(
+  localMessages: ChatMessage[],
+  backendMessage: ChatMessage,
+  optimisticEchoId: string,
+): ChatMessage | undefined {
+  if (!optimisticEchoId || backendMessage.role !== "user" || !backendMessage.text.trim()) {
+    return undefined;
+  }
+
+  if (localMessages.some((message: ChatMessage): boolean => message.id === backendMessage.id)) {
+    return undefined;
+  }
+
+  const localMessage = localMessages.find((message: ChatMessage): boolean => message.id === optimisticEchoId);
+
+  if (localMessage?.role !== backendMessage.role || localMessage.text.trim() !== backendMessage.text.trim()) {
+    return undefined;
+  }
+
+  return localMessage;
+}
+
+function pendingPromptEchoId(pendingPromptEchoIds: Map<string, string>, sessionId: string): string {
+  return pendingPromptEchoIds.get(sessionId) || "";
+}
+
+function movePendingPromptEchoId(pendingPromptEchoIds: Map<string, string>, fromSessionId: string, toSessionId: string): void {
+  const echoId = pendingPromptEchoIds.get(fromSessionId) || "";
+
+  if (!echoId) {
+    return;
+  }
+
+  pendingPromptEchoIds.delete(fromSessionId);
+  pendingPromptEchoIds.set(toSessionId, echoId);
+}
+
+function clearMatchedPendingPromptEchoId(
+  pendingPromptEchoIds: Map<string, string>,
+  sessionId: string,
+  mergedMessages: ChatMessage[],
+  _rawBackendMessages: unknown,
+  optimisticEchoId: string,
+): void {
+  if (!optimisticEchoId || !mergedMessages.length) {
+    return;
+  }
+
+  if (mergedMessages.some((message: ChatMessage): boolean => message.id === optimisticEchoId)) {
+    return;
+  }
+
+  pendingPromptEchoIds.delete(sessionId);
 }
 
 function render(state: State, dom: ChatDom): void {

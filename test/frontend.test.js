@@ -993,6 +993,251 @@ test("mounted submit persists backend session and emits sidebar-compatible event
   });
 });
 
+test("mounted submit clears the submitted prompt immediately", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    let releaseStart;
+    const startReady = new Promise((resolve) => { releaseStart = resolve; });
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          await startReady;
+          return { activeSessionId: "clear-session", messages: [] };
+        }
+
+        if (method === "submitPrompt") {
+          return { activeSessionId: input.data.sessionId, messages: [] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "  clear me  ";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(textarea.value, "");
+    releaseStart();
+    await tick();
+    cleanup();
+  });
+});
+
+test("mounted submit clears whitespace-only input", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const cleanup = activate({ app, backend: async () => ({}), mount: createMount(window, app) });
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "   ";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(textarea.value, "");
+    cleanup();
+  });
+});
+
+test("mounted submit deduplicates backend echo of current optimistic user prompt", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "dedupe-session" };
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: "dedupe-session",
+            messages: [{ id: "backend-user", role: "user", text: input.data.text, createdAt: Date.now() }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "same prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "dedupe-session");
+    const userMessages = session.messages.filter((message) => message.role === "user" && message.text === "same prompt");
+    assert.equal(userMessages.length, 1);
+    assert.equal(userMessages[0].id, "backend-user");
+    cleanup();
+  });
+});
+
+test("mounted submit deduplicates backend-created session echo", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: "backend-created-dedupe",
+            messages: [{ id: "backend-created-user", role: "user", text: input.data.text, createdAt: Date.now() }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "created echo";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "backend-created-dedupe");
+    const userMessages = session.messages.filter((message) => message.role === "user" && message.text === "created echo");
+    assert.equal(userMessages.length, 1);
+    assert.equal(userMessages[0].id, "backend-created-user");
+    assert.match(text, /created echo/);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps repeated same-text prompt when backend returns existing message", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    let submitCount = 0;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "repeat-session" };
+        }
+
+        if (method === "submitPrompt") {
+          submitCount += 1;
+          return {
+            activeSessionId: "repeat-session",
+            messages: [{ id: "backend-user-1", role: "user", text: input.data.text, createdAt: 1 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "repeat prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    textarea.value = "repeat prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "repeat-session");
+    const userMessages = session.messages.filter((message) => message.role === "user" && message.text === "repeat prompt");
+    assert.equal(submitCount, 2);
+    assert.equal(userMessages.length, 2);
+    assert.ok(userMessages.some((message) => message.id === "backend-user-1"));
+    cleanup();
+  });
+});
+
+test("mounted submit deduplicates streaming chat state echo of current prompt", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "stream-echo-session", runId: "stream-echo-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+              controller.close();
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const placeholder = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "stream-echo-session",
+            messages: [{ id: "assistant-placeholder", role: "assistant", text: "", createdAt: 0 }],
+          });
+          const echo = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "stream-echo-session",
+            messages: [{ id: "backend-stream-user", role: "user", text: "stream echo", createdAt: 1 }],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${placeholder}\n\n`));
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${echo}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream echo";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "stream-echo-session");
+    const userMessages = session.messages.filter((message) => message.role === "user" && message.text === "stream echo");
+    assert.equal(userMessages.length, 1);
+    assert.equal(userMessages[0].id, "backend-stream-user");
+    cleanup();
+  });
+});
+
 test("mounted submit emits backend warnings as toasts", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
