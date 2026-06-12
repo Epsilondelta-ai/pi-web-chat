@@ -10,7 +10,7 @@ This plugin follows the modern pi-web plugin standard: pi-web core supplies `con
 - Sidebar RxJS integration when `globalThis.piWeb` is available:
   - consumes `plugin.pi-web-sidebar.selectedSession`
   - emits `plugin.pi-web-sidebar.event`
-- pi-web-sidebar integration through `globalThis.piWebSidebar`, `app.piWebSidebar`, and sidebar active-session storage keys.
+- pi-web-sidebar integration through live `globalThis.piWebSidebar` / `app.piWebSidebar` snapshots and selection channels.
 - Mounted chat state follows sidebar selected-session changes through backend `sessionEventsSse` streams.
 - Chat-created/adopted sessions publish sidebar-compatible events without directly mutating sidebar `selectedSession$`.
 - Local chat/session persistence in `localStorage`.
@@ -70,7 +70,7 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
-- `chatState` with `{ sessionId, workspacePath }` → `{ activeSessionId, messages }`; fallback state request for hosts without backend streams
+- `chatState` with `{ sessionId, workspacePath }` → `{ activeSessionId, messages }`; empty `sessionId` returns an empty state
 - `startPrompt` with `{ text, attachments, sessionId, workspacePath }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
 - `sessionEventsSse` with `{ sessionId, workspacePath }` → SSE `chat.state` frames for session transcript state

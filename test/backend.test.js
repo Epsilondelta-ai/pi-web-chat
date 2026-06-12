@@ -813,6 +813,22 @@ test("chatState reads selected session files directly", async () => {
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "from file"]]);
 });
 
+test("chatState without a session id does not fall back to the newest session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "newer_recent-session.jsonl"), [
+    JSON.stringify({ type: "session", id: "recent-session" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "stale default prompt" } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, {});
+
+  assert.equal(result.activeSessionId, "");
+  assert.deepEqual(result.messages, []);
+  assert.equal(result.isStreaming, false);
+});
+
 test("chatState reads nested subagent session files by id", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const childDir = join(root, ".pi", "sessions", "parent-session", "run-abc", "run-0");

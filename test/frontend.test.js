@@ -282,7 +282,42 @@ test("mounted activation shows guide when no selected or stored session exists",
   });
 });
 
-test("mounted activation loads stored session instead of guide", async () => {
+test("mounted activation ignores stored sessions when no sidebar session is selected", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    window.localStorage.setItem("plugin.pi-web-sidebar.activeSessionId", "stale-sidebar-session");
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{
+        id: "stored-session",
+        title: "Stored",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "m1", role: "assistant", text: "stored transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    assert.match(text, /pi-web-chat guide/);
+    assert.doesNotMatch(text, /stored transcript/);
+    assert.equal(backendCalls.some((call) => call.method === "chatState"), false);
+    cleanup();
+  });
+});
+
+test("mounted activation does not persist a temp session before selection or submit", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
@@ -305,8 +340,56 @@ test("mounted activation loads stored session instead of guide", async () => {
     await tick();
     await tick();
 
-    assert.match(window.document.querySelector(".term-inner").textContent, /stored transcript/);
-    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "stored-session");
+    assert.deepEqual(store.sessions.map((session) => session.id), ["stored-session"]);
+    cleanup();
+  });
+});
+
+test("mounted submit without selected session preserves cached sessions and prunes temp session", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{
+        id: "stored-session",
+        title: "Stored",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "m1", role: "assistant", text: "stored transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "new-session" };
+        }
+
+        if (method === "submitPrompt") {
+          return { activeSessionId: "new-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "start from guide";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "new-session");
+    assert.ok(store.sessions.some((session) => session.id === "stored-session"));
+    assert.ok(store.sessions.some((session) => session.id === "new-session"));
+    assert.equal(store.sessions.filter((session) => session.title === "New chat" && session.messages.length === 0).length, 0);
     cleanup();
   });
 });
@@ -1365,8 +1448,8 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards.every((card) => card.dataset.collapsed === "true"), true);
     assert.equal(cards.every((card) => card.querySelector(".tc-body") === null), true);
     assert.equal(cards[3].querySelector(".tc-head").getAttribute("aria-expanded"), "false");
-    assert.equal(cards[3].querySelector(".tc-head").getAttribute("aria-label"), "Show bash output");
-    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Show read output");
+    assert.equal(cards[3].querySelector(".tc-head").getAttribute("aria-label"), "Show bash output, running, arguments present");
+    assert.equal(cards[0].querySelector(".tc-head").getAttribute("aria-label"), "Show read output, done");
     assert.ok(cards[0].querySelector("[data-tool-icon='book-open']"));
     assert.ok(cards[1].querySelector("[data-tool-icon='git-branch']"));
     assert.equal(cards[1].querySelector(".tc-args").textContent, JSON.stringify({ command: "git status" }));
@@ -1407,7 +1490,7 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     otherCards[0].querySelector(".tc-head").click();
     assert.equal(otherCards[0].dataset.collapsed, "false");
     assert.equal(otherCards[0].querySelector(".tc-head").getAttribute("aria-expanded"), "true");
-    assert.equal(otherCards[0].querySelector(".tc-head").getAttribute("aria-label"), "Hide read output");
+    assert.equal(otherCards[0].querySelector(".tc-head").getAttribute("aria-label"), "Hide read output, done");
     assert.equal(otherCards[0].querySelector(".tc-body").textContent, "README.md");
     cleanup();
 
@@ -1823,6 +1906,103 @@ function createMount(window, app) {
 function tick(ms = 0) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+test("mounted sidebar clears handle null channels and stale async results", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const selectedSession$ = new BehaviorSubject(null);
+    let resolveChatState;
+    app.piWebSidebar = {
+      channels: { selectedSession$ },
+      getSnapshot: () => ({ activeSessionId: "snapshot-session", activeWorkspaceId: "workspace-1" }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.sessionId === "snapshot-session") {
+          await new Promise((resolve) => { resolveChatState = resolve; });
+          return { activeSessionId: "snapshot-session", messages: [{ id: "m1", role: "assistant", text: "stale snapshot", createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    selectedSession$.next(null);
+    await tick();
+    resolveChatState();
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /stale snapshot/);
+    cleanup();
+  });
+});
+
+test("mounted sidebar clears session.activeId null and stale submit results", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    let resolveStart;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          await new Promise((resolve) => { resolveStart = resolve; });
+          return { activeSessionId: "stale-submit-session" };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stale submit";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    globalThis.piWeb.behaviorSubject("session.activeId", null).next(null);
+    await tick();
+    resolveStart();
+    await tick();
+    await tick();
+
+    const stored = window.localStorage.getItem("pi-web-chat.sessions.v1") || "";
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.equal(stored.includes("stale submit"), false);
+    cleanup();
+  });
+});
+
+test("mounted tool aria labels summarize args without full JSON", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "aria-session" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? {
+        activeSessionId: "aria-session",
+        messages: [{ id: "a1", role: "assistant", text: "", createdAt: 1, toolCalls: [
+          { id: "long", name: "bash", args: { command: "x".repeat(300) }, argsStatus: "present", text: "", status: "ok" },
+        ] }],
+      } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const head = window.document.querySelector(".tc-head");
+    assert.equal(head.getAttribute("aria-label"), "Show bash output, done, arguments present");
+    assert.match(window.document.querySelector(".tc-args").textContent, /xxx/);
+    cleanup();
+  });
+});
 
 async function withWindow(callback) {
   const window = new Window();
