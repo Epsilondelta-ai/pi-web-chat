@@ -13,6 +13,8 @@ import {
   renderMessages,
   renderSlashCommands,
   setAttachButtonMode,
+  toolArgsBodyText,
+  toolArgsInlineText,
   setComposerMode,
   type ChatDom,
 } from "./dom";
@@ -193,6 +195,8 @@ export {
   pluginStyleText,
   renderMessages,
   setComposerMode,
+  toolArgsBodyText,
+  toolArgsInlineText,
 };
 export { chatEventsToAgUiLikeEvents, createAgUiLikeRunInput, promptFromAgUiLikeRunInput } from "./ag-ui";
 
@@ -350,7 +354,9 @@ function bindMountedComposer(
         fileInput.value = "";
       }
     } catch (error) {
-      renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)], store.activeSessionId);
+      if (!isAbortError(error)) {
+        renderMountedBackendMessages(chatSurface, [mountedPromptErrorMessage(error)], store.activeSessionId);
+      }
     } finally {
       sendButton.disabled = false;
       syncMode();
@@ -761,7 +767,7 @@ function readSidebarSelection(context: PluginContext): SidebarSelectedSession | 
   const snapshotSessionId = snapshot?.activeSessionId || "";
   const snapshotWorkspaceId = snapshot?.activeWorkspaceId || "";
 
-  if (snapshotSessionId) {
+  if (snapshotSessionId && context.app?.dataset.clearedSessionId !== snapshotSessionId) {
     return { sessionId: snapshotSessionId, workspaceId: snapshotWorkspaceId || undefined };
   }
 
@@ -775,12 +781,19 @@ function persistSidebarSelection(context: PluginContext, selected: SidebarSelect
   }
 
   if (selected?.sessionId) {
+    delete context.app?.dataset.clearedSessionId;
     context.app?.setAttribute("data-active-session-id", selected.sessionId);
     storeString(SIDEBAR_ACTIVE_SESSION_KEY, selected.sessionId);
   }
 }
 
 function clearSidebarActiveSession(context: PluginContext): void {
+  const selected = readSidebarSelection(context);
+
+  if (selected?.sessionId && context.app) {
+    context.app.dataset.clearedSessionId = selected.sessionId;
+  }
+
   context.app?.removeAttribute("data-active-session-id");
   removeStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
   globalThis.piWeb?.behaviorSubject<string | null>("session.activeId", null).next(null);
@@ -1038,6 +1051,12 @@ async function submitMountedPromptWithStreaming(
   renderMountedBackendMessages(chatSurface, submitSession.messages, targetSessionId);
 
   const start = await startStreamingPrompt(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+
+  if (runController.signal.aborted) {
+    discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+    return;
+  }
+
   emitBackendWarnings(start);
 
   if (typeof start.activeSessionId === "string" && start.activeSessionId) {
@@ -1062,6 +1081,12 @@ async function submitMountedPromptWithStreaming(
 
   if (typeof start.runId !== "string" || !start.runId) {
     const response = await submitPromptToPluginBackend(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
+
+    if (runController.signal.aborted) {
+      discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+      return;
+    }
+
     emitBackendWarnings(response);
     const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId);
 
@@ -1088,7 +1113,7 @@ async function submitMountedPromptWithStreaming(
       targetWorkspace.id,
       assistant,
       (): void => {
-        if (store.activeSessionId === targetSessionId) {
+        if (!runController.signal.aborted && store.activeSessionId === targetSessionId) {
           renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
         }
       },
@@ -1100,9 +1125,21 @@ async function submitMountedPromptWithStreaming(
     }
   }
 
-  if (store.activeSessionId === targetSessionId) {
+  if (!runController.signal.aborted && store.activeSessionId === targetSessionId) {
     void openMountedSessionEvents(context, chatSurface, store, mountedState, targetSessionId, targetWorkspace.path, targetWorkspace.id);
   }
+}
+
+function discardMountedPendingMessage(store: ChatStore, sessionId: string, messageId: string): void {
+  const session = store.sessions.find((item) => item.id === sessionId);
+
+  if (!session) {
+    return;
+  }
+
+  session.messages = session.messages.filter((message) => message.id !== messageId);
+  removeEmptyInactiveSession(store, session.id);
+  saveStore(store);
 }
 
 async function consumeStreamingRun(
@@ -1683,8 +1720,12 @@ function bindMountedSidebarSelection(
   store: ChatStore,
   mountedState: MountedState,
 ): void {
-  const onSelected = (selected: SidebarSelectedSession | null): void => {
+  const onSelected = (selected: SidebarSelectedSession | null, ignoreEmptySelection: boolean): void => {
     if (!selected?.sessionId) {
+      if (!ignoreEmptySelection) {
+        clearMountedSidebarSelection(context, chatSurface, store, mountedState, true);
+      }
+
       return;
     }
 
@@ -1707,14 +1748,18 @@ function bindMountedSidebarSelection(
     const selected = selectedSessionFromSidebarEvent(context, event);
 
     if (selected) {
-      onSelected(selected);
+      onSelected(selected, false);
     }
   };
   const sidebarSelection = context.app?.piWebSidebar?.channels?.selectedSession$ || globalThis.piWebSidebar?.channels?.selectedSession$;
   const sidebarEvents = context.app?.piWebSidebar?.channels?.events$ || globalThis.piWebSidebar?.channels?.events$;
 
   if (sidebarSelection) {
-    disposables.add(sidebarSelection.subscribe(onSelected));
+    let isInitialSelection = true;
+    disposables.add(sidebarSelection.subscribe((selected: SidebarSelectedSession | null): void => {
+      onSelected(selected, isInitialSelection);
+      isInitialSelection = false;
+    }));
   }
 
   if (sidebarEvents) {
@@ -1728,22 +1773,59 @@ function bindMountedSidebarSelection(
       const workspaceId = typeof detail.workspaceId === "string" ? detail.workspaceId : "";
 
       if (sessionId) {
-        onSelected({ sessionId, workspaceId: workspaceId || undefined });
+        onSelected({ sessionId, workspaceId: workspaceId || undefined }, false);
       }
     });
   }
 
   if (globalThis.piWeb) {
-    disposables.add(globalThis.piWeb.behaviorSubject<SidebarSelectedSession | null>(SIDEBAR_SELECTED_SESSION_CHANNEL, readSidebarSelection(context)).subscribe(onSelected));
+    let isInitialPiWebSelection = true;
+    disposables.add(globalThis.piWeb.behaviorSubject<SidebarSelectedSession | null>(SIDEBAR_SELECTED_SESSION_CHANNEL, readSidebarSelection(context)).subscribe((selected: SidebarSelectedSession | null): void => {
+      onSelected(selected, isInitialPiWebSelection);
+      isInitialPiWebSelection = false;
+    }));
     disposables.add(globalThis.piWeb.subject<SidebarActionEvent>(SIDEBAR_EVENT_CHANNEL).subscribe(onSidebarEvent));
+    let isInitialActiveSession = true;
     disposables.add(globalThis.piWeb.behaviorSubject<string | null>("session.activeId", null).subscribe((sessionId: string | null): void => {
       if (!sessionId) {
+        if (!isInitialActiveSession) {
+          clearMountedSidebarSelection(context, chatSurface, store, mountedState, false);
+        }
+
+        isInitialActiveSession = false;
         return;
       }
 
-      onSelected({ sessionId, workspaceId: context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || undefined });
+      isInitialActiveSession = false;
+      onSelected({ sessionId, workspaceId: context.app?.dataset.activeWorkspaceId || readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY) || undefined }, false);
     }));
   }
+}
+
+function clearMountedSidebarSelection(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+  publish: boolean,
+): void {
+  mountedState.backendChatToken += 1;
+  mountedState.runEventsAbort?.abort();
+  mountedState.sessionEventsAbort?.abort();
+  store.activeSessionId = "";
+  saveStore(store);
+
+  if (publish) {
+    clearSidebarActiveSession(context);
+  } else {
+    const selected = readSidebarSelection(context);
+
+    if (selected?.sessionId && context.app) {
+      context.app.dataset.clearedSessionId = selected.sessionId;
+    }
+  }
+
+  renderMountedDocumentation(chatSurface);
 }
 
 function syncStateToViewedSession(state: State, dom: ChatDom): string {
@@ -2124,7 +2206,7 @@ function renderMountedToolCard(tool: ChatToolCall, toolKey: string): HTMLElement
   head.className = "tc-head";
   head.title = collapsed ? "Show tool output" : "Hide tool output";
   head.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${tool.name || "tool"} output`);
+  head.setAttribute("aria-label", mountedToolAriaLabel(tool, collapsed));
   head.append(toolGlyph(tool), toolName(tool), toolArgs(tool), toolMeta(tool, collapsed));
 
   if (!collapsed) {
@@ -2136,10 +2218,30 @@ function renderMountedToolCard(tool: ChatToolCall, toolKey: string): HTMLElement
   return card;
 }
 
+function mountedToolAriaLabel(tool: ChatToolCall, collapsed: boolean): string {
+  const action = collapsed ? "Show" : "Hide";
+  const status = tool.status === "running" ? "running" : tool.status === "err" ? "failed" : "done";
+  const args = mountedToolAriaArgsText(tool);
+  const argsLabel = args ? `, ${args}` : "";
+  return `${action} ${tool.name || "tool"} output, ${status}${argsLabel}`;
+}
+
+function mountedToolAriaArgsText(tool: ChatToolCall): string {
+  if (tool.argsStatus === "present") {
+    return "arguments present";
+  }
+
+  if (tool.argsStatus) {
+    return toolArgsInlineText(tool);
+  }
+
+  return tool.args ? "arguments present" : "";
+}
+
 function renderMountedToolBody(tool: ChatToolCall): HTMLElement {
   const body = document.createElement("pre");
   body.className = "tc-body";
-  body.textContent = tool.text || mountedToolBodyArgsText(tool);
+  body.textContent = tool.text || toolArgsBodyText(tool);
   return body;
 }
 
@@ -2221,7 +2323,7 @@ function toggleMountedToolCard(card: HTMLElement, head: HTMLElement, tool: ChatT
 
   card.dataset.collapsed = collapsed ? "true" : "false";
   head.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  head.setAttribute("aria-label", `${collapsed ? "Show" : "Hide"} ${card.dataset.tool || "tool"} output`);
+  head.setAttribute("aria-label", mountedToolAriaLabel(tool, collapsed));
   head.title = collapsed ? "Show tool output" : "Hide tool output";
   const toggle = head.querySelector<HTMLElement>(".tc-toggle-label");
 
@@ -2255,7 +2357,7 @@ function toolName(tool: ChatToolCall): HTMLElement {
 function toolArgs(tool: ChatToolCall): HTMLElement {
   const args = document.createElement("span");
   args.className = "tc-args";
-  args.textContent = mountedToolArgsText(tool);
+  args.textContent = toolArgsInlineText(tool);
   return args;
 }
 
@@ -2294,51 +2396,11 @@ function toolCaret(collapsed: boolean): HTMLElement {
   return wrap;
 }
 
-function mountedToolArgsText(tool: ChatToolCall): string {
-  if (tool.argsStatus === "truncated") {
-    return "arguments truncated";
-  }
-  if (tool.argsStatus === "omitted") {
-    return "arguments omitted";
-  }
-  if (tool.argsStatus === "unavailable") {
-    return "arguments unavailable";
-  }
-  if (tool.argsStatus === "empty") {
-    return "no arguments";
-  }
-  if (!tool.args) {
-    return "";
-  }
-
-  return JSON.stringify(tool.args);
-}
-
-function mountedToolBodyArgsText(tool: ChatToolCall): string {
-  if (tool.argsStatus === "truncated") {
-    return "arguments truncated: too large to display";
-  }
-  if (tool.argsStatus === "omitted") {
-    return "arguments omitted: response too large";
-  }
-  if (tool.argsStatus === "unavailable") {
-    return "arguments unavailable";
-  }
-  if (tool.argsStatus === "empty") {
-    return "no arguments";
-  }
-  if (!tool.args) {
-    return "arguments unavailable";
-  }
-
-  return JSON.stringify(tool.args, null, 2);
-}
-
 function toolIconName(tool: ChatToolCall): ToolIconName | undefined {
   const name = normalizeToolName(tool.name);
 
   if (["bash", "shell", "sh", "zsh", "terminal"].includes(name)) {
-    return commandIconName(mountedToolArgsText(tool).toLowerCase()) || "terminal";
+    return commandIconName(toolArgsInlineText(tool).toLowerCase()) || "terminal";
   }
 
   return TOOL_ICON_NAMES[name];
@@ -2965,6 +3027,10 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function id(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || /aborted|abort/i.test(error.message));
 }
 
 function errorText(error: unknown): string {

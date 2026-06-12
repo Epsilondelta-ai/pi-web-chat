@@ -164,7 +164,7 @@ function renderMessage(message: ChatMessage): HTMLElement {
       const summary = document.createElement("summary");
       summary.textContent = `${tool.name} · ${tool.status}`;
       const content = document.createElement("pre");
-      content.textContent = tool.text || toolBodyArgsText(tool);
+      content.textContent = tool.text || toolArgsBodyText(tool);
       block.append(summary, content);
       tools.append(block);
     }
@@ -188,7 +188,27 @@ function renderMessage(message: ChatMessage): HTMLElement {
   return item;
 }
 
-function toolBodyArgsText(tool: ChatToolCall): string {
+export function toolArgsInlineText(tool: ChatToolCall): string {
+  if (tool.argsStatus === "truncated") {
+    return "arguments truncated";
+  }
+  if (tool.argsStatus === "omitted") {
+    return "arguments omitted";
+  }
+  if (tool.argsStatus === "unavailable") {
+    return "arguments unavailable";
+  }
+  if (tool.argsStatus === "empty") {
+    return "no arguments";
+  }
+  if (!tool.args) {
+    return "";
+  }
+
+  return JSON.stringify(tool.args);
+}
+
+export function toolArgsBodyText(tool: ChatToolCall): string {
   if (tool.argsStatus === "truncated") {
     return "arguments truncated: too large to display";
   }
