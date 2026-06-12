@@ -225,15 +225,14 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
   const selected = readSidebarSelection(context);
   persistSidebarSelection(context, selected || undefined);
-  const shouldShowDocumentation: boolean = !selected?.sessionId && !hasStoredSessions();
-  const mountedStore = loadStore(selected?.sessionId || "");
+  const mountedStore = selected?.sessionId ? loadStore(selected.sessionId) : createNoSelectionStore();
   const mountedState: MountedState = { backendChatToken: 0 };
 
-  if (shouldShowDocumentation) {
+  if (!selected?.sessionId) {
     renderMountedDocumentation(chatSurface);
   } else {
     renderMountedBackendMessages(chatSurface, activeSession(mountedStore).messages, mountedStore.activeSessionId);
-    void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected?.sessionId || mountedStore.activeSessionId);
+    void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected.sessionId);
   }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
@@ -766,9 +765,7 @@ function readSidebarSelection(context: PluginContext): SidebarSelectedSession | 
     return { sessionId: snapshotSessionId, workspaceId: snapshotWorkspaceId || undefined };
   }
 
-  const sessionId = readStoredString(SIDEBAR_ACTIVE_SESSION_KEY);
-  const workspaceId = readStoredString(SIDEBAR_ACTIVE_WORKSPACE_KEY);
-  return sessionId ? { sessionId, workspaceId: workspaceId || undefined } : null;
+  return null;
 }
 
 function persistSidebarSelection(context: PluginContext, selected: SidebarSelectedSession | undefined): void {
@@ -1766,6 +1763,10 @@ function syncMountedStoreToViewedSession(context: PluginContext, store: ChatStor
   if (selected?.sessionId && !isMountedSelectionActive(context, store, selected)) {
     persistSidebarSelection(context, selected);
     switchMountedStoreToSession(store, selected.sessionId);
+  }
+
+  if (!store.activeSessionId) {
+    return sessionById(store, "", true).id;
   }
 
   return store.activeSessionId;
@@ -2770,7 +2771,18 @@ function moveMessageBetweenSessions(store: ChatStore, fromSessionId: string, toS
 
   fromSession.updatedAt = Date.now();
   toSession.updatedAt = Date.now();
+  removeEmptyInactiveSession(store, fromSession.id);
   saveStore(store);
+}
+
+function removeEmptyInactiveSession(store: ChatStore, sessionId: string): void {
+  const session = store.sessions.find((item) => item.id === sessionId);
+
+  if (!session || session.id === store.activeSessionId || session.messages.length > 0 || session.title !== "New chat") {
+    return;
+  }
+
+  store.sessions = store.sessions.filter((item) => item.id !== session.id);
 }
 
 function switchToSession(state: State, dom: ChatDom, sessionId: string): void {
@@ -2824,6 +2836,25 @@ function clearDraft(): void {
   saveDraft("");
 }
 
+function createFreshStore(sessionId?: string): ChatStore {
+  const session = createSession(sessionId);
+  return { activeSessionId: session.id, sessions: [session] };
+}
+
+function createNoSelectionStore(): ChatStore {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
+
+    if (parsed && Array.isArray(parsed.sessions)) {
+      return { activeSessionId: "", sessions: parsed.sessions.filter(isSession).map(sanitizeSession) };
+    }
+  } catch {
+    // Fall through to an empty inactive store.
+  }
+
+  return { activeSessionId: "", sessions: [] };
+}
+
 function loadStore(preferredSessionId = ""): ChatStore {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
@@ -2837,17 +2868,7 @@ function loadStore(preferredSessionId = ""): ChatStore {
   } catch {
     // Fall through to a fresh store.
   }
-  const session = createSession(preferredSessionId || undefined);
-  return { activeSessionId: session.id, sessions: [session] };
-}
-
-function hasStoredSessions(): boolean {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Partial<ChatStore> | null;
-    return Boolean(parsed && Array.isArray(parsed.sessions) && parsed.sessions.some(isSession));
-  } catch {
-    return false;
-  }
+  return createFreshStore(preferredSessionId || undefined);
 }
 
 function saveStore(store: ChatStore): void {

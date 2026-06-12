@@ -1210,16 +1210,14 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	}
 	sessionFile := ""
 	requestedSessionID := strings.TrimSpace(stringInput(input, "sessionId"))
-	if requestedSessionID != "" {
-		if path, ok := piSessionFileByID(root, requestedSessionID); ok {
-			sessionFile = path
-		}
+	if requestedSessionID == "" {
+		return map[string]any{"activeSessionId": "", "messages": []chatMessage{}, "isStreaming": false}, nil
+	}
+	if path, ok := piSessionFileByID(root, requestedSessionID); ok {
+		sessionFile = path
 	}
 	if sessionFile == "" {
-		sessionFile, err = mostRecentPiSessionFile(root)
-	}
-	if err != nil || sessionFile == "" {
-		return map[string]any{"activeSessionId": responseSessionID(requestedSessionID), "messages": []chatMessage{}, "isStreaming": false}, err
+		return map[string]any{"activeSessionId": responseSessionID(requestedSessionID), "messages": []chatMessage{}, "isStreaming": false}, nil
 	}
 	messages, sessionID, err := readPiSessionMessages(sessionFile)
 	if err != nil {
@@ -1275,40 +1273,6 @@ func isAssistantMessageStreaming(message chatMessage) bool {
 		}
 	}
 	return false
-}
-
-func mostRecentPiSessionFile(workspaceRoot string) (string, error) {
-	var newest string
-	var newestTime time.Time
-
-	for _, dir := range piSessionDirs(workspaceRoot) {
-		entries, err := os.ReadDir(dir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-
-			path := filepath.Join(dir, entry.Name())
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-
-			if newest == "" || info.ModTime().After(newestTime) {
-				newest = path
-				newestTime = info.ModTime()
-			}
-		}
-	}
-
-	return newest, nil
 }
 
 func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {

@@ -282,7 +282,42 @@ test("mounted activation shows guide when no selected or stored session exists",
   });
 });
 
-test("mounted activation loads stored session instead of guide", async () => {
+test("mounted activation ignores stored sessions when no sidebar session is selected", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    window.localStorage.setItem("plugin.pi-web-sidebar.activeSessionId", "stale-sidebar-session");
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{
+        id: "stored-session",
+        title: "Stored",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "m1", role: "assistant", text: "stored transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    assert.match(text, /pi-web-chat guide/);
+    assert.doesNotMatch(text, /stored transcript/);
+    assert.equal(backendCalls.some((call) => call.method === "chatState"), false);
+    cleanup();
+  });
+});
+
+test("mounted activation does not persist a temp session before selection or submit", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
@@ -305,8 +340,56 @@ test("mounted activation loads stored session instead of guide", async () => {
     await tick();
     await tick();
 
-    assert.match(window.document.querySelector(".term-inner").textContent, /stored transcript/);
-    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "stored-session");
+    assert.deepEqual(store.sessions.map((session) => session.id), ["stored-session"]);
+    cleanup();
+  });
+});
+
+test("mounted submit without selected session preserves cached sessions and prunes temp session", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stored-session",
+      sessions: [{
+        id: "stored-session",
+        title: "Stored",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "m1", role: "assistant", text: "stored transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "new-session" };
+        }
+
+        if (method === "submitPrompt") {
+          return { activeSessionId: "new-session", messages: [{ id: "u1", role: "user", text: input.data.text, createdAt: 1 }] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "start from guide";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "new-session");
+    assert.ok(store.sessions.some((session) => session.id === "stored-session"));
+    assert.ok(store.sessions.some((session) => session.id === "new-session"));
+    assert.equal(store.sessions.filter((session) => session.title === "New chat" && session.messages.length === 0).length, 0);
     cleanup();
   });
 });
