@@ -303,6 +303,13 @@ function runStreamRunnerProcess(args, resolve) {
   process.once("SIGTERM", abort);
   process.once("SIGINT", abort);
 
+  let inputClosed = false;
+  const closeRpcInput = () => {
+    if (inputClosed) return;
+    inputClosed = true;
+    proc.stdin?.end();
+  };
+
   emit({ type: "run.start", runId });
   proc.stdout.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
@@ -311,7 +318,7 @@ function runStreamRunnerProcess(args, resolve) {
       if (index < 0) break;
       const line = buffer.slice(0, index).replace(/\r$/, "");
       buffer = buffer.slice(index + 1);
-      if (line.trim()) mapRpcLine(line, emit);
+      if (line.trim() && mapRpcLine(line, emit) === "agent_end") closeRpcInput();
     }
   });
   proc.stderr.on("data", (chunk) => emit({ type: "error", message: chunk.toString("utf8") }));
@@ -324,7 +331,7 @@ function runStreamRunnerProcess(args, resolve) {
     const status = aborted || current.status === "aborted" ? "aborted" : "complete";
     finish(status, code ?? 0);
   });
-  proc.stdin?.end(`${JSON.stringify({ id: runId, type: "prompt", message: prompt })}\n`);
+  proc.stdin?.write(`${JSON.stringify({ id: runId, type: "prompt", message: prompt })}\n`);
 }
 
 function mapRpcLine(line, emit) {
@@ -333,12 +340,12 @@ function mapRpcLine(line, emit) {
     event = JSON.parse(line);
   } catch {
     emit({ type: "error", message: line });
-    return;
+    return "parse_error";
   }
 
   if (event.type === "response") {
     emit({ type: "response", command: event.command, success: Boolean(event.success), error: event.error });
-    return;
+    return event.type;
   }
 
   if (event.type === "message_update") {
@@ -349,7 +356,7 @@ function mapRpcLine(line, emit) {
     else if (delta.type === "toolcall_delta") emit({ type: "tool.delta", toolCallId: delta.toolCallId || delta.id || "", delta: String(delta.delta || "") });
     else if (delta.type === "toolcall_end") emit(toolCallStreamEvent("tool.end", delta));
     else emit({ type: "message.event", event: delta.type || "update" });
-    return;
+    return event.type;
   }
 
   if (event.type === "tool_execution_start") {
@@ -360,6 +367,7 @@ function mapRpcLine(line, emit) {
   else if (event.type === "tool_execution_end") emit({ type: "tool.end", toolCallId: event.toolCallId, toolName: event.toolName, result: toolResultText(event.result), isError: Boolean(event.isError) });
   else if (event.type === "agent_start") emit({ type: "run.agent.start" });
   else if (event.type === "agent_end") emit({ type: "run.agent.end" });
+  return event.type;
 }
 
 function toolCallStreamEvent(type, delta) {

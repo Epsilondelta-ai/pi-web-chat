@@ -688,17 +688,27 @@ func runGoStreamRunner(args []string) error {
 		return err
 	}
 	_, writeErr := stdin.Write(append(payload, '\n'))
-	_ = stdin.Close()
 	if writeErr != nil {
 		_ = cmd.Process.Kill()
 		return writeErr
+	}
+
+	inputClosed := false
+	closeRPCInput := func() {
+		if inputClosed {
+			return
+		}
+		inputClosed = true
+		_ = stdin.Close()
 	}
 
 	scanner := bufio.NewScanner(stdout)
 	buffer := make([]byte, 0, 64*1024)
 	scanner.Buffer(buffer, maxOutputBytes)
 	for scanner.Scan() {
-		emitMappedPiRPCLine(eventsPath, statePath, scanner.Bytes())
+		if emitMappedPiRPCLine(eventsPath, statePath, scanner.Bytes()) == "agent_end" {
+			closeRPCInput()
+		}
 	}
 	waitErr := cmd.Wait()
 	if scanErr := scanner.Err(); scanErr != nil {
@@ -712,10 +722,10 @@ func runGoStreamRunner(args []string) error {
 	return nil
 }
 
-func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) {
+func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) string {
 	var event map[string]any
 	if err := json.Unmarshal(line, &event); err != nil {
-		return
+		return "parse_error"
 	}
 	typeName, _ := event["type"].(string)
 	switch typeName {
@@ -746,7 +756,12 @@ func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) {
 			"toolName":   stringFromAny(event["toolName"]),
 			"result":     textFromAny(event["result"]),
 		})
+	case "agent_start":
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.agent.start"})
+	case "agent_end":
+		emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.agent.end"})
 	}
+	return typeName
 }
 
 func mapAssistantMessageEvent(raw any) streamEvent {

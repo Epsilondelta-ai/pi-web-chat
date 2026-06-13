@@ -69,6 +69,37 @@ async function rejectBackend(method, workspaceRoot, data = {}) {
   assert.ok(result.stderr.trim());
 }
 
+function delayedRpcPiScript(body) {
+  return `#!/usr/bin/env node
+let input = '';
+let started = false;
+let completed = false;
+let sawEnd = false;
+const finish = () => {
+  completed = true;
+  console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
+  if (sawEnd) process.exit(0);
+};
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+  input += chunk;
+  if (started || !input.includes('\\n')) return;
+  started = true;
+  console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
+  console.log(JSON.stringify({ type: 'agent_start' }));
+  setTimeout(() => {
+${body}
+    finish();
+  }, 25);
+});
+process.stdin.on('end', () => {
+  sawEnd = true;
+  process.exit(0);
+});
+setTimeout(() => process.exit(2), 3000);
+`;
+}
+
 test("commands returns chat and discovered slash commands", async () => {
   const result = await callBackend("commands", ".");
   const names = result.commands.map((item) => item.command);
@@ -178,10 +209,7 @@ test("startPrompt honors settings sessionDir", async () => {
   const sessionDir = join(root, "configured", "sessions");
   await mkdir(join(root, ".pi"), { recursive: true });
   await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir }));
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await callBackend(
@@ -205,10 +233,7 @@ test("startPrompt warns and falls back when settings sessionDir is outside works
   const fakePi = join(bin, "pi");
   await mkdir(join(root, ".pi"), { recursive: true });
   await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: outside }));
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await callBackend(
@@ -235,10 +260,7 @@ test("startPrompt warns and falls back when settings sessionDir symlinks outside
   await symlink(outside, join(root, "link-sessions"));
   await mkdir(join(root, ".pi"), { recursive: true });
   await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: "link-sessions" }));
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await callBackend(
@@ -263,10 +285,7 @@ test("startPrompt warns and falls back when settings sessionDir is invalid", asy
   const fakePi = join(bin, "pi");
   await mkdir(join(root, ".pi"), { recursive: true });
   await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: "" }));
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await callBackend(
@@ -332,10 +351,7 @@ test("js and compiled startPrompt agree on settings sessionDir warnings", async 
     const bin = await mkdtemp(join(tmpdir(), `pi-web-chat-bin-${item.name}-`));
     const outside = await mkdtemp(join(tmpdir(), `pi-web-chat-outside-${item.name}-`));
     const fakePi = join(bin, "pi");
-    await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+    await writeFile(fakePi, delayedRpcPiScript(""));
     await chmod(fakePi, 0o755);
 
     const outputs = [];
@@ -378,10 +394,7 @@ test("startPrompt fails closed when fallback session dir symlinks outside worksp
   await mkdir(join(root, ".pi"), { recursive: true });
   await symlink(outside, join(root, ".pi", "sessions"));
   await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: outside }));
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await runBackend(
@@ -406,10 +419,7 @@ test("compiled submitPrompt fails closed when fallback session dir symlinks outs
   await mkdir(join(root, ".pi"), { recursive: true });
   await symlink(outside, join(root, ".pi", "sessions"));
   await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({ sessionDir: outside }));
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await runBackendBinary(
@@ -429,22 +439,15 @@ test("streaming methods capture pi rpc text thinking and tool events", async () 
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think' } }));
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } }));
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't0', name: 'read', arguments: { path: 'README.md' } } } }));
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id: 't0', name: 'read' } } }));
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't2', name: 'edit', arguments: { patch: 'x'.repeat(2000) } } } }));
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't3', name: 'edit', arguments: { patch: '漢'.repeat(400) } } } }));
-  console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pwd' } }));
-  console.log(JSON.stringify({ type: 'tool_execution_update', toolCallId: 't1', toolName: 'bash', partialResult: { content: [{ type: 'text', text: 'out' }] } }));
-  console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));
-  console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
-});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(`    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think' } }));
+    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } }));
+    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't0', name: 'read', arguments: { path: 'README.md' } } } }));
+    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id: 't0', name: 'read' } } }));
+    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't2', name: 'edit', arguments: { patch: 'x'.repeat(2000) } } } }));
+    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't3', name: 'edit', arguments: { patch: '漢'.repeat(400) } } } }));
+    console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pwd' } }));
+    console.log(JSON.stringify({ type: 'tool_execution_update', toolCallId: 't1', toolName: 'bash', partialResult: { content: [{ type: 'text', text: 'out' }] } }));
+    console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));`));
   await chmod(fakePi, 0o755);
 
   const start = await callBackend("startPrompt", root, { text: "hello pi" }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
@@ -482,12 +485,7 @@ test("backend wrapper startPrompt uses captured workspace path for existing and 
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: process.cwd() } }));
-});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(`    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: process.cwd() } }));`));
   await chmod(fakePi, 0o755);
   const workspaceSessionId = "workspace-session-id";
   const workspaceSessionDir = join(root, ".pi", "sessions");
@@ -529,10 +527,7 @@ test("backend wrapper creates configured sessionDir before using existing sessio
     id: existingSessionId,
     cwd: root,
   })}\n`);
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
 
   const result = await callBackend(
@@ -568,12 +563,7 @@ test("backend wrapper emits stream events as SSE frames", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse js' } }));
-});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(`    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse js' } }));`));
   await chmod(fakePi, 0o755);
 
   const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
@@ -591,12 +581,7 @@ test("js streaming backend caps response session ids", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
-});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(""));
   await chmod(fakePi, 0o755);
   const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
   const sessionDir = join(home, ".pi", "agent", "sessions", safe);
@@ -615,12 +600,7 @@ test("compiled backend exposes streaming methods", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'go stream' } }));
-});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(`    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'go stream' } }));`));
   await chmod(fakePi, 0o755);
 
   const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
@@ -651,12 +631,7 @@ test("compiled backend emits stream events as SSE frames", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse go' } }));
-});
-`);
+  await writeFile(fakePi, delayedRpcPiScript(`    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'sse go' } }));`));
   await chmod(fakePi, 0o755);
 
   const env = { HOME: home, PATH: `${bin}:${process.env.PATH}` };
