@@ -542,7 +542,7 @@ func steerPiPrompt(input request) (any, error) {
 	if _, err := file.Write(append(payload, '\n')); err != nil {
 		return nil, err
 	}
-	if !waitForGoSteeringAck(state, steeringID, 750*time.Millisecond) {
+	if !waitForGoSteeringAck(state, steeringID, 3*time.Second) {
 		return nil, errors.New("steering was not accepted before the run ended")
 	}
 	return map[string]any{"accepted": true, "runId": state.RunID, "activeSessionId": responseSessionID(state.ActiveSessionID), "isStreaming": true}, nil

@@ -177,7 +177,7 @@ function steerPrompt(data) {
 
   const steeringId = randomUUID();
   appendFileSync(state.steeringPath, `${JSON.stringify({ id: steeringId, type: "steer", message: text })}\n`);
-  if (!waitForSteeringAck(state, steeringId, 750)) {
+  if (!waitForSteeringAck(state, steeringId, 3000)) {
     throw new Error("steering was not accepted before the run ended");
   }
 
