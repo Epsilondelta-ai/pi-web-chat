@@ -35,6 +35,7 @@ const (
 	maxChatMessageTextBytes          = 4000
 	maxChatToolArgsBytes             = 1000
 	maxChatToolCallsPerMessage       = 100
+	maxChatMessageBlocks             = 200
 	defaultMaxSkillDiscoveryDirs     = 4000
 	defaultMaxWorkspaceSearchEntries = 20000
 	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
@@ -72,12 +73,20 @@ type fileRef struct {
 }
 
 type chatMessage struct {
-	ID        string         `json:"id"`
-	Role      string         `json:"role"`
-	Text      string         `json:"text"`
-	CreatedAt int64          `json:"createdAt"`
-	Meta      map[string]any `json:"meta,omitempty"`
-	ToolCalls []chatToolCall `json:"toolCalls,omitempty"`
+	ID        string             `json:"id"`
+	Role      string             `json:"role"`
+	Text      string             `json:"text"`
+	CreatedAt int64              `json:"createdAt"`
+	Meta      map[string]any     `json:"meta,omitempty"`
+	Blocks    []chatMessageBlock `json:"blocks,omitempty"`
+	ToolCalls []chatToolCall     `json:"toolCalls,omitempty"`
+}
+
+type chatMessageBlock struct {
+	ID       string        `json:"id"`
+	Type     string        `json:"type"`
+	Text     string        `json:"text"`
+	ToolCall *chatToolCall `json:"toolCall,omitempty"`
 }
 
 type chatToolCall struct {
@@ -1521,7 +1530,7 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 		if id == "" {
 			id = strconv.Itoa(len(messages) + 1)
 		}
-		text, toolCalls := piMessageParts(msg["content"], id)
+		text, toolCalls, blocks := piMessageParts(msg["content"], id)
 		if role == "toolResult" && mergeToolResult(messages, msg, text) {
 			continue
 		}
@@ -1530,7 +1539,7 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 		}
 		messages = append(messages, chatMessage{
 			ID: id, Role: mappedRole, Text: text, CreatedAt: createdAt,
-			Meta: map[string]any{"piRole": role}, ToolCalls: toolCalls,
+			Meta: map[string]any{"piRole": role}, Blocks: blocks, ToolCalls: toolCalls,
 		})
 	}
 	messages = trimChatMessagesForResponse(messages)
@@ -1561,11 +1570,22 @@ func mergeToolResult(messages []chatMessage, msg map[string]any, text string) bo
 			} else {
 				tool.Status = "ok"
 			}
+			syncToolResultBlock(message, tool)
 			return true
 		}
 	}
 
 	return false
+}
+
+func syncToolResultBlock(message *chatMessage, tool *chatToolCall) {
+	for blockIndex := range message.Blocks {
+		block := &message.Blocks[blockIndex]
+		if block.Type == "tool" && block.ToolCall != nil && block.ToolCall.ID == tool.ID {
+			block.ToolCall = tool
+			return
+		}
+	}
 }
 
 func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
@@ -1578,6 +1598,12 @@ func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 	for index := len(messages) - 1; index >= 0 && remaining > 0; index-- {
 		message := messages[index]
 		message.Text = limitString(message.Text, maxChatMessageTextBytes)
+		for blockIndex := range message.Blocks {
+			message.Blocks[blockIndex].Text = limitString(message.Blocks[blockIndex].Text, maxChatMessageTextBytes)
+			if message.Blocks[blockIndex].ToolCall != nil {
+				message.Blocks[blockIndex].ToolCall.Text = limitString(message.Blocks[blockIndex].ToolCall.Text, maxChatMessageTextBytes)
+			}
+		}
 		for toolIndex := range message.ToolCalls {
 			message.ToolCalls[toolIndex].Text = limitString(message.ToolCalls[toolIndex].Text, maxChatMessageTextBytes)
 		}
@@ -1585,6 +1611,14 @@ func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 		messageBytes := chatMessageResponseBytes(message)
 		if messageBytes > remaining {
 			message.Text = limitString(message.Text, remaining)
+			for blockIndex := range message.Blocks {
+				message.Blocks[blockIndex].Text = ""
+				if message.Blocks[blockIndex].ToolCall != nil {
+					message.Blocks[blockIndex].ToolCall.Text = ""
+					message.Blocks[blockIndex].ToolCall.Args = nil
+					message.Blocks[blockIndex].ToolCall.ArgsStatus = "omitted"
+				}
+			}
 			for toolIndex := range message.ToolCalls {
 				message.ToolCalls[toolIndex].Text = ""
 				message.ToolCalls[toolIndex].Args = nil
@@ -1593,6 +1627,7 @@ func trimChatMessagesForResponse(messages []chatMessage) []chatMessage {
 			messageBytes = chatMessageResponseBytes(message)
 		}
 		if messageBytes > remaining {
+			message.Blocks = nil
 			message.ToolCalls = nil
 			messageBytes = chatMessageResponseBytes(message)
 		}
@@ -1634,13 +1669,14 @@ func mapPiRole(role string) string {
 	}
 }
 
-func piMessageParts(content any, messageID string) (string, []chatToolCall) {
+func piMessageParts(content any, messageID string) (string, []chatToolCall, []chatMessageBlock) {
 	switch value := content.(type) {
 	case string:
-		return value, nil
+		return value, nil, []chatMessageBlock{{ID: messageID + "-text-0", Type: "text", Text: value}}
 	case []any:
 		parts := []string{}
 		toolCalls := []chatToolCall{}
+		blocks := []chatMessageBlock{}
 		for blockIndex, raw := range value {
 			block, ok := raw.(map[string]any)
 			if !ok {
@@ -1651,20 +1687,41 @@ func piMessageParts(content any, messageID string) (string, []chatToolCall) {
 			case "text":
 				if text, ok := block["text"].(string); ok {
 					parts = append(parts, text)
+					if len(blocks) < maxChatMessageBlocks {
+						blocks = append(blocks, chatMessageBlock{ID: fmt.Sprintf("%s-text-%d", messageID, blockIndex), Type: "text", Text: text})
+					}
+				}
+			case "thinking", "thinking_delta":
+				if text := textBlockText(block); text != "" && len(blocks) < maxChatMessageBlocks {
+					blocks = append(blocks, chatMessageBlock{ID: fmt.Sprintf("%s-thinking-%d", messageID, blockIndex), Type: "thinking", Text: text})
 				}
 			case "toolCall":
+				if len(toolCalls) >= maxChatToolCallsPerMessage {
+					continue
+				}
 				if toolCall := piToolCall(block, messageID, blockIndex); toolCall.Name != "" {
 					toolCalls = append(toolCalls, toolCall)
+					if len(blocks) < maxChatMessageBlocks {
+						tool := toolCall
+						blocks = append(blocks, chatMessageBlock{ID: fmt.Sprintf("%s-tool-%d", messageID, blockIndex), Type: "tool", ToolCall: &tool})
+					}
 				}
 			}
 		}
-		if len(toolCalls) > maxChatToolCallsPerMessage {
-			toolCalls = toolCalls[:maxChatToolCallsPerMessage]
-		}
-		return strings.Join(parts, "\n"), toolCalls
+		return strings.Join(parts, "\n"), toolCalls, blocks
 	default:
-		return "", nil
+		return "", nil, nil
 	}
+}
+
+func textBlockText(block map[string]any) string {
+	for _, key := range []string{"text", "thinking", "content"} {
+		if text, ok := block[key].(string); ok {
+			return text
+		}
+	}
+
+	return ""
 }
 
 func piToolCall(block map[string]any, messageID string, blockIndex int) chatToolCall {
