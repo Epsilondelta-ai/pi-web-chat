@@ -72,6 +72,7 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
 - `chatState` with `{ sessionId, workspacePath }` → `{ activeSessionId, messages }`; empty `sessionId` returns an empty state
 - `startPrompt` with `{ text, attachments, sessionId, workspacePath }` → `{ accepted, runId, activeSessionId, isStreaming }`
+- `steerPrompt` with `{ runId, text, attachments }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`
 - `sessionEventsSse` with `{ sessionId, workspacePath }` → SSE `chat.state` frames for session transcript state
 - `streamEventsSse` with `{ runId, cursor, workspacePath }` → SSE `event:`/`data:` frames for the same chat events

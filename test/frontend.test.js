@@ -1241,6 +1241,143 @@ test("mounted submit deduplicates streaming chat state echo of current prompt", 
   });
 });
 
+test("mounted submit preserves draft during async context resolution before run starts", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let releaseResolveContext;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "resolveContext") {
+          await new Promise((resolve) => {
+            releaseResolveContext = resolve;
+          });
+          return { attachments: [] };
+        }
+
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "active-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async () => new ReadableStream({ start() {} }),
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "first @README.md";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    textarea.value = "second";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(textarea.value, "second");
+    releaseResolveContext();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "startPrompt").input.data.text, "first @README.md");
+    assert.equal(textarea.value, "second");
+    cleanup();
+  });
+});
+
+test("mounted submit while streaming sends steering without aborting or starting a new run", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    const encoder = new TextEncoder();
+    let streamController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "active-run-session", runId: "active-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId, isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              streamController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "active-run-session",
+            messages: [
+              { id: "backend-first", role: "user", text: "first", createdAt: 1 },
+              { id: "backend-second", role: "user", text: "second", createdAt: 2 },
+            ],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    assert.ok(streamController);
+
+    textarea.value = "second";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
+    assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 0);
+    assert.equal(backendCalls.filter((call) => call.method === "abortPrompt").length, 0);
+    const steerCall = backendCalls.find((call) => call.method === "steerPrompt");
+    assert.equal(steerCall.input.data.runId, "active-run");
+    assert.equal(steerCall.input.data.text, "second");
+
+    streamController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    streamController.close();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "active-run-session");
+    const userMessages = session.messages.filter((message) => message.role === "user");
+    assert.deepEqual(userMessages.map((message) => message.id), ["backend-first", "backend-second"]);
+    cleanup();
+  });
+});
+
 test("mounted streaming render preserves unchanged transcript item nodes", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
