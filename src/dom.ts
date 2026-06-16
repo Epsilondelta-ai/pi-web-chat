@@ -49,6 +49,7 @@ export function createChatSurface(): HTMLElement {
   const surface = document.createElement("main");
   surface.className = "main pi-web-chat-surface";
   surface.dataset.main = "session";
+  surface.dataset.pluginChatRoot = "";
   surface.innerHTML = `<div class="term"><div class="term-inner" role="log" aria-live="polite" aria-relevant="additions text"></div></div><button type="button" class="scroll-bottom-btn" data-action="scroll-bottom" aria-label="stick to bottom" title="stick to bottom" aria-pressed="true" hidden>↓</button>`;
   return surface;
 }

@@ -960,6 +960,8 @@ test("mounted submit persists backend session and emits sidebar-compatible event
 
     const piEvents = [];
     globalThis.piWeb.subject("plugin.pi-web-sidebar.event").subscribe((event) => piEvents.push(event));
+    const sessionChanges = [];
+    globalThis.piWeb.subject("session.changed").subscribe((event) => sessionChanges.push(event));
 
     const cleanup = activate({
       app,
@@ -989,6 +991,7 @@ test("mounted submit persists backend session and emits sidebar-compatible event
     assert.equal(app.dataset.activeSessionId, "new-session");
     assert.equal(events[0].type, "chat-session");
     assert.equal(piEvents[0].detail.sessionId, "new-session");
+    assert.deepEqual(sessionChanges, [{ sessionId: "new-session", name: "send to pi", title: "send to pi" }]);
     cleanup();
   });
 });
@@ -1456,8 +1459,10 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");
     const submitted = [];
+    const sessionChanges = [];
     const encoder = new TextEncoder();
     globalThis.piWeb.subject("chat.input.submitted").subscribe((event) => submitted.push(event));
+    globalThis.piWeb.subject("session.changed").subscribe((event) => sessionChanges.push(event));
 
     const cleanup = activate({
       app,
@@ -1521,6 +1526,8 @@ test("mounted submit streams through SSE and notifies sidebar refresh channel", 
     }), false);
     assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "stream-session");
     assert.equal(globalThis.piWeb.behaviorSubject("session.activeId", null).getValue(), "stream-session");
+    assert.equal(window.document.querySelector("[data-plugin-chat-root]")?.classList.contains("pi-web-chat-surface"), true);
+    assert.deepEqual(sessionChanges, [{ sessionId: "stream-session", name: "stream me", title: "stream me" }]);
     assert.match(window.document.querySelector(".term-inner").textContent, /final answer|streamed answer/);
     assert.equal(window.document.querySelector(".tool-card .tc-args").textContent, JSON.stringify({ path: "README.md" }));
     cleanup();
