@@ -20,7 +20,7 @@ import activate, {
   setComposerMode,
   shellAttachmentNoteVisible,
   submittedAttachmentsForText,
-} from "../index.js";
+} from "./.generated/index.js";
 
 function createPiWeb() {
   const subjects = new Map();

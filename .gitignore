@@ -1,5 +1,6 @@
 node_modules/
 coverage/
+test/.generated/
 .DS_Store
 .rezero/memory/
 .pi/npm
