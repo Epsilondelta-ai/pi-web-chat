@@ -1260,10 +1260,11 @@ async function steerMountedPrompt(
     discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
 
     if (isUnsupportedStreamingBackend(error)) {
-      mountedState.runEventsAbort?.abort();
-      mountedState.activeRunId = undefined;
-      mountedState.activeRunSessionId = undefined;
-      await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+      renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
+      globalThis.piWeb?.subject<ToastRequest>("toast.requested").next({
+        level: "error",
+        message: "This backend does not support steering while a response is streaming.",
+      });
       return;
     }
 

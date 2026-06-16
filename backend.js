@@ -804,7 +804,9 @@ function runPromptPath(runId) {
 
 function removeRunFiles(runId) {
   if (!isRunId(runId)) return;
-  for (const suffix of [".json", ".events.jsonl", ".prompt.txt"]) removeFile(join(runRoot(), `${runId}${suffix}`));
+  for (const suffix of [".json", ".events.jsonl", ".prompt.txt", ".steering.jsonl", ".steering-ack.jsonl"]) {
+    removeFile(join(runRoot(), `${runId}${suffix}`));
+  }
 }
 
 function removeFile(path) {

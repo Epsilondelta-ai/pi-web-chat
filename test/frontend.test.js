@@ -1292,7 +1292,7 @@ test("mounted submit preserves draft during async context resolution before run 
   });
 });
 
-test("mounted submit falls back when active backend lacks steerPrompt", async () => {
+test("mounted submit rejects steering without starting a competing run when backend lacks steerPrompt", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     const backendCalls = [];
@@ -1341,8 +1341,8 @@ test("mounted submit falls back when active backend lacks steerPrompt", async ()
     await tick();
 
     assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 1);
-    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 2);
-    assert.equal(backendCalls.filter((call) => call.method === "startPrompt")[1].input.data.text, "second");
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
+    assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 0);
     cleanup();
   });
 });
