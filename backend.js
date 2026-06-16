@@ -21,6 +21,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 const dir = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const method = process.argv[2] || "";
@@ -35,7 +36,7 @@ if (method === "__streamRunner") {
   process.exit(0);
 }
 
-if (["startPrompt", "streamEvents", "streamEventsSse", "sessionEventsSse", "abortPrompt"].includes(method)) {
+if (["startPrompt", "steerPrompt", "streamEvents", "streamEventsSse", "sessionEventsSse", "abortPrompt"].includes(method)) {
   await handleStreamingMethod(method, workspaceRoot);
   process.exit(0);
 }
@@ -98,7 +99,7 @@ async function handleStreamingMethod(name, root) {
       return;
     }
 
-    const result = name === "startPrompt" ? startPrompt(root, data) : name === "streamEvents" ? streamEvents(data) : abortPrompt(data);
+    const result = name === "startPrompt" ? startPrompt(root, data) : name === "steerPrompt" ? steerPrompt(data) : name === "streamEvents" ? streamEvents(data) : abortPrompt(data);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
@@ -126,16 +127,22 @@ function startPrompt(root, data) {
   const statePath = runStatePath(runId);
   const eventsPath = join(runRoot(), `${runId}.events.jsonl`);
   const promptPath = join(runRoot(), `${runId}.prompt.txt`);
+  const steeringPath = join(runRoot(), `${runId}.steering.jsonl`);
+  const steeringAckPath = join(runRoot(), `${runId}.steering-ack.jsonl`);
   const session = resolveSession(root, String(data.sessionId || ""));
 
   writeFileSync(promptPath, text, { mode: 0o600 });
   writeFileSync(eventsPath, "", { mode: 0o600 });
+  writeFileSync(steeringPath, "", { mode: 0o600 });
+  writeFileSync(steeringAckPath, "", { mode: 0o600 });
   writeJsonAtomic(statePath, {
     runId,
     activeSessionId: session.sessionId,
     sessionFile: session.sessionFile,
     eventsPath,
     promptPath,
+    steeringPath,
+    steeringAckPath,
     status: "starting",
     cursor: 0,
     pid: null,
@@ -152,6 +159,73 @@ function startPrompt(root, data) {
 
   writeJsonAtomic(statePath, { ...readJson(statePath), pid: child.pid, status: "running", updatedAt: Date.now() });
   return { accepted: true, runId, activeSessionId: responseSessionId(session.sessionId), isStreaming: true, warnings: session.warnings };}
+
+function steerPrompt(data) {
+  const state = readRunState(String(data.runId || ""));
+  if (state.status !== "running" && state.status !== "starting") {
+    throw new Error("run is not streaming");
+  }
+
+  const text = mergePromptAttachments(String(data.text || ""), data.attachments);
+  if (!text.trim()) {
+    throw new Error("text is required");
+  }
+
+  if (!state.steeringPath) {
+    throw new Error("steering is unavailable for this run");
+  }
+
+  const steeringId = randomUUID();
+  appendFileSync(state.steeringPath, `${JSON.stringify({ id: steeringId, type: "steer", message: text })}\n`);
+  if (!waitForSteeringAck(state, steeringId, 3000)) {
+    throw new Error("steering was not accepted before the run ended");
+  }
+
+  return { accepted: true, runId: state.runId, activeSessionId: responseSessionId(state.activeSessionId), isStreaming: true };
+}
+
+function waitForSteeringAck(state, steeringId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (steeringAcked(state.steeringAckPath, steeringId)) {
+      return true;
+    }
+
+    const current = safeReadJson(runStatePath(state.runId)) || {};
+    if (current.status !== "running" && current.status !== "starting") {
+      return false;
+    }
+
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+
+  return steeringAcked(state.steeringAckPath, steeringId);
+}
+
+function steeringAcked(path, steeringId) {
+  if (!path || !existsSync(path)) {
+    return false;
+  }
+
+  return readFileSync(path, "utf8").split("\n").some((line) => line.trim() === steeringId);
+}
+
+function ackSteeringPayload(path, line) {
+  if (!path) {
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  if (payload?.id) {
+    appendFileSync(path, `${payload.id}\n`);
+  }
+}
 
 function streamEvents(data) {
   const state = readRunState(String(data.runId || ""));
@@ -253,6 +327,8 @@ function abortPrompt(data) {
     }
   }
   removeFile(runPromptPath(state.runId));
+  removeFile(state.steeringPath);
+  removeFile(state.steeringAckPath);
   writeJsonAtomic(runStatePath(state.runId), { ...state, status: "aborted", updatedAt: Date.now() });
   return { aborted: true, runId: state.runId };
 }
@@ -276,15 +352,32 @@ function runStreamRunnerProcess(args, resolve) {
   const prompt = readFileSync(promptPath, "utf8");
   removeFile(promptPath);
   const proc = spawn("pi", ["--session", sessionFile, "--mode", "rpc"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] });
-  writeJsonAtomic(statePath, { ...(safeReadJson(statePath) || {}), childPid: proc.pid, updatedAt: Date.now() });
+  const initialState = safeReadJson(statePath) || {};
+  writeJsonAtomic(statePath, { ...initialState, childPid: proc.pid, updatedAt: Date.now() });
   let buffer = "";
+  let steeringFd;
+  let steeringBuffer = "";
+  let steeringDecoder = new StringDecoder("utf8");
+  let steeringTimer;
   let aborted = false;
   let settled = false;
   const finish = (status, code = 0) => {
-    if (settled) return;
+    if (settled) {
+      return;
+    }
+
     settled = true;
     process.removeListener("SIGTERM", abort);
     process.removeListener("SIGINT", abort);
+    if (steeringTimer) {
+      clearInterval(steeringTimer);
+    }
+    if (steeringFd !== undefined) {
+      closeSync(steeringFd);
+      steeringFd = undefined;
+    }
+    removeFile((safeReadJson(statePath) || {}).steeringPath);
+    removeFile((safeReadJson(statePath) || {}).steeringAckPath);
     emit({ type: "run.end", runId, exitCode: code });
     const current = safeReadJson(statePath) || {};
     writeJsonAtomic(statePath, { ...current, status, updatedAt: Date.now(), completedAt: Date.now() });
@@ -305,9 +398,62 @@ function runStreamRunnerProcess(args, resolve) {
 
   let inputClosed = false;
   const closeRpcInput = () => {
-    if (inputClosed) return;
+    if (inputClosed) {
+      return;
+    }
+
     inputClosed = true;
+    if (steeringTimer) {
+      clearInterval(steeringTimer);
+    }
+    if (steeringFd !== undefined) {
+      closeSync(steeringFd);
+      steeringFd = undefined;
+    }
+
     proc.stdin?.end();
+  };
+  const writeRpcPayload = (payload) => {
+    if (inputClosed) {
+      return false;
+    }
+
+    proc.stdin?.write(`${payload}\n`);
+    return true;
+  };
+  const pumpSteering = () => {
+    const current = safeReadJson(statePath) || {};
+    if (!current.steeringPath || !existsSync(current.steeringPath)) {
+      return;
+    }
+    if (steeringFd === undefined) {
+      steeringFd = openSync(current.steeringPath, "r");
+    }
+
+    const chunk = Buffer.alloc(4096);
+    while (true) {
+      const count = readSync(steeringFd, chunk, 0, chunk.length, null);
+      if (count <= 0) {
+        break;
+      }
+      steeringBuffer += steeringDecoder.write(chunk.subarray(0, count));
+    }
+
+    // Keep this behavior in parity with backend.go forwardGoSteering.
+    while (true) {
+      const index = steeringBuffer.indexOf("\n");
+      if (index < 0) {
+        return;
+      }
+
+      const line = steeringBuffer.slice(0, index).trim();
+      steeringBuffer = steeringBuffer.slice(index + 1);
+      if (line && !writeRpcPayload(line)) {
+        return;
+      }
+
+      ackSteeringPayload(current.steeringAckPath, line);
+    }
   };
 
   emit({ type: "run.start", runId });
@@ -331,7 +477,8 @@ function runStreamRunnerProcess(args, resolve) {
     const status = aborted || current.status === "aborted" ? "aborted" : "complete";
     finish(status, code ?? 0);
   });
-  proc.stdin?.write(`${JSON.stringify({ id: runId, type: "prompt", message: prompt })}\n`);
+  writeRpcPayload(JSON.stringify({ id: runId, type: "prompt", message: prompt }));
+  steeringTimer = setInterval(pumpSteering, 50);
 }
 
 function mapRpcLine(line, emit) {
@@ -657,7 +804,9 @@ function runPromptPath(runId) {
 
 function removeRunFiles(runId) {
   if (!isRunId(runId)) return;
-  for (const suffix of [".json", ".events.jsonl", ".prompt.txt"]) removeFile(join(runRoot(), `${runId}${suffix}`));
+  for (const suffix of [".json", ".events.jsonl", ".prompt.txt", ".steering.jsonl", ".steering-ack.jsonl"]) {
+    removeFile(join(runRoot(), `${runId}${suffix}`));
+  }
 }
 
 function removeFile(path) {

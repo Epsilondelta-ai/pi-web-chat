@@ -303,6 +303,8 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 		return submitPiPrompt(workspaceRoot, input)
 	case "startPrompt":
 		return startPiPrompt(workspaceRoot, input)
+	case "steerPrompt":
+		return steerPiPrompt(input)
 	case "streamEvents":
 		return streamPiEvents(input)
 	case "abortPrompt":
@@ -408,6 +410,8 @@ type streamRunState struct {
 	SessionFile     string `json:"sessionFile"`
 	EventsPath      string `json:"eventsPath"`
 	PromptPath      string `json:"promptPath"`
+	SteeringPath    string `json:"steeringPath"`
+	SteeringAckPath string `json:"steeringAckPath"`
 	Status          string `json:"status"`
 	PID             int    `json:"pid"`
 	ChildPID        int    `json:"childPid"`
@@ -459,10 +463,18 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 	statePath := goStreamStatePath(runID)
 	eventsPath := filepath.Join(runDir, runID+".events.jsonl")
 	promptPath := filepath.Join(runDir, runID+".prompt.txt")
+	steeringPath := filepath.Join(runDir, runID+".steering.jsonl")
+	steeringAckPath := filepath.Join(runDir, runID+".steering-ack.jsonl")
 	if err := os.WriteFile(promptPath, []byte(text), 0o600); err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(steeringPath, nil, 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(steeringAckPath, nil, 0o600); err != nil {
 		return nil, err
 	}
 
@@ -472,6 +484,8 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 		SessionFile:     sessionFile,
 		EventsPath:      eventsPath,
 		PromptPath:      promptPath,
+		SteeringPath:    steeringPath,
+		SteeringAckPath: steeringAckPath,
 		Status:          "starting",
 		CreatedAt:       time.Now().UnixMilli(),
 		UpdatedAt:       time.Now().UnixMilli(),
@@ -498,6 +512,40 @@ func startPiPrompt(workspaceRoot string, input request) (any, error) {
 	_ = cmd.Process.Release()
 
 	return map[string]any{"accepted": true, "runId": runID, "activeSessionId": responseSessionID(sessionID), "isStreaming": true, "warnings": warnings}, nil
+}
+
+func steerPiPrompt(input request) (any, error) {
+	state, err := readGoStreamState(stringInput(input, "runId"))
+	if err != nil {
+		return nil, err
+	}
+	if state.Status != "running" && state.Status != "starting" {
+		return nil, errors.New("run is not streaming")
+	}
+	text := mergePromptAttachments(stringInput(input, "text"), input["attachments"])
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("text is required")
+	}
+	if state.SteeringPath == "" {
+		return nil, errors.New("steering is unavailable for this run")
+	}
+	steeringID := createSessionID()
+	payload, err := json.Marshal(map[string]any{"id": steeringID, "type": "steer", "message": text})
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(state.SteeringPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if _, err := file.Write(append(payload, '\n')); err != nil {
+		return nil, err
+	}
+	if !waitForGoSteeringAck(state, steeringID, 3*time.Second) {
+		return nil, errors.New("steering was not accepted before the run ended")
+	}
+	return map[string]any{"accepted": true, "runId": state.RunID, "activeSessionId": responseSessionID(state.ActiveSessionID), "isStreaming": true}, nil
 }
 
 func streamPiEvents(input request) (any, error) {
@@ -635,6 +683,8 @@ func abortPiPrompt(input request) (any, error) {
 	state.Status = "aborted"
 	state.UpdatedAt = time.Now().UnixMilli()
 	_ = os.Remove(state.PromptPath)
+	_ = os.Remove(state.SteeringPath)
+	_ = os.Remove(state.SteeringAckPath)
 	if err := writeGoStreamState(goStreamStatePath(state.RunID), state); err != nil {
 		return nil, err
 	}
@@ -687,20 +737,37 @@ func runGoStreamRunner(args []string) error {
 		_ = cmd.Process.Kill()
 		return err
 	}
-	_, writeErr := stdin.Write(append(payload, '\n'))
-	if writeErr != nil {
-		_ = cmd.Process.Kill()
-		return writeErr
-	}
 
 	inputClosed := false
+	inputDone := make(chan struct{})
+	var inputMu sync.Mutex
+	writeRPCPayload := func(payload []byte) error {
+		inputMu.Lock()
+		defer inputMu.Unlock()
+		if inputClosed {
+			return errors.New("rpc input is closed")
+		}
+		_, err := stdin.Write(append(payload, '\n'))
+		return err
+	}
 	closeRPCInput := func() {
+		inputMu.Lock()
+		defer inputMu.Unlock()
 		if inputClosed {
 			return
 		}
 		inputClosed = true
+		close(inputDone)
 		_ = stdin.Close()
 	}
+
+	if writeErr := writeRPCPayload(payload); writeErr != nil {
+		_ = cmd.Process.Kill()
+		return writeErr
+	}
+	go forwardGoSteering(state.SteeringPath, state.SteeringAckPath, inputDone, func(payload []byte) error {
+		return writeRPCPayload(payload)
+	})
 
 	scanner := bufio.NewScanner(stdout)
 	buffer := make([]byte, 0, 64*1024)
@@ -719,7 +786,117 @@ func runGoStreamRunner(args []string) error {
 	}
 	emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.end"})
 	_ = os.Remove(promptPath)
+	_ = os.Remove(state.SteeringPath)
+	_ = os.Remove(state.SteeringAckPath)
 	return nil
+}
+
+func waitForGoSteeringAck(state streamRunState, steeringID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if goSteeringAcked(state.SteeringAckPath, steeringID) {
+			return true
+		}
+		latest, err := readGoStreamState(state.RunID)
+		if err == nil && latest.Status != "running" && latest.Status != "starting" {
+			return false
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return goSteeringAcked(state.SteeringAckPath, steeringID)
+}
+
+func goSteeringAcked(path string, steeringID string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == steeringID {
+			return true
+		}
+	}
+	return false
+}
+
+func forwardGoSteering(path string, ackPath string, done <-chan struct{}, writePayload func([]byte) error) {
+	if path == "" {
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	// Keep this behavior in parity with backend.js pumpSteering.
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	buffer := ""
+	pendingBytes := []byte{}
+	chunk := make([]byte, 4096)
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			for {
+				count, err := file.Read(chunk)
+				if count > 0 {
+					text, remaining := decodeCompleteUTF8(append(pendingBytes, chunk[:count]...))
+					buffer += text
+					pendingBytes = remaining
+				}
+				if err != nil {
+					break
+				}
+			}
+			for {
+				index := strings.IndexByte(buffer, '\n')
+				if index < 0 {
+					break
+				}
+				line := strings.TrimSpace(buffer[:index])
+				buffer = buffer[index+1:]
+				if line == "" {
+					continue
+				}
+				if err := writePayload([]byte(line)); err != nil {
+					return
+				}
+				ackGoSteeringPayload(ackPath, line)
+			}
+		}
+	}
+}
+
+func decodeCompleteUTF8(data []byte) (string, []byte) {
+	for end := len(data); end >= 0 && end >= len(data)-utf8.UTFMax; end-- {
+		if utf8.Valid(data[:end]) {
+			return string(data[:end]), append([]byte{}, data[end:]...)
+		}
+	}
+	return "", append([]byte{}, data...)
+}
+
+func ackGoSteeringPayload(path string, line string) {
+	if path == "" {
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(line), &payload); err != nil {
+		return
+	}
+	id := stringFromAny(payload["id"])
+	if id == "" {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.WriteString(id + "\n")
 }
 
 func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) string {
