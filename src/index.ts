@@ -815,9 +815,28 @@ function publishSidebarActiveSession(context: PluginContext, sessionId: string, 
   const detail: JsonRecord = { reason, sessionId, workspaceId };
 
   globalThis.piWeb?.behaviorSubject<string | null>("session.activeId", sessionId).next(sessionId);
-  globalThis.piWeb?.subject<JsonRecord>("session.changed").next({ sessionId, workspaceId, reason });
   publishSidebarEvent(context, "active.start", detail);
   publishSidebarEvent(context, "session.created", detail);
+}
+
+function publishMountedSessionTitleIfChanged(sessionId: string, title: string): void {
+  globalThis.piWeb?.subject<JsonRecord>("session.changed").next({ sessionId, name: title, title });
+}
+
+function updateSessionTitleFromFirstUser(session: ChatSession): string {
+  if (session.title !== "New chat") {
+    return "";
+  }
+
+  const firstUser = session.messages.find((message: ChatMessage): boolean => message.role === "user");
+  const title = firstUser?.text.slice(0, 48) || "";
+
+  if (!title) {
+    return "";
+  }
+
+  session.title = title;
+  return title;
 }
 
 function storeString(key: string, value: string): void {
@@ -1112,6 +1131,13 @@ async function submitMountedPromptWithStreaming(
   }
 
   const session = sessionById(store, targetSessionId);
+  const title = updateSessionTitleFromFirstUser(session);
+
+  if (title) {
+    saveStore(store);
+    publishMountedSessionTitleIfChanged(targetSessionId, title);
+  }
+
   const assistant = ensureStreamingAssistant(session);
   try {
     await consumeStreamingRun(
@@ -1653,17 +1679,13 @@ function applyBackendResponseToMountedStore(
   }
 
   session.messages = nextMessages;
-
-  if (session.title === "New chat") {
-    const firstUser = session.messages.find((message) => message.role === "user");
-
-    if (firstUser) {
-      session.title = firstUser.text.slice(0, 48) || session.title;
-    }
-  }
-
+  const title = updateSessionTitleFromFirstUser(session);
   session.updatedAt = Date.now();
   saveStore(store);
+
+  if (title) {
+    publishMountedSessionTitleIfChanged(session.id, title);
+  }
   return session.messages;
 }
 
@@ -1731,8 +1753,14 @@ function applyBackendResponseToMountedSession(
   }
 
   session.messages = nextMessages;
+  const title = updateSessionTitleFromFirstUser(session);
   session.updatedAt = Date.now();
   saveStore(store);
+
+  if (title) {
+    publishMountedSessionTitleIfChanged(session.id, title);
+  }
+
   return session.messages;
 }
 
