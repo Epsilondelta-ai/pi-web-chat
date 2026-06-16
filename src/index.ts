@@ -1258,6 +1258,15 @@ async function steerMountedPrompt(
     emitBackendWarnings(response);
   } catch (error) {
     discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+
+    if (isUnsupportedStreamingBackend(error)) {
+      mountedState.runEventsAbort?.abort();
+      mountedState.activeRunId = undefined;
+      mountedState.activeRunSessionId = undefined;
+      await submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+      return;
+    }
+
     throw error;
   }
 }
@@ -1483,7 +1492,7 @@ async function startStreamingPrompt(
 }
 
 function isUnsupportedStreamingBackend(error: unknown): boolean {
-  return /unknown method: (startPrompt|streamEventsSse)|unsupported method: (startPrompt|streamEventsSse)|(startPrompt|streamEventsSse) unsupported/i.test(errorText(error));
+  return /unknown method: (startPrompt|streamEventsSse|steerPrompt)|unsupported method: (startPrompt|streamEventsSse|steerPrompt)|(startPrompt|streamEventsSse|steerPrompt) unsupported/i.test(errorText(error));
 }
 
 async function submitPromptToPluginBackend(

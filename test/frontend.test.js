@@ -1292,6 +1292,61 @@ test("mounted submit preserves draft during async context resolution before run 
   });
 });
 
+test("mounted submit falls back when active backend lacks steerPrompt", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let firstStreamController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: `run-${backendCalls.filter((call) => call.method === "startPrompt").length}`, isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          throw new Error("unknown method: steerPrompt");
+        }
+
+        return {};
+      },
+      backendStream: async (_method, _input, options) => {
+        return new ReadableStream({
+          start(controller) {
+            if (!firstStreamController) {
+              firstStreamController = controller;
+            }
+
+            options?.signal?.addEventListener("abort", () => controller.close());
+          },
+        });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    assert.ok(firstStreamController);
+
+    textarea.value = "second";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 1);
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 2);
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt")[1].input.data.text, "second");
+    cleanup();
+  });
+});
+
 test("mounted submit while streaming sends steering without aborting or starting a new run", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

@@ -732,6 +732,96 @@ setTimeout(() => process.exit(2), 3000);
   assert.match(content, /"message":"second"/);
 });
 
+test("steerPrompt preserves unicode across chunk boundaries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const marker = join(home, "pi-steer-unicode.jsonl");
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+  buffer += chunk;
+  while (buffer.includes('\\n')) {
+    const index = buffer.indexOf('\\n');
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const payload = JSON.parse(line);
+    if (payload.type === 'prompt') {
+      console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
+      console.log(JSON.stringify({ type: 'agent_start' }));
+    }
+    if (payload.type === 'steer') {
+      fs.appendFileSync(process.env.PI_STEER_MARKER, payload.message + '\\n');
+      console.log(JSON.stringify({ type: 'response', command: 'steer', success: true }));
+      console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
+      setTimeout(() => process.exit(0), 10);
+    }
+  }
+});
+setTimeout(() => process.exit(2), 3000);
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_STEER_MARKER: marker };
+  const start = await callBackend("startPrompt", root, { text: "first" }, env);
+  const message = `${"a".repeat(4057)}😀`;
+  const steer = await callBackend("steerPrompt", root, { runId: start.runId, text: message }, env);
+  assert.equal(steer.accepted, true);
+
+  const content = await waitForFileIncludes(marker, "😀");
+  assert.equal(content.trim(), message);
+});
+
+test("compiled steerPrompt preserves unicode across chunk boundaries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const marker = join(home, "pi-steer-unicode-compiled.jsonl");
+  const fakePi = join(bin, "pi");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+  buffer += chunk;
+  while (buffer.includes('\\n')) {
+    const index = buffer.indexOf('\\n');
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const payload = JSON.parse(line);
+    if (payload.type === 'prompt') {
+      console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
+      console.log(JSON.stringify({ type: 'agent_start' }));
+    }
+    if (payload.type === 'steer') {
+      fs.appendFileSync(process.env.PI_STEER_MARKER, payload.message + '\\n');
+      console.log(JSON.stringify({ type: 'response', command: 'steer', success: true }));
+      console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
+      setTimeout(() => process.exit(0), 10);
+    }
+  }
+});
+setTimeout(() => process.exit(2), 3000);
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_STEER_MARKER: marker };
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "first" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+  const message = `${"a".repeat(4057)}😀`;
+  const steer = await runBackendBinary("steerPrompt", root, { data: { runId: started.runId, text: message } }, env);
+  assert.equal(steer.code, 0, steer.stderr);
+
+  const content = await waitForFileIncludes(marker, "😀");
+  assert.equal(content.trim(), message);
+});
+
 test("compiled backend abortPrompt terminates the spawned pi child", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));

@@ -21,6 +21,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 const dir = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const method = process.argv[2] || "";
@@ -354,8 +355,9 @@ function runStreamRunnerProcess(args, resolve) {
   const initialState = safeReadJson(statePath) || {};
   writeJsonAtomic(statePath, { ...initialState, childPid: proc.pid, updatedAt: Date.now() });
   let buffer = "";
-  let steeringOffset = 0;
+  let steeringFd;
   let steeringBuffer = "";
+  let steeringDecoder = new StringDecoder("utf8");
   let steeringTimer;
   let aborted = false;
   let settled = false;
@@ -369,6 +371,10 @@ function runStreamRunnerProcess(args, resolve) {
     process.removeListener("SIGINT", abort);
     if (steeringTimer) {
       clearInterval(steeringTimer);
+    }
+    if (steeringFd !== undefined) {
+      closeSync(steeringFd);
+      steeringFd = undefined;
     }
     removeFile((safeReadJson(statePath) || {}).steeringPath);
     removeFile((safeReadJson(statePath) || {}).steeringAckPath);
@@ -400,6 +406,10 @@ function runStreamRunnerProcess(args, resolve) {
     if (steeringTimer) {
       clearInterval(steeringTimer);
     }
+    if (steeringFd !== undefined) {
+      closeSync(steeringFd);
+      steeringFd = undefined;
+    }
 
     proc.stdin?.end();
   };
@@ -416,14 +426,20 @@ function runStreamRunnerProcess(args, resolve) {
     if (!current.steeringPath || !existsSync(current.steeringPath)) {
       return;
     }
-
-    const data = readFileSync(current.steeringPath, "utf8");
-    if (data.length <= steeringOffset) {
-      return;
+    if (steeringFd === undefined) {
+      steeringFd = openSync(current.steeringPath, "r");
     }
 
-    steeringBuffer += data.slice(steeringOffset);
-    steeringOffset = data.length;
+    const chunk = Buffer.alloc(4096);
+    while (true) {
+      const count = readSync(steeringFd, chunk, 0, chunk.length, null);
+      if (count <= 0) {
+        break;
+      }
+      steeringBuffer += steeringDecoder.write(chunk.subarray(0, count));
+    }
+
+    // Keep this behavior in parity with backend.go forwardGoSteering.
     while (true) {
       const index = steeringBuffer.indexOf("\n");
       if (index < 0) {

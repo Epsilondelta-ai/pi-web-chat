@@ -823,21 +823,34 @@ func forwardGoSteering(path string, ackPath string, done <-chan struct{}, writeP
 	if path == "" {
 		return
 	}
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	// Keep this behavior in parity with backend.js pumpSteering.
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
-	offset := int64(0)
 	buffer := ""
+	pendingBytes := []byte{}
+	chunk := make([]byte, 4096)
 	for {
 		select {
 		case <-done:
 			return
 		case <-ticker.C:
-			data, err := os.ReadFile(path)
-			if err != nil || int64(len(data)) <= offset {
-				continue
+			for {
+				count, err := file.Read(chunk)
+				if count > 0 {
+					text, remaining := decodeCompleteUTF8(append(pendingBytes, chunk[:count]...))
+					buffer += text
+					pendingBytes = remaining
+				}
+				if err != nil {
+					break
+				}
 			}
-			buffer += string(data[offset:])
-			offset = int64(len(data))
 			for {
 				index := strings.IndexByte(buffer, '\n')
 				if index < 0 {
@@ -855,6 +868,15 @@ func forwardGoSteering(path string, ackPath string, done <-chan struct{}, writeP
 			}
 		}
 	}
+}
+
+func decodeCompleteUTF8(data []byte) (string, []byte) {
+	for end := len(data); end >= 0 && end >= len(data)-utf8.UTFMax; end-- {
+		if utf8.Valid(data[:end]) {
+			return string(data[:end]), append([]byte{}, data[end:]...)
+		}
+	}
+	return "", append([]byte{}, data...)
 }
 
 func ackGoSteeringPayload(path string, line string) {
