@@ -151,10 +151,18 @@ export type ChatMessage = {
   text: string;
   createdAt: number;
   attachments?: FileAttachment[];
+  blocks?: ChatMessageBlock[];
   thinking?: string;
   toolCalls?: ChatToolCall[];
   streaming?: boolean;
   meta?: JsonRecord;
+};
+
+export type ChatMessageBlock = {
+  id: string;
+  type: "text" | "thinking" | "tool";
+  text: string;
+  toolCall?: ChatToolCall;
 };
 
 export type ToolArgsStatus = "present" | "empty" | "unavailable" | "truncated" | "omitted";

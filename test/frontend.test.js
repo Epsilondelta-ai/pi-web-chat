@@ -1433,6 +1433,69 @@ test("mounted submit while streaming sends steering without aborting or starting
   });
 });
 
+test("mounted streaming render preserves ordered thinking text and tool blocks", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "ordered-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "ordered stream";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: thinking.delta\ndata: {"type":"thinking.delta","delta":"think 1"}\n\n'));
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"answer 1"}\n\n'));
+    runController.enqueue(encoder.encode('event: tool.start\ndata: {"type":"tool.start","toolCallId":"t1","toolName":"bash","argsStatus":"empty"}\n\n'));
+    runController.enqueue(encoder.encode('event: thinking.delta\ndata: {"type":"thinking.delta","delta":"think 2"}\n\n'));
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"answer 2"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+
+    const assistantItem = window.document.querySelectorAll(".transcript-item")[1];
+    const ordered = [...assistantItem.children].map((child) => {
+      if (child.classList.contains("thinking-block")) {
+        return `thinking:${child.querySelector(".body").textContent}`;
+      }
+
+      if (child.classList.contains("tool-card")) {
+        return `tool:${child.dataset.tool}`;
+      }
+
+      return `text:${child.querySelector(".body").textContent}`;
+    });
+
+    assert.deepEqual(ordered, ["thinking:think 1", "text:answer 1", "tool:bash", "thinking:think 2", "text:answer 2"]);
+    cleanup();
+  });
+});
+
 test("mounted streaming render preserves unchanged transcript item nodes", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
@@ -2438,6 +2501,60 @@ test("mounted sidebar clears handle null channels and stale async results", asyn
 
     assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
     assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /stale snapshot/);
+    cleanup();
+  });
+});
+
+test("mounted renderer falls back to text when capped blocks are empty", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "capped-blocks-session" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? {
+        activeSessionId: "capped-blocks-session",
+        messages: [{
+          id: "a1",
+          role: "assistant",
+          text: "visible fallback",
+          createdAt: 1,
+          blocks: [
+            { id: "b1", type: "thinking", text: "partial thinking" },
+            { id: "b2", type: "tool", text: "", toolCall: { id: "t1", name: "read", text: "", argsStatus: "omitted", status: "ok" } },
+          ],
+        }],
+      } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.match(window.document.querySelector(".term-inner").textContent, /visible fallback/);
+    cleanup();
+  });
+});
+
+test("mounted renderer falls back to full text when block cap is reached", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "capped-count-session" }) };
+    const blocks = Array.from({ length: 200 }, (_, index) => ({ id: `b${index}`, type: "text", text: `part-${index}` }));
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? {
+        activeSessionId: "capped-count-session",
+        messages: [{ id: "a1", role: "assistant", text: "full capped fallback", createdAt: 1, blocks }],
+      } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    assert.match(text, /full capped fallback/);
+    assert.doesNotMatch(text, /part-199/);
     cleanup();
   });
 });

@@ -161,7 +161,7 @@ process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
   const prompt = JSON.parse(input.trim()).message;
   fs.appendFileSync(session, JSON.stringify({ type: 'message', id: 'u1', timestamp: '2026-01-02T03:04:05.000Z', message: { role: 'user', content: prompt } }) + '\\n');
-  fs.appendFileSync(session, JSON.stringify({ type: 'message', id: 'a1', timestamp: '2026-01-02T03:04:06.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } }) + '\\n');
+  fs.appendFileSync(session, JSON.stringify({ type: 'message', id: 'a1', timestamp: '2026-01-02T03:04:06.000Z', message: { role: 'assistant', content: [{ type: 'thinking', text: 'think' }, { type: 'text', text: 'answer' }] } }) + '\\n');
 });
 `);
   await chmod(fakePi, 0o755);
@@ -169,6 +169,10 @@ process.stdin.on('end', () => {
   const result = await callBackend("submitPrompt", root, { text: "hello pi", attachments: [{ name: "note.txt", content: "attached context" }] }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
   assert.equal(result.accepted, true);
   assert.equal(result.messages.at(-1).text, "answer");
+  assert.deepEqual(result.messages.at(-1).blocks, [
+    { id: "a1-thinking-0", type: "thinking", text: "think" },
+    { id: "a1-text-1", type: "text", text: "answer" },
+  ]);
   const sessionDir = join(root, ".pi", "sessions");
   const files = await readdir(sessionDir);
   assert.equal(files.length, 1);
@@ -1062,6 +1066,12 @@ test("chatState parses pi JSONL session fixtures", async () => {
   assert.equal(result.isStreaming, false);
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "hi"], ["a2", "assistant", ""]]);
   assert.deepEqual(result.messages.at(-1).toolCalls, [{ id: "call-1", name: "bash", args: { command: "bun test" }, argsStatus: "present", text: "done", status: "ok" }]);
+  assert.deepEqual(result.messages.at(-1).blocks, [{
+    id: "a2-tool-0",
+    type: "tool",
+    text: "",
+    toolCall: { id: "call-1", name: "bash", args: { command: "bun test" }, argsStatus: "present", text: "done", status: "ok" },
+  }]);
 
   const selected = await callBackend("chatState", root, { sessionId: "pi-session-2" }, { HOME: home });
   assert.equal(selected.activeSessionId, "pi-session-2");
@@ -1098,6 +1108,26 @@ test("chatState caps large tool call arguments and generates stable fallback ids
   assert.equal(result.messages[0].toolCalls[0].args._preview, undefined);
   assert.equal(result.messages[0].toolCalls[0].argsStatus, "truncated");
   assert.equal(result.messages[0].toolCalls[1].argsStatus, "present");
+  assert.ok(JSON.stringify(result).length < 70000);
+});
+
+test("chatState caps excessive ordered block count", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const safe = `--${root.replace(/^\/+/, "").replace(/[\\/:]/g, "-")}--`;
+  const sessionDir = join(home, ".pi", "agent", "sessions", safe);
+  await mkdir(sessionDir, { recursive: true });
+  const content = Array.from({ length: 300 }, (_, index) => {
+    return { type: "text", text: `part-${index}` };
+  });
+  await writeFile(join(sessionDir, "many-blocks.jsonl"), [
+    JSON.stringify({ type: "session", id: "many-blocks" }),
+    JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:06.000Z", message: { role: "assistant", content } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "many-blocks" }, { HOME: home });
+  assert.equal(result.messages[0].blocks.length, 200);
+  assert.match(result.messages[0].text, /part-299/);
   assert.ok(JSON.stringify(result).length < 70000);
 });
 

@@ -23,6 +23,7 @@ import type {
   ChatEvent,
   ChatInputSubmitted,
   ChatMessage,
+  ChatMessageBlock,
   ChatSession,
   ChatToolCall,
   ChatStore,
@@ -50,6 +51,7 @@ const SIDEBAR_ACTIVE_WORKSPACE_KEY = "plugin.pi-web-sidebar.activeWorkspaceId";
 const FILE_REF_LIMIT = 12;
 const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
+const MAX_MESSAGE_BLOCKS = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
 const MAX_SHELL_OUTPUT_BYTES = 64_000;
@@ -1579,8 +1581,10 @@ function ensureStreamingAssistant(session: ChatSession): ChatMessage {
 function applyChatEvents(message: ChatMessage, events: ChatEvent[]): void {
   for (const event of events) {
     if (event.type === "text.delta" && typeof event.delta === "string") {
+      appendMessageBlockText(message, "text", event.delta);
       message.text += event.delta;
     } else if (event.type === "thinking.delta" && typeof event.delta === "string") {
+      appendMessageBlockText(message, "thinking", event.delta);
       message.thinking = `${message.thinking || ""}${event.delta}`;
     } else if (event.type === "tool.start") {
       upsertToolCall(message, event, "running");
@@ -1589,10 +1593,27 @@ function applyChatEvents(message: ChatMessage, events: ChatEvent[]): void {
       tool.text = event.delta;
     } else if (event.type === "tool.end") {
       const tool = upsertToolCall(message, event, event.isError ? "err" : "ok");
-      if (typeof event.result === "string" && event.result) tool.text = event.result;
+      if (typeof event.result === "string" && event.result) {
+        tool.text = event.result;
+      }
     } else if (event.type === "error" && typeof event.message === "string") {
+      appendMessageBlockText(message, "text", `${message.text ? "\n" : ""}${event.message}`);
       message.text += `${message.text ? "\n" : ""}${event.message}`;
     }
+  }
+}
+
+function appendMessageBlockText(message: ChatMessage, type: "text" | "thinking", delta: string): void {
+  message.blocks ||= [];
+  const lastBlock: ChatMessageBlock | undefined = message.blocks[message.blocks.length - 1];
+
+  if (lastBlock?.type === type) {
+    lastBlock.text += delta;
+    return;
+  }
+
+  if (message.blocks.length < MAX_MESSAGE_BLOCKS) {
+    message.blocks.push({ id: id(), type, text: delta });
   }
 }
 
@@ -1600,16 +1621,31 @@ function upsertToolCall(message: ChatMessage, event: ChatEvent, status: "running
   const idValue = event.toolCallId || event.toolName || "tool";
   message.toolCalls ||= [];
   let tool = message.toolCalls.find((item) => item.id === idValue);
+
   if (!tool) {
     tool = { id: idValue, name: event.toolName || "tool", args: event.args, text: "", status };
     message.toolCalls.push(tool);
+    appendToolMessageBlock(message, tool);
   }
+
   tool.status = status;
   if (shouldUpdateToolArgs(tool, event)) {
     tool.args = event.args;
     tool.argsStatus = event.argsStatus;
   }
   return tool;
+}
+
+function appendToolMessageBlock(message: ChatMessage, tool: ChatToolCall): void {
+  message.blocks ||= [];
+
+  if (message.blocks.some((block: ChatMessageBlock): boolean => block.type === "tool" && block.toolCall?.id === tool.id)) {
+    return;
+  }
+
+  if (message.blocks.length < MAX_MESSAGE_BLOCKS) {
+    message.blocks.push({ id: id(), type: "tool", text: "", toolCall: tool });
+  }
 }
 
 function shouldUpdateToolArgs(tool: ChatToolCall, event: ChatEvent): boolean {
@@ -1821,6 +1857,7 @@ function messageSignature(message: ChatMessage): string {
     id: message.id,
     role: message.role,
     text: message.text,
+    blocks: message.blocks,
     thinking: message.thinking,
     streaming: message.streaming,
     toolCalls: message.toolCalls,
@@ -2354,22 +2391,63 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   item.className = "transcript-item";
   item.dataset.messageId = message.id;
 
-  const row = document.createElement("div");
-  row.className = "msg";
-  row.dataset.kind = mountedMessageKind(message.role);
+  if (hasRenderableMessageBlocks(message)) {
+    const skipTextBlocks = shouldRenderTextFallbackBeforeBlocks(message);
 
-  const prefix = document.createElement("span");
-  prefix.className = `prefix ${mountedMessageKind(message.role)}`;
-  prefix.textContent = mountedMessagePrefix(message.role);
+    if (skipTextBlocks) {
+      appendMountedMessageRow(item, message.role, message.text);
+    }
 
-  const body = document.createElement("pre");
-  body.className = `body ${mountedMessageKind(message.role)}`;
-  body.textContent = message.text;
+    renderMountedMessageBlocks(item, message, sessionId, skipTextBlocks);
+  } else {
+    renderMountedLegacyMessage(item, message, sessionId);
+  }
 
-  row.append(prefix, body);
+  if (message.streaming) {
+    item.dataset.streaming = "true";
+  }
 
+  return item;
+}
+
+function hasRenderableMessageBlocks(message: ChatMessage): boolean {
+  return Boolean(message.blocks?.some((block: ChatMessageBlock): boolean => {
+    return block.type === "tool" || block.text.trim().length > 0;
+  }));
+}
+
+function shouldRenderTextFallbackBeforeBlocks(message: ChatMessage): boolean {
+  return Boolean(message.text.trim()) && (!hasRenderableTextMessageBlock(message) || isMessageBlockCapReached(message));
+}
+
+function hasRenderableTextMessageBlock(message: ChatMessage): boolean {
+  return Boolean(message.blocks?.some((block: ChatMessageBlock): boolean => {
+    return block.type === "text" && block.text.trim().length > 0;
+  }));
+}
+
+function isMessageBlockCapReached(message: ChatMessage): boolean {
+  return (message.blocks?.length || 0) >= MAX_MESSAGE_BLOCKS;
+}
+
+function renderMountedMessageBlocks(item: HTMLElement, message: ChatMessage, sessionId: string, skipTextBlocks = false): void {
+  for (const block of message.blocks || []) {
+    if (block.type === "text") {
+      if (!skipTextBlocks) {
+        appendMountedMessageRow(item, message.role, block.text);
+      }
+    } else if (block.type === "thinking") {
+      item.append(renderMountedThinking(block.text, Boolean(message.streaming)));
+    } else if (block.type === "tool" && block.toolCall) {
+      const tool = message.toolCalls?.find((item: ChatToolCall): boolean => item.id === block.toolCall?.id) || block.toolCall;
+      item.append(renderMountedToolCard(tool, mountedToolKey(sessionId, message, tool)));
+    }
+  }
+}
+
+function renderMountedLegacyMessage(item: HTMLElement, message: ChatMessage, sessionId: string): void {
   if (shouldRenderMountedMessageRow(message)) {
-    item.append(row);
+    appendMountedMessageRow(item, message.role, message.text);
   }
 
   if (message.thinking) {
@@ -2379,12 +2457,27 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   for (const tool of message.toolCalls || []) {
     item.append(renderMountedToolCard(tool, mountedToolKey(sessionId, message, tool)));
   }
+}
 
-  if (message.streaming) {
-    item.dataset.streaming = "true";
+function appendMountedMessageRow(item: HTMLElement, role: ChatMessage["role"], text: string): void {
+  if (role === "assistant" && !text.trim()) {
+    return;
   }
 
-  return item;
+  const row = document.createElement("div");
+  row.className = "msg";
+  row.dataset.kind = mountedMessageKind(role);
+
+  const prefix = document.createElement("span");
+  prefix.className = `prefix ${mountedMessageKind(role)}`;
+  prefix.textContent = mountedMessagePrefix(role);
+
+  const body = document.createElement("pre");
+  body.className = `body ${mountedMessageKind(role)}`;
+  body.textContent = text;
+
+  row.append(prefix, body);
+  item.append(row);
 }
 
 function shouldRenderMountedMessageRow(message: ChatMessage): boolean {
@@ -2960,7 +3053,13 @@ function sessionForBackendState(store: ChatStore, backendSessionId: string | nul
 function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMessage[], optimisticEchoIds: string | string[] = ""): ChatMessage[] {
   const echoIds = Array.isArray(optimisticEchoIds) ? optimisticEchoIds : [optimisticEchoIds].filter(Boolean);
   const merged = new Map<string, ChatMessage>();
-  for (const message of localMessages) merged.set(message.id, message);
+  const orderById = new Map<string, number>();
+  let order = 0;
+
+  for (const message of localMessages) {
+    merged.set(message.id, message);
+    orderById.set(message.id, order++);
+  }
 
   const usedEchoIds: Set<string> = new Set<string>();
   for (const message of backendMessages) {
@@ -2970,13 +3069,26 @@ function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMe
       usedEchoIds.add(duplicate.id);
       merged.delete(duplicate.id);
       merged.set(message.id, message);
+      orderById.set(message.id, orderById.get(duplicate.id) ?? order++);
       continue;
+    }
+
+    if (!orderById.has(message.id)) {
+      orderById.set(message.id, order++);
     }
 
     merged.set(message.id, { ...merged.get(message.id), ...message });
   }
 
-  return [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
+  return [...merged.values()].sort((a, b): number => {
+    const createdAtDelta = a.createdAt - b.createdAt;
+
+    if (createdAtDelta !== 0) {
+      return createdAtDelta;
+    }
+
+    return (orderById.get(a.id) ?? 0) - (orderById.get(b.id) ?? 0);
+  });
 }
 
 function findOptimisticEchoMessage(
@@ -3296,12 +3408,42 @@ function sanitizeChatMessages(value: unknown): ChatMessage[] {
 }
 
 function sanitizeChatMessage(message: ChatMessage): ChatMessage {
-  if (!Array.isArray(message.toolCalls)) {
-    const { toolCalls: _toolCalls, ...rest } = message;
+  const sanitized: ChatMessage = { ...message };
+
+  if (Array.isArray(message.toolCalls)) {
+    sanitized.toolCalls = message.toolCalls.filter(isChatToolCall);
+  } else {
+    delete sanitized.toolCalls;
+  }
+
+  if (Array.isArray(message.blocks)) {
+    sanitized.blocks = message.blocks.filter(isChatMessageBlock).map(sanitizeChatMessageBlock);
+  } else {
+    delete sanitized.blocks;
+  }
+
+  return sanitized;
+}
+
+function sanitizeChatMessageBlock(block: ChatMessageBlock): ChatMessageBlock {
+  if (block.type !== "tool") {
+    const { toolCall: _toolCall, ...rest } = block;
     return rest;
   }
 
-  return { ...message, toolCalls: message.toolCalls.filter(isChatToolCall) };
+  return block;
+}
+
+function isChatMessageBlock(value: unknown): value is ChatMessageBlock {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.text !== "string") {
+    return false;
+  }
+
+  if (value.type === "text" || value.type === "thinking") {
+    return true;
+  }
+
+  return value.type === "tool" && isChatToolCall(value.toolCall);
 }
 
 function isChatToolCall(value: unknown): value is ChatToolCall {
