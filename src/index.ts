@@ -58,6 +58,7 @@ const STREAM_RENDER_MIN_MS = 250;
 const SPINNER_FRAME_COUNT = 6;
 const SPINNER_INTERVAL_MS = 150;
 const mountedExpandedToolCards: Set<string> = new Set<string>();
+const mountedMessageSignatures: WeakMap<HTMLElement, string> = new WeakMap<HTMLElement, string>();
 
 type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
 
@@ -2040,15 +2041,76 @@ function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMe
   }
 
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
-  container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
+  reconcileMountedBackendMessages(container, messages, sessionId);
   syncMountedScrollAfterRender(chatSurface);
 }
 
 function renderMountedSessionSwitch(chatSurface: HTMLElement, messages: ChatMessage[], sessionId: string): void {
   pruneMountedExpandedToolCards(messages, sessionId);
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
-  container.replaceChildren(...messages.map((message: ChatMessage): HTMLElement => renderMountedBackendMessage(message, sessionId)));
+  reconcileMountedBackendMessages(container, messages, sessionId);
   syncMountedScrollAfterRender(chatSurface);
+}
+
+function reconcileMountedBackendMessages(container: HTMLElement, messages: ChatMessage[], sessionId: string): void {
+  const existingItems: Map<string, HTMLElement> = mountedTranscriptItemsById(container);
+  const nextItems: HTMLElement[] = messages.map((message: ChatMessage): HTMLElement => {
+    const signature: string = `${sessionId}:${messageSignature(message)}`;
+    const existing: HTMLElement | undefined = existingItems.get(message.id);
+
+    if (existing && mountedMessageSignatures.get(existing) === signature) {
+      return existing;
+    }
+
+    const item: HTMLElement = renderMountedBackendMessage(message, sessionId);
+    mountedMessageSignatures.set(item, signature);
+    return item;
+  });
+  const nextItemSet: Set<HTMLElement> = new Set<HTMLElement>(nextItems);
+  let cursor: ChildNode | null = container.firstChild;
+
+  for (const item of nextItems) {
+    if (cursor !== item) {
+      container.insertBefore(item, cursor);
+    }
+
+    cursor = item.nextSibling;
+  }
+
+  for (const child of Array.from(container.children)) {
+    if (isMountedTranscriptItem(container, child) && !nextItemSet.has(child)) {
+      child.remove();
+      continue;
+    }
+
+    if (!isMountedTranscriptItem(container, child)) {
+      child.remove();
+    }
+  }
+}
+
+function mountedTranscriptItemsById(container: HTMLElement): Map<string, HTMLElement> {
+  const items: Map<string, HTMLElement> = new Map<string, HTMLElement>();
+
+  for (const child of Array.from(container.children)) {
+    if (!isMountedTranscriptItem(container, child)) {
+      continue;
+    }
+
+    const messageId: string = child.dataset.messageId || "";
+
+    if (messageId) {
+      items.set(messageId, child);
+    }
+  }
+
+  return items;
+}
+
+function isMountedTranscriptItem(container: HTMLElement, child: Element): child is HTMLElement {
+  const view = container.ownerDocument.defaultView as (Window & { HTMLElement: typeof HTMLElement }) | null;
+
+  return Boolean(view && child instanceof view.HTMLElement && child.classList.contains("transcript-item"));
 }
 
 function renderMountedDocumentation(chatSurface: HTMLElement): void {

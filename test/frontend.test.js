@@ -1241,6 +1241,61 @@ test("mounted submit deduplicates streaming chat state echo of current prompt", 
   });
 });
 
+test("mounted streaming render preserves unchanged transcript item nodes", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "stream-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "stream keyed";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"a"}\n\n'));
+    await tick(300);
+    const firstItems = [...window.document.querySelectorAll(".transcript-item")];
+    firstItems[0].tabIndex = -1;
+    firstItems[0].focus();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"b"}\n\n'));
+    await tick(300);
+    const secondItems = [...window.document.querySelectorAll(".transcript-item")];
+
+    assert.equal(firstItems.length, 2);
+    assert.equal(secondItems.length, 2);
+    assert.equal(secondItems[0], firstItems[0]);
+    assert.equal(window.document.activeElement, firstItems[0]);
+    assert.notEqual(secondItems[1], firstItems[1]);
+    assert.match(secondItems[1].textContent, /ab/);
+    cleanup();
+  });
+});
+
 test("mounted submit emits backend warnings as toasts", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
