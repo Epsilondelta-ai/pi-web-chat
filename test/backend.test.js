@@ -2,6 +2,7 @@ import { chmod, mkdtemp, readFile, readdir, writeFile, mkdir, symlink } from "no
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -166,6 +167,61 @@ test("runtimeStatus reads persisted pi-web status quotas", async () => {
   assert.equal(response.status.weeklyQuota, 14);
 });
 
+test("runtimeStatus fetches codex quotas through plugin backend launcher", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-root-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  await mkdir(join(root, ".pi"));
+  await mkdir(join(home, ".pi", "agent"), { recursive: true });
+  await writeFile(join(root, ".pi", "pi-web.json"), JSON.stringify({ status: { model: "GPT-5.5" } }));
+  await writeFile(join(home, ".pi", "agent", "auth.json"), JSON.stringify({
+    "openai-codex": {
+      type: "oauth",
+      access: "test-token",
+      accountId: "account-1",
+    },
+  }));
+
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push({
+      url: request.url,
+      authorization: request.headers.authorization,
+      accountId: request.headers["chatgpt-account-id"],
+    });
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({
+      rate_limit: {
+        primary_window: { used_percent: 16, limit_window_seconds: 300 * 60 },
+        secondary_window: { used_percent: 73, limit_window_seconds: 10080 * 60 },
+      },
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/`;
+    const response = await callBackend("runtimeStatus", root, {}, {
+      HOME: home,
+      PI_CODEX_CHATGPT_BASE_URL: baseURL,
+    });
+    assert.equal(response.status.model, "GPT-5.5");
+    assert.equal(response.status.modelProvider, "openai-codex");
+    assert.equal(response.status.fiveHourQuota, 84);
+    assert.equal(response.status.weeklyQuota, 27);
+    assert.deepEqual(requests, [{
+      url: "/backend-api/wham/usage",
+      authorization: "Bearer test-token",
+      accountId: "account-1",
+    }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("compiled runtimeStatus unwraps mounted data before reading workspace quotas", async () => {
   const rootA = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-root-a-"));
   const rootB = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-root-b-"));
@@ -207,28 +263,6 @@ test("runtimeStatus uses selected workspace path", async () => {
   const response = await callBackend("runtimeStatus", rootA, { workspacePath: rootB }, { HOME: home });
 
   assert.equal(response.status.model, "repo-b");
-});
-
-test("runtimeStatus falls back to pi RPC when settings omit model", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-rpc-"));
-  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
-  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
-  await mkdir(join(root, ".pi"));
-  await writeFile(join(bin, "pi"), `#!/usr/bin/env node
-process.stdin.resume();
-console.log(JSON.stringify({ status: { model: "live-model", modelProvider: "live-provider", thinkingLevel: "medium", fiveHourQuota: 42, weeklyQuota: 7 } }));
-`);
-  await chmod(join(bin, "pi"), 0o755);
-
-  const response = await callBackend("runtimeStatus", root, {}, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
-
-  assert.deepEqual(response.status, {
-    model: "live-model",
-    modelProvider: "live-provider",
-    thinkingLevel: "medium",
-    fiveHourQuota: 42,
-    weeklyQuota: 7,
-  });
 });
 
 test("readFile rejects path traversal", async () => {

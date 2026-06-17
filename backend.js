@@ -56,9 +56,10 @@ try {
   // Already executable or installed on a read-only filesystem.
 }
 
+const stdin = await readStdin();
 const run = spawnSync(binary, process.argv.slice(2), {
   encoding: "utf8",
-  input: await readStdin(),
+  input: stdin,
   maxBuffer: 1024 * 1024 * 32,
 });
 
@@ -67,9 +68,94 @@ if (run.error) {
   process.exit(1);
 }
 
+if (method === "runtimeStatus" && (run.status ?? 1) === 0) {
+  writeSync(1, await runtimeStatusWithPluginQuota(run.stdout || ""));
+  writeSync(2, run.stderr || "");
+  process.exit(0);
+}
+
 writeSync(1, run.stdout || "");
 writeSync(2, run.stderr || "");
 process.exit(run.status ?? 1);
+
+async function runtimeStatusWithPluginQuota(stdout) {
+  let payload;
+  try {
+    payload = JSON.parse(stdout || "{}");
+  } catch {
+    return stdout;
+  }
+
+  if (!payload || typeof payload !== "object") return stdout;
+  const status = payload.status && typeof payload.status === "object" ? payload.status : {};
+  payload.status = { ...status, ...(await codexQuotaStatus()) };
+  return `${JSON.stringify(payload)}\n`;
+}
+
+async function codexQuotaStatus() {
+  const credential = codexCredential();
+  if (!credential) return {};
+
+  const baseURL = (process.env.PI_CODEX_CHATGPT_BASE_URL || "https://chatgpt.com/backend-api/").replace(/\/+$/, "");
+  const response = await fetch(`${baseURL}/wham/usage`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${credential.access}`,
+      "chatgpt-account-id": credential.accountId,
+      "Content-Type": "application/json",
+    },
+    signal: AbortSignal.timeout(4000),
+  }).catch(() => undefined);
+
+  if (!response?.ok) return {};
+
+  const payload = await readCappedJson(response, maxToolArgsBytes * 512).catch(() => undefined);
+  const rateLimit = payload?.rate_limit && typeof payload.rate_limit === "object" ? payload.rate_limit : {};
+  return {
+    modelProvider: "openai-codex",
+    fiveHourQuota: remainingCodexQuota(rateLimit.primary_window),
+    weeklyQuota: remainingCodexQuota(rateLimit.secondary_window),
+  };
+}
+
+function codexCredential() {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  if (!home) return undefined;
+
+  try {
+    const auth = JSON.parse(readFileSync(join(home, ".pi", "agent", "auth.json"), "utf8"));
+    const credential = auth?.["openai-codex"];
+    if (!credential?.access || !credential?.accountId) return undefined;
+    return credential;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readCappedJson(response, limit) {
+  const reader = response.body?.getReader?.();
+  if (!reader) return response.json();
+
+  let size = 0;
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) throw new Error("quota response too large");
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function remainingCodexQuota(window) {
+  if (!window || typeof window !== "object") return undefined;
+  const used = Number(window.used_percent);
+  if (!Number.isFinite(used)) return undefined;
+  const seconds = Number(window.limit_window_seconds || 0);
+  if (Number.isFinite(seconds) && seconds > 0 && seconds !== 300 * 60 && seconds !== 10080 * 60) return undefined;
+  return Math.max(0, Math.min(100, Math.round(100 - used)));
+}
 
 function resolveBinary() {
   const os = { darwin: "darwin", linux: "linux" }[process.platform];

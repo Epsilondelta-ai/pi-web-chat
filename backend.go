@@ -353,7 +353,6 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 
 func workspaceRuntimeStatus(ctx context.Context, workspaceRoot string) runtimeStatusInfo {
 	status := runtimeStatusFromSettings(workspaceRoot)
-	status = mergeRuntimeStatus(status, runtimeStatusFromPiRPC(ctx, workspaceRoot))
 
 	if branch := currentGitBranch(ctx, workspaceRoot); branch != "" {
 		status.CurrentBranch = branch
@@ -465,64 +464,6 @@ func mergeRuntimeSettingsFields(target map[string]any, source map[string]any) {
 func stringMapValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)
 	return value
-}
-
-func runtimeStatusFromPiRPC(ctx context.Context, workspaceRoot string) runtimeStatusInfo {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "pi", "--mode", "rpc")
-	cmd.Dir = workspaceRoot
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return runtimeStatusInfo{}
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return runtimeStatusInfo{}
-	}
-	if err := cmd.Start(); err != nil {
-		return runtimeStatusInfo{}
-	}
-	_, _ = stdin.Write([]byte(`{"id":"runtime-status","type":"runtime_status"}` + "\n"))
-	_ = stdin.Close()
-
-	status := runtimeStatusInfo{}
-	found := false
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 16*1024), maxOutputBytes)
-	for scanner.Scan() {
-		status = mergeRuntimeStatus(status, runtimeStatusFromRPCLine(scanner.Bytes()))
-		if status.Model != "" || status.FiveHourQuota != nil || status.WeeklyQuota != nil {
-			found = true
-			break
-		}
-	}
-	if found && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-	_ = cmd.Wait()
-	return status
-}
-
-func runtimeStatusFromRPCLine(line []byte) runtimeStatusInfo {
-	var payload map[string]any
-	if json.Unmarshal(line, &payload) != nil {
-		return runtimeStatusInfo{}
-	}
-	if nested, ok := payload["status"].(map[string]any); ok {
-		payload = nested
-	}
-	if nested, ok := payload["runtimeStatus"].(map[string]any); ok {
-		payload = nested
-	}
-	return runtimeStatusInfo{
-		Model:         firstStringFromMap(payload, "model", "defaultModel"),
-		ModelProvider: firstStringFromMap(payload, "modelProvider", "provider", "defaultProvider"),
-		ThinkingLevel: firstStringFromMap(payload, "thinkingLevel", "defaultThinkingLevel"),
-		FiveHourQuota: intPointerFromMap(payload, "fiveHourQuota", "fiveHour"),
-		WeeklyQuota:   intPointerFromMap(payload, "weeklyQuota", "weekly"),
-	}
 }
 
 func firstStringFromMap(values map[string]any, keys ...string) string {
