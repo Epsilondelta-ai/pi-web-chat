@@ -210,6 +210,65 @@ test("activate requires modern pi-web mount APIs", async () => {
   });
 });
 
+test("mounted composer syncs prompt meta from existing runtime status", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.runtimeStatus = {
+      model: "GPT-5.5",
+      thinkingLevel: "high",
+      fiveHourQuota: 84,
+      weeklyQuota: 14,
+      currentBranch: "feature/ui",
+    };
+    app.loadRuntimeStatus = async (workspaceId) => {
+      app.loadedRuntimeWorkspace = workspaceId;
+    };
+
+    const cleanup = activate({ app, backend: async () => ({}), mount: createMount(window, app) });
+    await tick();
+
+    assert.equal(
+      window.document.querySelector("[data-prompt-meta]").textContent,
+      "GPT-5.5 (high) | 5h (84%) | Week (14%) | feature/ui",
+    );
+    assert.notEqual(window.document.querySelector(".prompt-meta-battery-full svg"), null);
+    assert.notEqual(window.document.querySelector(".prompt-meta-battery-low svg"), null);
+    assert.notEqual(window.document.querySelector(".prompt-meta-branch svg"), null);
+    assert.equal(app.loadedRuntimeWorkspace, "workspace-1");
+    cleanup();
+  });
+});
+
+test("mounted composer follows prompt meta updates and restores host method", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const calls = [];
+    const originalUpdatePromptMeta = (status = {}) => {
+      calls.push(status);
+      app.runtimeStatus = {
+        ...app.runtimeStatus,
+        ...status,
+        currentBranch: status.currentBranch || status.branch || app.runtimeStatus?.currentBranch,
+      };
+    };
+    app.updatePromptMeta = originalUpdatePromptMeta;
+    app.runtimeStatus = { model: "Claude", thinkingLevel: "off", currentBranch: "main" };
+
+    const cleanup = activate({ app, backend: async () => ({}), mount: createMount(window, app) });
+    await tick();
+
+    app.updatePromptMeta({ fiveHourQuota: 20, weeklyQuota: 21, branch: "dev" });
+
+    assert.equal(window.document.querySelector("[data-prompt-meta]").textContent, "Claude (off) | 5h (20%) | Week (21%) | dev");
+    assert.notEqual(window.document.querySelector(".prompt-meta-battery-low svg"), null);
+    assert.equal(calls.length, 2);
+
+    cleanup();
+
+    assert.equal(app.updatePromptMeta, originalUpdatePromptMeta);
+  });
+});
+
 test("mounted chatState preserves messages while sanitizing malformed tool calls", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

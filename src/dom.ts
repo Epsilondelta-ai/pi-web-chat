@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatToolCall, FileSearchResult, PluginCommand } from "./types";
+import type { ChatMessage, ChatToolCall, FileSearchResult, PluginCommand, RuntimeStatus } from "./types";
 
 const PLUGIN_ID = "pi-web-chat";
 const STYLE_ID = `${PLUGIN_ID}-style`;
@@ -25,6 +25,15 @@ const MATERIAL_ICONS: Record<"attachFile" | "stop" | "send" | "terminal", string
 
 function materialIcon(name: string, path: string): string {
   return `<svg class="material-icon" data-material-icon="${name}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="${path}"></path></svg>`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 export type ChatDom = {
@@ -71,7 +80,8 @@ export function createComposerSurface(): HTMLElement {
       </div>
       <div class="drop-overlay" hidden><span>drop to attach</span></div>
     </div>
-    <div class="prompt-meta" data-prompt-meta>— | <span class="prompt-meta-item prompt-meta-branch"><span>—</span></span></div>`;
+    <div class="prompt-meta" data-prompt-meta></div>`;
+  renderPromptMeta(surface, {});
   return surface;
 }
 
@@ -81,6 +91,70 @@ export function installBadge(app: HTMLElement): HTMLSpanElement {
   badge.textContent = "chat plugin";
   app.querySelector("[data-prompt-meta]")?.append(badge);
   return badge;
+}
+
+export function renderPromptMeta(root: HTMLElement, status: RuntimeStatus = {}, includeBadge = false): void {
+  const meta = root.querySelector<HTMLElement>("[data-prompt-meta]");
+
+  if (!meta) {
+    return;
+  }
+
+  const parts: string[] = [modelLabel(status.model || "—", status.thinkingLevel)];
+  const fiveHour = quotaLabel("5h", status.fiveHourQuota);
+  const weekly = quotaLabel("Week", status.weeklyQuota);
+  const branch = status.currentBranch || status.branch || "—";
+
+  if (fiveHour) {
+    parts.push(fiveHour);
+  }
+
+  if (weekly) {
+    parts.push(weekly);
+  }
+
+  parts.push(branchLabel(branch));
+  meta.innerHTML = parts.join(" | ");
+
+  if (includeBadge) {
+    meta.append(document.createTextNode(" | "), promptMetaBadge());
+  }
+}
+
+function promptMetaBadge(): HTMLSpanElement {
+  const badge = document.createElement("span");
+  badge.className = "prompt-meta-item pi-web-chat-badge";
+  badge.textContent = "chat plugin";
+  return badge;
+}
+
+function branchLabel(branch: string): string {
+  return `<span class="prompt-meta-item prompt-meta-branch">${promptMetaIcon("git-branch")}<span>${escapeHtml(branch)}</span></span>`;
+}
+
+function modelLabel(model: string, thinkingLevel?: string): string {
+  const safeModel = escapeHtml(model);
+  return thinkingLevel ? `${safeModel} (${escapeHtml(thinkingLevel)})` : safeModel;
+}
+
+function quotaLabel(label: string, quota?: number): string | undefined {
+  if (typeof quota !== "number" || !Number.isFinite(quota)) {
+    return undefined;
+  }
+
+  const percent = Math.max(0, Math.min(100, Math.round(quota)));
+  const level = percent >= 70 ? "full" : percent >= 30 ? "medium" : "low";
+  return `<span class="prompt-meta-item prompt-meta-battery prompt-meta-battery-${level}">${escapeHtml(label)} ${promptMetaIcon(`battery-${level}`)}(${percent}%)</span>`;
+}
+
+function promptMetaIcon(name: string): string {
+  const icons: Record<string, string> = {
+    "battery-full": `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 10v4"></path><path d="M14 10v4"></path><path d="M22 14v-4"></path><path d="M6 10v4"></path><rect x="2" y="6" width="16" height="12" rx="2"></rect></svg>`,
+    "battery-medium": `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14v-4"></path><path d="M22 14v-4"></path><path d="M6 14v-4"></path><rect x="2" y="6" width="16" height="12" rx="2"></rect></svg>`,
+    "battery-low": `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 14v-4"></path><path d="M6 14v-4"></path><rect x="2" y="6" width="16" height="12" rx="2"></rect></svg>`,
+    "git-branch": `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg>`,
+  };
+  return icons[name] || "";
 }
 
 export function createChatDom(): ChatDom {

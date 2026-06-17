@@ -4,13 +4,13 @@ import {
   createChatDom,
   createChatSurface,
   createComposerSurface,
-  installBadge,
   installStyles,
   pluginClass,
   pluginStyleText,
   renderAttachmentChips,
   renderFileRefs,
   renderMessages,
+  renderPromptMeta,
   renderSlashCommands,
   setAttachButtonMode,
   toolArgsBodyText,
@@ -36,6 +36,7 @@ import type {
   PluginCommand,
   PluginContext,
   Runtime,
+  RuntimeStatus,
   SidebarActionEvent,
   SidebarSelectedSession,
   SidebarWorkspace,
@@ -62,7 +63,13 @@ const SPINNER_INTERVAL_MS = 150;
 const mountedExpandedToolCards: Set<string> = new Set<string>();
 const mountedMessageSignatures: WeakMap<HTMLElement, string> = new WeakMap<HTMLElement, string>();
 
-type AppWithRuntime = HTMLElement & { piWebChat?: Runtime; dataset: DOMStringMap };
+type AppWithRuntime = HTMLElement & {
+  piWebChat?: Runtime;
+  runtimeStatus?: RuntimeStatus;
+  updatePromptMeta?: (status?: RuntimeStatus) => void;
+  loadRuntimeStatus?: (workspaceId?: string) => Promise<void> | void;
+  dataset: DOMStringMap;
+};
 
 type Channels = {
   input$: BehaviorSubject<string>;
@@ -203,6 +210,7 @@ export {
   pluginClass,
   pluginStyleText,
   renderMessages,
+  renderPromptMeta,
   setComposerMode,
   toolArgsBodyText,
   toolArgsInlineText,
@@ -249,7 +257,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
-  const badge = app ? disposables.add(installBadge(app)) : undefined;
+  bindMountedPromptMeta(disposables, app, composerSurface);
   app?.classList.add(pluginClass());
 
   const cleanup = (): void => {
@@ -257,7 +265,6 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     mountedState.sessionEventsAbort?.abort();
     disposables.dispose();
     mountedExpandedToolCards.clear();
-    badge?.remove();
     style.remove();
     app?.classList.remove(pluginClass());
     if (app?.piWebChat === runtime) delete app.piWebChat;
@@ -268,6 +275,37 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
 
   return cleanup;
+}
+
+function bindMountedPromptMeta(disposables: Disposables, app: AppWithRuntime | undefined, composerSurface: HTMLElement): void {
+  renderPromptMeta(composerSurface, app?.runtimeStatus || {});
+
+  if (!app) {
+    return;
+  }
+
+  const originalUpdatePromptMeta = app.updatePromptMeta;
+  const wrappedUpdatePromptMeta = (status: RuntimeStatus = {}): void => {
+    app.runtimeStatus = {
+      ...app.runtimeStatus,
+      ...status,
+      currentBranch: status.currentBranch || status.branch || app.runtimeStatus?.currentBranch,
+    };
+    originalUpdatePromptMeta?.call(app, status);
+    renderPromptMeta(composerSurface, app.runtimeStatus || status);
+  };
+  app.updatePromptMeta = wrappedUpdatePromptMeta;
+
+  disposables.add({
+    remove: (): void => {
+      if (app.updatePromptMeta === wrappedUpdatePromptMeta) {
+        app.updatePromptMeta = originalUpdatePromptMeta;
+      }
+    },
+  });
+
+  app.updatePromptMeta(app.runtimeStatus || {});
+  void app.loadRuntimeStatus?.(app.dataset.activeWorkspaceId);
 }
 
 function bindMountedComposer(

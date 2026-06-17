@@ -189,6 +189,17 @@ export type ChatStore = {
   sessions: ChatSession[];
 };
 
+export type RuntimeStatus = {
+  model?: string;
+  modelProvider?: string;
+  thinkingLevel?: string;
+  fiveHourQuota?: number;
+  weeklyQuota?: number;
+  currentBranch?: string;
+  branch?: string;
+  warning?: string;
+};
+
 export type Runtime = {
   dispose(): void;
 };
