@@ -863,6 +863,41 @@ setTimeout(() => process.exit(2), 3000);
   assert.equal(content.trim(), message);
 });
 
+test("chatState reports active run id while selected session is streaming", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  const ready = join(home, "pi-ready.txt");
+  const fakePi = join(bin, "pi");
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "streaming-session.jsonl"), JSON.stringify({ type: "session", id: "streaming-session" }));
+  await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require('fs');
+fs.writeFileSync(process.env.PI_READY_MARKER, 'ready');
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+  await chmod(fakePi, 0o755);
+
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_READY_MARKER: ready };
+  const start = await callBackend("startPrompt", root, { sessionId: "streaming-session", text: "still running" }, env);
+  let readyText = "";
+  for (let index = 0; index < 20 && readyText !== "ready"; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    readyText = await readFile(ready, "utf8").catch(() => "");
+  }
+  assert.equal(readyText, "ready");
+
+  const state = await callBackend("chatState", root, { sessionId: start.activeSessionId }, env);
+  assert.equal(state.activeSessionId, start.activeSessionId);
+  assert.equal(state.runId, start.runId);
+  assert.equal(state.isStreaming, true);
+
+  const abort = await runBackendBinary("abortPrompt", root, { data: { runId: start.runId } }, env);
+  assert.equal(abort.code, 0, abort.stderr);
+});
+
 test("compiled backend abortPrompt terminates the spawned pi child", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));

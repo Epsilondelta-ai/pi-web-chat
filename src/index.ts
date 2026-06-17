@@ -111,6 +111,7 @@ type MountedState = {
   fallbackSubmittingSessionId?: string;
   resolvingSubmit?: boolean;
   pendingSteering?: MountedSteeringRequest;
+  onRunStateChange?: () => void;
   runEventsAbort?: AbortController;
   sessionEventsAbort?: AbortController;
 };
@@ -544,8 +545,15 @@ function bindMountedComposer(
     });
   }
 
+  mountedState.onRunStateChange = sync;
   disposables.add({
-    remove: (): void => clearMountedFileSearchTimer(triggers),
+    remove: (): void => {
+      clearMountedFileSearchTimer(triggers);
+
+      if (mountedState.onRunStateChange === sync) {
+        mountedState.onRunStateChange = undefined;
+      }
+    },
   });
   syncMode();
   sync();
@@ -601,6 +609,8 @@ async function stopMountedRun(
     if (mountedState.activeRunId === runId) {
       mountedState.activeRunId = undefined;
       mountedState.activeRunSessionId = undefined;
+      mountedState.activeRunWorkspacePath = undefined;
+      mountedState.activeRunWorkspaceId = undefined;
     }
   }
 }
@@ -1490,6 +1500,7 @@ async function steerMountedPrompt(
     }
 
     discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+    removePendingPromptEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
 
     if (isUnsupportedStreamingBackend(error)) {
       renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
@@ -1518,7 +1529,7 @@ function createMountedSteeringDelay(
     timeout = setTimeout((): void => {
       onDispatch();
       resolve();
-    }, 100);
+    }, STEERING_CANCEL_WINDOW_MS);
     signal.addEventListener("abort", (): void => {
       clearTimeout(timeout);
       reject(new DOMException("Steering cancelled", "AbortError"));
@@ -1963,6 +1974,7 @@ async function openMountedSessionEvents(
       const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
       const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
       const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoIds);
+      syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
       clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoIds);
       if (messages.length) {
         render.request();
@@ -2001,6 +2013,7 @@ async function refreshMountedBackendChatState(
     const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
     const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
     const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoIds);
+    syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
     clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoIds);
     if (messages.length) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
@@ -2028,8 +2041,34 @@ function chatStateEventResponse(event: ChatEvent): BackendResponse {
   return {
     activeSessionId: event.activeSessionId,
     messages: event.messages,
+    runId: event.runId,
     isStreaming: event.isStreaming,
   };
+}
+
+function syncMountedRunStateFromBackendResponse(
+  mountedState: MountedState,
+  response: BackendResponse,
+  sessionId: string,
+  workspacePath: string,
+  workspaceId: string,
+): void {
+  if (response.isStreaming === true && typeof response.runId === "string" && response.runId) {
+    mountedState.activeRunId = response.runId;
+    mountedState.activeRunSessionId = typeof response.activeSessionId === "string" && response.activeSessionId ? response.activeSessionId : sessionId;
+    mountedState.activeRunWorkspacePath = workspacePath;
+    mountedState.activeRunWorkspaceId = workspaceId;
+    mountedState.onRunStateChange?.();
+    return;
+  }
+
+  if (response.isStreaming === false && (!response.activeSessionId || response.activeSessionId === mountedState.activeRunSessionId)) {
+    mountedState.activeRunId = undefined;
+    mountedState.activeRunSessionId = undefined;
+    mountedState.activeRunWorkspacePath = undefined;
+    mountedState.activeRunWorkspaceId = undefined;
+    mountedState.onRunStateChange?.();
+  }
 }
 
 function activeWorkspacePath(context: PluginContext): string {
@@ -3384,6 +3423,17 @@ function pushPendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, se
 
 function pendingPromptEchoIds(pendingPromptEchoIds: Map<string, string[]>, sessionId: string): string[] {
   return pendingPromptEchoIds.get(sessionId) || [];
+}
+
+function removePendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, sessionId: string, echoId: string): void {
+  const remaining: string[] = (pendingPromptEchoIds.get(sessionId) || []).filter((item: string): boolean => item !== echoId);
+
+  if (remaining.length) {
+    pendingPromptEchoIds.set(sessionId, remaining);
+    return;
+  }
+
+  pendingPromptEchoIds.delete(sessionId);
 }
 
 function movePendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, fromSessionId: string, toSessionId: string): void {

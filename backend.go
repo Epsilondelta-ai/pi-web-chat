@@ -37,10 +37,12 @@ const (
 	maxChatToolArgsBytes             = 1000
 	maxChatToolCallsPerMessage       = 100
 	maxChatMessageBlocks             = 200
+	maxActiveRunStateScan            = 512
 	defaultMaxSkillDiscoveryDirs     = 4000
 	defaultMaxWorkspaceSearchEntries = 20000
 	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
 	envMaxWorkspaceSearchEntries     = "PI_WEB_CHAT_MAX_WORKSPACE_SEARCH_ENTRIES"
+	activeRunStateTtl                = time.Hour
 )
 
 var skipDirs = map[string]bool{
@@ -1133,7 +1135,11 @@ func abortPiPrompt(input request) (any, error) {
 	_ = os.Remove(state.PromptPath)
 	_ = os.Remove(state.SteeringPath)
 	_ = os.Remove(state.SteeringAckPath)
-	if err := writeGoStreamState(goStreamStatePath(state.RunID), state); err != nil {
+	statePath, err := streamStatePath(state.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeGoStreamState(statePath, state); err != nil {
 		return nil, err
 	}
 	return map[string]any{"aborted": true, "runId": state.RunID}, nil
@@ -1491,10 +1497,11 @@ func readGoStreamEvents(path string, cursor int) ([]streamEvent, int, error) {
 }
 
 func readGoStreamState(runID string) (streamRunState, error) {
-	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") || strings.Contains(runID, "..") || runID == "" {
-		return streamRunState{}, errors.New("invalid runId")
+	statePath, err := streamStatePath(runID)
+	if err != nil {
+		return streamRunState{}, err
 	}
-	return readGoStreamStateByPath(goStreamStatePath(runID))
+	return readGoStreamStateByPath(statePath)
 }
 
 func readGoStreamStateByPath(path string) (streamRunState, error) {
@@ -1529,8 +1536,35 @@ func goStreamRunDir() string {
 	return filepath.Join(os.TempDir(), "pi-web-chat-runs-go")
 }
 
+func jsStreamRunDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+	return filepath.Join(home, ".pi", "web-chat", "runs")
+}
+
 func goStreamStatePath(runID string) string {
 	return filepath.Join(goStreamRunDir(), runID+".json")
+}
+
+func jsStreamStatePath(runID string) string {
+	return filepath.Join(jsStreamRunDir(), runID+".json")
+}
+
+func streamStatePath(runID string) (string, error) {
+	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") || strings.Contains(runID, "..") || runID == "" {
+		return "", errors.New("invalid runId")
+	}
+	goPath := goStreamStatePath(runID)
+	if _, err := os.Stat(goPath); err == nil {
+		return goPath, nil
+	}
+	jsPath := jsStreamStatePath(runID)
+	if _, err := os.Stat(jsPath); err == nil {
+		return jsPath, nil
+	}
+	return goPath, nil
 }
 
 func stringFromAny(value any) string {
@@ -1880,7 +1914,67 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 		last := messages[len(messages)-1]
 		isStreaming = isAssistantMessageStreaming(last)
 	}
-	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": isStreaming}, nil
+	activeRunID := activeRunIDForSession(sessionID, sessionFile)
+	if activeRunID != "" {
+		isStreaming = true
+	}
+	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "runId": activeRunID, "isStreaming": isStreaming}, nil
+}
+
+func activeRunIDForSession(sessionID string, sessionFile string) string {
+	latestRunID := ""
+	latestUpdatedAt := int64(0)
+	for _, statePath := range recentRunStatePaths([]string{goStreamRunDir(), jsStreamRunDir()}) {
+		state, err := readGoStreamStateByPath(statePath)
+		if err != nil || (state.Status != "running" && state.Status != "starting") {
+			continue
+		}
+		if sessionFile != "" {
+			if state.SessionFile != sessionFile {
+				continue
+			}
+		} else if state.ActiveSessionID != sessionID {
+			continue
+		}
+		if state.UpdatedAt >= latestUpdatedAt {
+			latestUpdatedAt = state.UpdatedAt
+			latestRunID = state.RunID
+		}
+	}
+	return latestRunID
+}
+
+func recentRunStatePaths(dirs []string) []string {
+	paths := []string{}
+	cutoff := time.Now().Add(-activeRunStateTtl)
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	sort.Slice(paths, func(left int, right int) bool {
+		leftInfo, leftErr := os.Stat(paths[left])
+		rightInfo, rightErr := os.Stat(paths[right])
+		if leftErr != nil || rightErr != nil {
+			return leftErr == nil
+		}
+		return leftInfo.ModTime().After(rightInfo.ModTime())
+	})
+	if len(paths) > maxActiveRunStateScan {
+		return paths[:maxActiveRunStateScan]
+	}
+	return paths
 }
 
 func promptWorkspaceRoot(workspaceRoot string, input request) (string, error) {
