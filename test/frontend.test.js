@@ -1606,9 +1606,14 @@ test("mounted steering can be cancelled before backend dispatch", async () => {
 
         return {};
       },
-      backendStream: async (method) => {
+      backendStream: async (method, _input, options) => {
         if (method === "streamEventsSse") {
-          return new ReadableStream({ start(controller) { streamController = controller; } });
+          return new ReadableStream({
+            start(controller) {
+              streamController = controller;
+              options?.signal?.addEventListener("abort", () => controller.close(), { once: true });
+            },
+          });
         }
 
         return new ReadableStream({ start() {} });
@@ -1619,27 +1624,32 @@ test("mounted steering can be cancelled before backend dispatch", async () => {
     const textarea = window.document.querySelector(".prompt-textarea");
     const sendButton = window.document.querySelector(".send-btn");
     const stopButton = window.document.querySelector(".stop-btn");
-    textarea.value = "first";
-    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
-    sendButton.click();
-    await tick();
-    assert.ok(streamController);
+    try {
+      textarea.value = "first";
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      sendButton.click();
+      await tick();
+      assert.ok(streamController);
 
-    textarea.value = "second";
-    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
-    sendButton.click();
-    await tick();
+      textarea.value = "second";
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      sendButton.click();
+      await tick();
 
-    assert.equal(sendButton.dataset.mode, "steering");
-    assert.equal(stopButton.title, "cancel steering");
-    stopButton.click();
-    await tick(STEERING_CANCEL_WAIT_MS);
+      assert.equal(sendButton.dataset.mode, "steering");
+      assert.equal(stopButton.title, "cancel steering");
+      assert.equal(window.document.querySelector(".pending-steering-text").textContent, "second");
+      assert.equal(window.document.querySelector("[data-action='cancel-steering']").title, "cancel steering");
+      window.document.querySelector("[data-action='cancel-steering']").click();
+      await tick(STEERING_CANCEL_WAIT_MS);
 
-    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
-    const session = store.sessions.find((item) => item.id === "steer-cancel-session");
-    assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 0);
-    assert.deepEqual(session.messages.filter((message) => message.role === "user").map((message) => message.text), ["first"]);
-    cleanup();
+      const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+      const session = store.sessions.find((item) => item.id === "steer-cancel-session");
+      assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 0);
+      assert.deepEqual(session.messages.filter((message) => message.role === "user").map((message) => message.text), ["first"]);
+    } finally {
+      cleanup();
+    }
   });
 });
 

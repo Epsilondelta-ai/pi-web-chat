@@ -268,6 +268,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected.sessionId);
   }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
+  bindMountedSteeringCancel(disposables, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
   bindMountedPromptMeta(context, composerSurface);
   app?.classList.add(pluginClass());
@@ -570,6 +571,36 @@ function isMountedRunBusy(mountedState: MountedState): boolean {
   );
 }
 
+function bindMountedSteeringCancel(
+  disposables: Disposables,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+): void {
+  disposables.listen(chatSurface, "click", (event: Event): void => {
+    const target = event.target as { closest?: (selector: string) => HTMLButtonElement | null } | null;
+    const button = target?.closest?.("[data-action='cancel-steering']");
+
+    if (!button) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const sessionId = button.dataset.sessionId || "";
+    const messageId = button.dataset.messageId || "";
+    const cancelled = cancelMountedSteering(store, mountedState);
+
+    if (!cancelled && sessionId && messageId) {
+      discardMountedPendingMessage(store, sessionId, messageId);
+    }
+
+    if (sessionId && store.activeSessionId === sessionId) {
+      renderMountedBackendMessages(chatSurface, sessionById(store, sessionId).messages, sessionId);
+    }
+  });
+}
+
 async function stopMountedRun(
   context: PluginContext,
   chatSurface: HTMLElement,
@@ -617,17 +648,18 @@ async function stopMountedRun(
   }
 }
 
-function cancelMountedSteering(store: ChatStore, mountedState: MountedState): void {
+function cancelMountedSteering(store: ChatStore, mountedState: MountedState): boolean {
   const pending = mountedState.pendingSteering;
 
   if (!pending || pending.sent) {
-    return;
+    return false;
   }
 
   clearTimeout(pending.timeout);
   pending.controller.abort();
   mountedState.pendingSteering = undefined;
   discardMountedPendingMessage(store, pending.sessionId, pending.messageId);
+  return true;
 }
 
 function syncMountedAttachmentChips(
@@ -1458,6 +1490,7 @@ async function steerMountedPrompt(
     text,
     attachments: sanitizeAttachmentsForStorage(attachments),
     createdAt: Date.now(),
+    meta: { piWebChatSteeringState: "pending" },
   };
   const session = sessionById(store, targetSessionId);
   const controller = new AbortController();
@@ -1466,6 +1499,12 @@ async function steerMountedPrompt(
 
     if (pending) {
       pending.sent = true;
+      markMountedSteeringMessageSent(store, pending.sessionId, pending.messageId);
+
+      if (store.activeSessionId === pending.sessionId) {
+        renderMountedBackendMessages(chatSurface, sessionById(store, pending.sessionId).messages, pending.sessionId);
+      }
+
       onStateChange();
     }
   });
@@ -1549,6 +1588,20 @@ function discardMountedPendingMessage(store: ChatStore, sessionId: string, messa
 
   session.messages = session.messages.filter((message) => message.id !== messageId);
   removeEmptyInactiveSession(store, session.id);
+  saveStore(store);
+}
+
+function markMountedSteeringMessageSent(store: ChatStore, sessionId: string, messageId: string): void {
+  const message = sessionById(store, sessionId).messages.find((item: ChatMessage): boolean => item.id === messageId);
+
+  if (!message?.meta) {
+    return;
+  }
+
+  delete message.meta.piWebChatSteeringState;
+  if (Object.keys(message.meta).length === 0) {
+    delete message.meta;
+  }
   saveStore(store);
 }
 
@@ -2694,7 +2747,9 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   item.className = "transcript-item";
   item.dataset.messageId = message.id;
 
-  if (hasRenderableMessageBlocks(message)) {
+  if (isPendingMountedSteeringMessage(message)) {
+    appendMountedPendingSteeringRow(item, message, sessionId);
+  } else if (hasRenderableMessageBlocks(message)) {
     const skipTextBlocks = shouldRenderTextFallbackBeforeBlocks(message);
 
     if (skipTextBlocks) {
@@ -2711,6 +2766,37 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   }
 
   return item;
+}
+
+function isPendingMountedSteeringMessage(message: ChatMessage): boolean {
+  return message.role === "user" && message.meta?.piWebChatSteeringState === "pending";
+}
+
+function appendMountedPendingSteeringRow(item: HTMLElement, message: ChatMessage, sessionId: string): void {
+  const row = document.createElement("div");
+  row.className = "msg pending-steering";
+  row.dataset.kind = "user";
+
+  const prefix = document.createElement("span");
+  prefix.className = "prefix user";
+  prefix.textContent = mountedMessagePrefix("user");
+
+  const body = document.createElement("small");
+  body.className = "body user pending-steering-text";
+  body.textContent = message.text;
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "pending-steering-cancel";
+  cancel.dataset.action = "cancel-steering";
+  cancel.dataset.sessionId = sessionId;
+  cancel.dataset.messageId = message.id;
+  cancel.setAttribute("aria-label", "cancel steering");
+  cancel.title = "cancel steering";
+  cancel.textContent = "×";
+
+  row.append(prefix, body, cancel);
+  item.append(row);
 }
 
 function hasRenderableMessageBlocks(message: ChatMessage): boolean {

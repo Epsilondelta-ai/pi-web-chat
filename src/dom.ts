@@ -568,6 +568,32 @@ export function pluginStyleText(): string {
       color: var(--fg-2, #a3a3a3);
     }
 
+    .pi-web-chat-surface .msg.pending-steering {
+      align-items: center;
+      margin-bottom: 10px;
+      opacity: 0.62;
+    }
+
+    .pi-web-chat-surface .pending-steering-text {
+      font-size: var(--text-sm, 13px);
+      color: var(--fg-3, #8b8b8b);
+    }
+
+    .pi-web-chat-surface .pending-steering-cancel {
+      border: 0;
+      background: transparent;
+      color: var(--fg-3, #8b8b8b);
+      cursor: pointer;
+      font: inherit;
+      line-height: 1;
+      padding: 2px 6px;
+    }
+
+    .pi-web-chat-surface .pending-steering-cancel:hover,
+    .pi-web-chat-surface .pending-steering-cancel:focus-visible {
+      color: var(--fg-1, #d4d4d4);
+    }
+
     .pi-web-chat-composer {
       display: block;
       border-top: 1px solid var(--border, #24313a);
