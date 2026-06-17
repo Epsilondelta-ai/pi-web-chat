@@ -233,6 +233,12 @@ test("mounted composer ignores host runtime meta and uses plugin backend", async
     window.setInterval = () => {
       throw new Error("prompt meta must not poll");
     };
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-2",
+        workspaces: [{ id: "workspace-2", path: "/tmp/runtime-workspace" }],
+      }),
+    };
 
     const cleanup = activate({
       app,
@@ -261,7 +267,10 @@ test("mounted composer ignores host runtime meta and uses plugin backend", async
     assert.notEqual(window.document.querySelector(".prompt-meta-battery-full svg"), null);
     assert.notEqual(window.document.querySelector(".prompt-meta-battery-low svg"), null);
     assert.notEqual(window.document.querySelector(".prompt-meta-branch svg"), null);
-    assert.deepEqual(backendCalls[0], { method: "runtimeStatus", input: { data: {} } });
+    assert.deepEqual(backendCalls[0], {
+      method: "runtimeStatus",
+      input: { workspaceId: "workspace-2", data: { workspacePath: "/tmp/runtime-workspace" } },
+    });
     cleanup();
     window.setInterval = originalSetInterval;
   });

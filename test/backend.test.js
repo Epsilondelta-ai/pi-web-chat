@@ -147,16 +147,40 @@ test("runtimeStatus returns prompt metadata from settings and git branch without
   });
 });
 
-test("runtimeStatus does not fall back to pi RPC when settings omit model", async () => {
+test("runtimeStatus uses selected workspace path", async () => {
+  const rootA = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-a-"));
+  const rootB = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-b-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  await mkdir(join(rootA, ".pi"));
+  await mkdir(join(rootB, ".pi"));
+  await writeFile(join(rootA, ".pi", "settings.json"), JSON.stringify({ defaultModel: "repo-a" }));
+  await writeFile(join(rootB, ".pi", "settings.json"), JSON.stringify({ defaultModel: "repo-b" }));
+
+  const response = await callBackend("runtimeStatus", rootA, { workspacePath: rootB }, { HOME: home });
+
+  assert.equal(response.status.model, "repo-b");
+});
+
+test("runtimeStatus falls back to pi RPC when settings omit model", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-rpc-"));
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
   await mkdir(join(root, ".pi"));
-  await writeFile(join(bin, "pi"), "#!/usr/bin/env node\nthrow new Error('runtimeStatus must not spawn pi');\n");
+  await writeFile(join(bin, "pi"), `#!/usr/bin/env node
+process.stdin.resume();
+console.log(JSON.stringify({ status: { model: "live-model", modelProvider: "live-provider", thinkingLevel: "medium", fiveHourQuota: 42, weeklyQuota: 7 } }));
+`);
+  await chmod(join(bin, "pi"), 0o755);
 
   const response = await callBackend("runtimeStatus", root, {}, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
 
-  assert.deepEqual(response.status, { thinkingLevel: "off" });
+  assert.deepEqual(response.status, {
+    model: "live-model",
+    modelProvider: "live-provider",
+    thinkingLevel: "medium",
+    fiveHourQuota: 42,
+    weeklyQuota: 7,
+  });
 });
 
 test("readFile rejects path traversal", async () => {
