@@ -1552,6 +1552,7 @@ test("mounted streaming render preserves ordered thinking text and tool blocks",
 
     runController.enqueue(encoder.encode('event: thinking.delta\ndata: {"type":"thinking.delta","delta":"think 1"}\n\n'));
     runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"answer 1"}\n\n'));
+    runController.enqueue(encoder.encode('event: tool.start\ndata: {"type":"tool.start","toolName":"tool","argsStatus":"unavailable"}\n\n'));
     runController.enqueue(encoder.encode('event: tool.start\ndata: {"type":"tool.start","toolCallId":"t1","toolName":"bash","argsStatus":"empty"}\n\n'));
     runController.enqueue(encoder.encode('event: thinking.delta\ndata: {"type":"thinking.delta","delta":"think 2"}\n\n'));
     runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"answer 2"}\n\n'));
@@ -1574,6 +1575,80 @@ test("mounted streaming render preserves ordered thinking text and tool blocks",
     });
 
     assert.deepEqual(ordered, ["thinking:think 1", "text:answer 1", "tool:bash", "thinking:think 2", "text:answer 2"]);
+    cleanup();
+  });
+});
+
+test("mounted streaming reconciles persisted assistant reply after backend state refresh", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let activeSessionId = "";
+    let runController;
+    let sessionController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          activeSessionId = input.data.sessionId;
+          return { activeSessionId, runId: "reconcile-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              sessionController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "dedupe assistant";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"final answer"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+
+    const backendState = JSON.stringify({
+      type: "chat.state",
+      activeSessionId,
+      messages: [
+        { id: "backend-user", role: "user", text: "dedupe assistant", createdAt: 1 },
+        { id: "backend-assistant", role: "assistant", text: "final answer", createdAt: 2 },
+      ],
+    });
+    sessionController.enqueue(encoder.encode(`event: chat.state\ndata: ${backendState}\n\n`));
+    await tick(300);
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === activeSessionId);
+    const assistantMessages = session.messages.filter((message) => message.role === "assistant");
+    assert.equal(assistantMessages.length, 1);
+    assert.equal(assistantMessages[0].id, "backend-assistant");
+    assert.equal(assistantMessages[0].text, "final answer");
     cleanup();
   });
 });

@@ -495,6 +495,7 @@ test("streaming methods capture pi rpc text thinking and tool events", async () 
   const fakePi = join(bin, "pi");
   await writeFile(fakePi, delayedRpcPiScript(`    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'think' } }));
     console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } }));
+    console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: {} } }));
     console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't0', name: 'read', arguments: { path: 'README.md' } } } }));
     console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id: 't0', name: 'read' } } }));
     console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't2', name: 'edit', arguments: { patch: 'x'.repeat(2000) } } } }));
@@ -519,6 +520,7 @@ test("streaming methods capture pi rpc text thinking and tool events", async () 
   assert.ok(types.includes("tool.start"));
   assert.ok(types.includes("tool.delta"));
   assert.ok(types.includes("tool.end"));
+  assert.equal(events.some((event) => event.type === "tool.start" && event.toolCallId === ""), false);
   assert.deepEqual(events.find((event) => event.toolCallId === "t0" && event.type === "tool.start").args, { path: "README.md" });
   assert.equal(events.find((event) => event.toolCallId === "t0" && event.type === "tool.start").argsStatus, "present");
   assert.equal(events.find((event) => event.toolCallId === "t0" && event.type === "tool.end").argsStatus, "unavailable");

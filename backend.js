@@ -499,9 +499,9 @@ function mapRpcLine(line, emit) {
     const delta = event.assistantMessageEvent || {};
     if (delta.type === "text_delta") emit({ type: "text.delta", delta: String(delta.delta || "") });
     else if (delta.type === "thinking_delta") emit({ type: "thinking.delta", delta: String(delta.delta || "") });
-    else if (delta.type === "toolcall_start") emit(toolCallStreamEvent("tool.start", delta));
+    else if (delta.type === "toolcall_start") emitToolCallStreamEvent(emit, "tool.start", delta);
     else if (delta.type === "toolcall_delta") emit({ type: "tool.delta", toolCallId: delta.toolCallId || delta.id || "", delta: String(delta.delta || "") });
-    else if (delta.type === "toolcall_end") emit(toolCallStreamEvent("tool.end", delta));
+    else if (delta.type === "toolcall_end") emitToolCallStreamEvent(emit, "tool.end", delta);
     else emit({ type: "message.event", event: delta.type || "update" });
     return event.type;
   }
@@ -517,10 +517,18 @@ function mapRpcLine(line, emit) {
   return event.type;
 }
 
+function emitToolCallStreamEvent(emit, type, delta) {
+  const event = toolCallStreamEvent(type, delta);
+  if (event) emit(event);
+}
+
 function toolCallStreamEvent(type, delta) {
   const toolCall = delta.toolCall && typeof delta.toolCall === "object" ? delta.toolCall : {};
   const { args, argsStatus } = toolArgsFromSources(toolCall, delta);
-  return { type, toolCallId: toolCall.id || delta.id || "", toolName: toolCall.name || delta.name || "tool", args, argsStatus };
+  const toolCallId = toolCall.id || delta.id || "";
+  const toolName = toolCall.name || delta.name || "";
+  if (!toolCallId && (!toolName || toolName === "tool") && argsStatus === "unavailable") return null;
+  return { type, toolCallId, toolName: toolName || "tool", args, argsStatus };
 }
 
 function toolArgsFromSources(...sources) {
