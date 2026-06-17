@@ -1422,17 +1422,26 @@ func mapAssistantToolCallEvent(event map[string]any, typeName string) streamEven
 	if toolName == "" {
 		toolName = stringFromAny(event["name"])
 	}
+
+	args, argsStatus := trimmedToolArgsFromMaps(toolCall, event)
+	if isIncompleteAssistantToolCall(toolID, toolName, argsStatus) {
+		return nil
+	}
+
 	if toolName == "" {
 		toolName = "tool"
 	}
 
-	args, argsStatus := trimmedToolArgsFromMaps(toolCall, event)
 	mappedType := "tool.start"
 	if typeName == "toolcall_end" {
 		mappedType = "tool.end"
 	}
 
 	return streamEvent{"type": mappedType, "toolCallId": toolID, "toolName": toolName, "args": args, "argsStatus": argsStatus}
+}
+
+func isIncompleteAssistantToolCall(toolID, toolName, argsStatus string) bool {
+	return toolID == "" && (toolName == "" || toolName == "tool") && argsStatus == "unavailable"
 }
 
 func completeGoStreamRunWithError(eventsPath, statePath string, err error) {
