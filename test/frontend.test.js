@@ -1419,12 +1419,211 @@ test("mounted submit rejects steering without starting a competing run when back
     textarea.value = "second";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
-    await tick();
+    await tick(140);
     await tick();
 
     assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 1);
     assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
     assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 0);
+    cleanup();
+  });
+});
+
+test("mounted composer shows loading send and stop aborts active run", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let streamController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "loading-session", runId: "loading-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method, _input, options) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              streamController = controller;
+              options?.signal?.addEventListener("abort", () => controller.close());
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const sendButton = window.document.querySelector(".send-btn");
+    const stopButton = window.document.querySelector(".stop-btn");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    sendButton.click();
+    await tick();
+
+    assert.ok(streamController);
+    assert.equal(sendButton.dataset.mode, "loading");
+    assert.equal(stopButton.hidden, false);
+
+    stopButton.click();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "abortPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "abortPrompt").input.data.runId, "loading-run");
+    cleanup();
+  });
+});
+
+test("mounted stop during start aborts backend run after run id arrives", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let resolveStart;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          await new Promise((resolve) => { resolveStart = resolve; });
+          return { activeSessionId: "starting-session", runId: "late-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async () => new ReadableStream({ start() {} }),
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const stopButton = window.document.querySelector(".stop-btn");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(stopButton.hidden, false);
+    stopButton.click();
+    resolveStart();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "abortPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "abortPrompt").input.data.runId, "late-run");
+    cleanup();
+  });
+});
+
+test("mounted steering can be cancelled before backend dispatch", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let streamController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "steer-cancel-session", runId: "steer-cancel-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId, isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({ start(controller) { streamController = controller; } });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const sendButton = window.document.querySelector(".send-btn");
+    const stopButton = window.document.querySelector(".stop-btn");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    sendButton.click();
+    await tick();
+    assert.ok(streamController);
+
+    textarea.value = "second";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    sendButton.click();
+    await tick();
+
+    assert.equal(sendButton.dataset.mode, "steering");
+    assert.equal(stopButton.title, "cancel steering");
+    stopButton.click();
+    await tick(140);
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "steer-cancel-session");
+    assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 0);
+    assert.deepEqual(session.messages.filter((message) => message.role === "user").map((message) => message.text), ["first"]);
+    cleanup();
+  });
+});
+
+test("mounted pending steering ignores keyboard resubmit until it is dispatched", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "steer-guard-session", runId: "steer-guard-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId, isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async () => new ReadableStream({ start() {} }),
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    textarea.value = "second";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    textarea.value = "third";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    await tick(140);
+
+    assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "steerPrompt").input.data.text, "second");
     cleanup();
   });
 });
@@ -1493,7 +1692,7 @@ test("mounted submit while streaming sends steering without aborting or starting
     textarea.value = "second";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
-    await tick();
+    await tick(140);
 
     assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
     assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 0);
