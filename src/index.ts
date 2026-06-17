@@ -298,7 +298,7 @@ async function refreshMountedPromptMetaFromBackend(context: PluginContext, compo
   try {
     const workspace: { id: string; path: string } = activeWorkspaceSelection(context);
     const data: JsonRecord = workspace.path ? { workspacePath: workspace.path } : {};
-    const response = await context.backend?.("runtimeStatus", { workspaceId: workspace.id, data });
+    const response = await backendCall(context, "runtimeStatus", data, workspace.id);
     const responseRecord = isRecord(response) ? response : {};
     const status = isRecord(responseRecord.status) ? runtimeStatusFromRecord(responseRecord.status) : undefined;
 
