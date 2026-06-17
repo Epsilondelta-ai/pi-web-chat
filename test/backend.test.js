@@ -147,6 +147,54 @@ test("runtimeStatus returns prompt metadata from settings and git branch without
   });
 });
 
+test("runtimeStatus reads persisted pi-web status quotas", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-status-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  await mkdir(join(root, ".pi"));
+  await writeFile(join(root, ".pi", "pi-web.json"), JSON.stringify({
+    status: {
+      model: "persisted-model",
+      fiveHourQuota: 84,
+      weeklyQuota: 14,
+    },
+  }));
+
+  const response = await callBackend("runtimeStatus", root, {}, { HOME: home });
+
+  assert.equal(response.status.model, "persisted-model");
+  assert.equal(response.status.fiveHourQuota, 84);
+  assert.equal(response.status.weeklyQuota, 14);
+});
+
+test("compiled runtimeStatus unwraps mounted data before reading workspace quotas", async () => {
+  const rootA = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-root-a-"));
+  const rootB = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-root-b-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  await mkdir(join(rootA, ".pi"));
+  await mkdir(join(rootB, ".pi"));
+  await writeFile(join(rootA, ".pi", "pi-web.json"), JSON.stringify({ status: { model: "wrong-root" } }));
+  await writeFile(join(rootB, ".pi", "pi-web.json"), JSON.stringify({
+    status: {
+      model: "selected-root",
+      fiveHourQuota: 67,
+      weeklyQuota: 23,
+    },
+  }));
+
+  const result = await runBackendBinary(
+    "runtimeStatus",
+    rootA,
+    { workspaceId: "workspace-b", data: { workspacePath: rootB } },
+    { HOME: home },
+  );
+
+  assert.equal(result.code, 0, result.stderr);
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.status.model, "selected-root");
+  assert.equal(response.status.fiveHourQuota, 67);
+  assert.equal(response.status.weeklyQuota, 23);
+});
+
 test("runtimeStatus uses selected workspace path", async () => {
   const rootA = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-a-"));
   const rootB = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-b-"));

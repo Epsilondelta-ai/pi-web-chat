@@ -407,6 +407,8 @@ func runtimeStatusFromSettings(workspaceRoot string) runtimeStatusInfo {
 		Model:         strings.TrimSpace(stringMapValue(settings, "defaultModel")),
 		ModelProvider: strings.TrimSpace(stringMapValue(settings, "defaultProvider")),
 		ThinkingLevel: strings.TrimSpace(stringMapValue(settings, "defaultThinkingLevel")),
+		FiveHourQuota: intPointerFromMap(settings, "fiveHourQuota"),
+		WeeklyQuota:   intPointerFromMap(settings, "weeklyQuota"),
 	}
 }
 
@@ -437,10 +439,26 @@ func readJSONMap(path string) map[string]any {
 }
 
 func mergeRuntimeSettings(target map[string]any, source map[string]any) {
-	for _, key := range []string{"defaultProvider", "defaultModel", "defaultThinkingLevel"} {
+	mergeRuntimeSettingsFields(target, source)
+	if status, ok := source["status"].(map[string]any); ok {
+		mergeRuntimeSettingsFields(target, status)
+	}
+}
+
+func mergeRuntimeSettingsFields(target map[string]any, source map[string]any) {
+	for _, key := range []string{"defaultProvider", "defaultModel", "defaultThinkingLevel", "fiveHourQuota", "weeklyQuota"} {
 		if value, ok := source[key]; ok {
 			target[key] = value
 		}
+	}
+	if value, ok := source["model"]; ok {
+		target["defaultModel"] = value
+	}
+	if value, ok := source["modelProvider"]; ok {
+		target["defaultProvider"] = value
+	}
+	if value, ok := source["thinkingLevel"]; ok {
+		target["defaultThinkingLevel"] = value
 	}
 }
 

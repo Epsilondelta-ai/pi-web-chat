@@ -67,6 +67,7 @@ npm run build:backend
 The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 
 - `commands` → `{ commands }`
+- `runtimeStatus` with `{ workspacePath }` → `{ status: { model, modelProvider, thinkingLevel, fiveHourQuota, weeklyQuota, currentBranch } }`
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
