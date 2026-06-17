@@ -110,6 +110,7 @@ export type FileAttachment = {
 };
 
 export type BackendResponse = {
+  status?: RuntimeStatus;
   commands?: PluginCommand[];
   files?: FileSearchResult[];
   attachments?: FileAttachment[];

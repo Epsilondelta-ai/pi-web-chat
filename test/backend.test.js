@@ -122,6 +122,43 @@ test("commands returns chat and discovered slash commands", async () => {
   assert.equal(new Set(names).size, names.length);
 });
 
+test("runtimeStatus returns prompt metadata from settings and git branch without env quota fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  await mkdir(join(root, ".pi"));
+  await writeFile(join(root, ".pi", "settings.json"), JSON.stringify({
+    defaultProvider: "openai-codex",
+    defaultModel: "GPT-5.5",
+    defaultThinkingLevel: "high",
+  }));
+  await runBackendCommand("git", ["init", "-b", "feature/meta", root]);
+
+  const response = await callBackend("runtimeStatus", root, {}, {
+    HOME: home,
+    PI_WEB_5H_QUOTA: "84",
+    PI_WEB_WEEKLY_QUOTA: "14",
+  });
+
+  assert.deepEqual(response.status, {
+    model: "GPT-5.5",
+    modelProvider: "openai-codex",
+    thinkingLevel: "high",
+    currentBranch: "feature/meta",
+  });
+});
+
+test("runtimeStatus does not fall back to pi RPC when settings omit model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-rpc-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
+  await mkdir(join(root, ".pi"));
+  await writeFile(join(bin, "pi"), "#!/usr/bin/env node\nthrow new Error('runtimeStatus must not spawn pi');\n");
+
+  const response = await callBackend("runtimeStatus", root, {}, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
+
+  assert.deepEqual(response.status, { thinkingLevel: "off" });
+});
+
 test("readFile rejects path traversal", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-"));
   await rejectBackend("readFile", root, { path: "../secret" });

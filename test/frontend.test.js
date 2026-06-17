@@ -210,21 +210,46 @@ test("activate requires modern pi-web mount APIs", async () => {
   });
 });
 
-test("mounted composer syncs prompt meta from existing runtime status", async () => {
+test("mounted composer ignores host runtime meta and uses plugin backend", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    const originalSetInterval = window.setInterval;
     app.runtimeStatus = {
-      model: "GPT-5.5",
-      thinkingLevel: "high",
-      fiveHourQuota: 84,
-      weeklyQuota: 14,
-      currentBranch: "feature/ui",
+      model: "Host model",
+      thinkingLevel: "xhigh",
+      fiveHourQuota: 1,
+      weeklyQuota: 2,
+      currentBranch: "host-branch",
     };
-    app.loadRuntimeStatus = async (workspaceId) => {
-      app.loadedRuntimeWorkspace = workspaceId;
+    app.updatePromptMeta = () => {
+      throw new Error("host updatePromptMeta must not be called");
+    };
+    app.loadRuntimeStatus = () => {
+      throw new Error("host loadRuntimeStatus must not be called");
+    };
+    window.setInterval = () => {
+      throw new Error("prompt meta must not poll");
     };
 
-    const cleanup = activate({ app, backend: async () => ({}), mount: createMount(window, app) });
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        return method === "runtimeStatus" ? {
+          status: {
+            model: "GPT-5.5",
+            thinkingLevel: "high",
+            fiveHourQuota: 84,
+            weeklyQuota: 14,
+            currentBranch: "feature/ui",
+          },
+        } : {};
+      },
+      mount: createMount(window, app),
+    });
+    await tick();
     await tick();
 
     assert.equal(
@@ -234,38 +259,36 @@ test("mounted composer syncs prompt meta from existing runtime status", async ()
     assert.notEqual(window.document.querySelector(".prompt-meta-battery-full svg"), null);
     assert.notEqual(window.document.querySelector(".prompt-meta-battery-low svg"), null);
     assert.notEqual(window.document.querySelector(".prompt-meta-branch svg"), null);
-    assert.equal(app.loadedRuntimeWorkspace, "workspace-1");
+    assert.deepEqual(backendCalls[0], { method: "runtimeStatus", input: { data: {} } });
     cleanup();
+    window.setInterval = originalSetInterval;
   });
 });
 
-test("mounted composer follows prompt meta updates and restores host method", async () => {
+test("mounted composer loads prompt meta from plugin backend when host app is unavailable", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
-    const calls = [];
-    const originalUpdatePromptMeta = (status = {}) => {
-      calls.push(status);
-      app.runtimeStatus = {
-        ...app.runtimeStatus,
-        ...status,
-        currentBranch: status.currentBranch || status.branch || app.runtimeStatus?.currentBranch,
-      };
-    };
-    app.updatePromptMeta = originalUpdatePromptMeta;
-    app.runtimeStatus = { model: "Claude", thinkingLevel: "off", currentBranch: "main" };
-
-    const cleanup = activate({ app, backend: async () => ({}), mount: createMount(window, app) });
+    const cleanup = activate({
+      backend: async (method) => method === "runtimeStatus" ? {
+        status: {
+          model: "GPT-5.5",
+          thinkingLevel: "high",
+          fiveHourQuota: 84,
+          weeklyQuota: 14,
+          currentBranch: "feature/ui",
+        },
+      } : {},
+      mount: createMount(window, app),
+    });
+    await tick();
     await tick();
 
-    app.updatePromptMeta({ fiveHourQuota: 20, weeklyQuota: 21, branch: "dev" });
-
-    assert.equal(window.document.querySelector("[data-prompt-meta]").textContent, "Claude (off) | 5h (20%) | Week (21%) | dev");
-    assert.notEqual(window.document.querySelector(".prompt-meta-battery-low svg"), null);
-    assert.equal(calls.length, 2);
+    assert.equal(
+      window.document.querySelector("[data-prompt-meta]").textContent,
+      "GPT-5.5 (high) | 5h (84%) | Week (14%) | feature/ui",
+    );
 
     cleanup();
-
-    assert.equal(app.updatePromptMeta, originalUpdatePromptMeta);
   });
 });
 

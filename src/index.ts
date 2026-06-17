@@ -65,9 +65,6 @@ const mountedMessageSignatures: WeakMap<HTMLElement, string> = new WeakMap<HTMLE
 
 type AppWithRuntime = HTMLElement & {
   piWebChat?: Runtime;
-  runtimeStatus?: RuntimeStatus;
-  updatePromptMeta?: (status?: RuntimeStatus) => void;
-  loadRuntimeStatus?: (workspaceId?: string) => Promise<void> | void;
   dataset: DOMStringMap;
 };
 
@@ -257,7 +254,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
-  bindMountedPromptMeta(disposables, app, composerSurface);
+  bindMountedPromptMeta(context, composerSurface);
   app?.classList.add(pluginClass());
 
   const cleanup = (): void => {
@@ -277,35 +274,63 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   return cleanup;
 }
 
-function bindMountedPromptMeta(disposables: Disposables, app: AppWithRuntime | undefined, composerSurface: HTMLElement): void {
-  renderPromptMeta(composerSurface, app?.runtimeStatus || {});
+function bindMountedPromptMeta(context: PluginContext, composerSurface: HTMLElement): void {
+  renderPromptMeta(composerSurface, {});
+  void refreshMountedPromptMetaFromBackend(context, composerSurface);
+}
 
-  if (!app) {
-    return;
+async function refreshMountedPromptMetaFromBackend(context: PluginContext, composerSurface: HTMLElement): Promise<void> {
+  try {
+    const response = await context.backend?.("runtimeStatus", { data: {} });
+    const responseRecord = isRecord(response) ? response : {};
+    const status = isRecord(responseRecord.status) ? runtimeStatusFromRecord(responseRecord.status) : undefined;
+
+    if (!status) {
+      return;
+    }
+
+    renderPromptMeta(composerSurface, status);
+  } catch {
+    // Runtime status is best effort; prompt submission must not depend on it.
+  }
+}
+
+function runtimeStatusFromRecord(record: JsonRecord): RuntimeStatus {
+  const status: RuntimeStatus = {};
+
+  if (typeof record.model === "string") {
+    status.model = record.model;
   }
 
-  const originalUpdatePromptMeta = app.updatePromptMeta;
-  const wrappedUpdatePromptMeta = (status: RuntimeStatus = {}): void => {
-    app.runtimeStatus = {
-      ...app.runtimeStatus,
-      ...status,
-      currentBranch: status.currentBranch || status.branch || app.runtimeStatus?.currentBranch,
-    };
-    originalUpdatePromptMeta?.call(app, status);
-    renderPromptMeta(composerSurface, app.runtimeStatus || status);
-  };
-  app.updatePromptMeta = wrappedUpdatePromptMeta;
+  if (typeof record.modelProvider === "string") {
+    status.modelProvider = record.modelProvider;
+  }
 
-  disposables.add({
-    remove: (): void => {
-      if (app.updatePromptMeta === wrappedUpdatePromptMeta) {
-        app.updatePromptMeta = originalUpdatePromptMeta;
-      }
-    },
-  });
+  if (typeof record.thinkingLevel === "string") {
+    status.thinkingLevel = record.thinkingLevel;
+  }
 
-  app.updatePromptMeta(app.runtimeStatus || {});
-  void app.loadRuntimeStatus?.(app.dataset.activeWorkspaceId);
+  if (typeof record.fiveHourQuota === "number") {
+    status.fiveHourQuota = record.fiveHourQuota;
+  }
+
+  if (typeof record.weeklyQuota === "number") {
+    status.weeklyQuota = record.weeklyQuota;
+  }
+
+  if (typeof record.currentBranch === "string") {
+    status.currentBranch = record.currentBranch;
+  }
+
+  if (typeof record.branch === "string") {
+    status.branch = record.branch;
+  }
+
+  if (typeof record.warning === "string") {
+    status.warning = record.warning;
+  }
+
+  return status;
 }
 
 function bindMountedComposer(

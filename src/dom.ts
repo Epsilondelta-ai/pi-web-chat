@@ -105,6 +105,10 @@ export function renderPromptMeta(root: HTMLElement, status: RuntimeStatus = {}, 
   const weekly = quotaLabel("Week", status.weeklyQuota);
   const branch = status.currentBranch || status.branch || "—";
 
+  if (status.warning) {
+    parts.push(warningLabel(status.warning));
+  }
+
   if (fiveHour) {
     parts.push(fiveHour);
   }
@@ -130,6 +134,10 @@ function promptMetaBadge(): HTMLSpanElement {
 
 function branchLabel(branch: string): string {
   return `<span class="prompt-meta-item prompt-meta-branch">${promptMetaIcon("git-branch")}<span>${escapeHtml(branch)}</span></span>`;
+}
+
+function warningLabel(warning: string): string {
+  return `<span class="prompt-meta-item prompt-meta-warning" title="${escapeHtml(warning)}">runtime warning</span>`;
 }
 
 function modelLabel(model: string, thinkingLevel?: string): string {
