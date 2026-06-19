@@ -1425,6 +1425,76 @@ test("mounted submit replaces streaming assistant with backend final assistant",
   });
 });
 
+test("mounted submit replaces streaming assistant from one final backend state", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "one-shot-session", runId: "one-shot-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "one-shot-session",
+            messages: [
+              { id: "backend-user", role: "user", text: "one shot", createdAt: 3000 },
+              { id: "backend-assistant", role: "assistant", text: "one final", createdAt: 2000 },
+            ],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "one shot";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"one partial"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "one-shot-session");
+    assert.deepEqual(session.messages.map((message) => `${message.role}:${message.id}`), [
+      "user:backend-user",
+      "assistant:backend-assistant",
+    ]);
+    cleanup();
+  });
+});
+
 test("mounted submit preserves draft during async context resolution before run starts", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

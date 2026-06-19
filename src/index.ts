@@ -104,7 +104,6 @@ type MountedState = {
   backendChatToken: number;
   pendingPromptEchoIds: Map<string, string[]>;
   pendingAssistantEchoIds: Map<string, string[]>;
-  pendingAssistantEchoByUserId: Map<string, string>;
   activeRunId?: string;
   activeRunSessionId?: string;
   activeRunWorkspacePath?: string;
@@ -263,7 +262,6 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     backendChatToken: 0,
     pendingPromptEchoIds: new Map<string, string[]>(),
     pendingAssistantEchoIds: new Map<string, string[]>(),
-    pendingAssistantEchoByUserId: new Map<string, string>(),
   };
 
   if (!selected?.sessionId) {
@@ -2074,7 +2072,6 @@ async function openMountedSessionEvents(
         "chatState",
         promptEchoIds,
         assistantEchoIds,
-        mountedState.pendingAssistantEchoByUserId,
       );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
       clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
@@ -2123,7 +2120,6 @@ async function refreshMountedBackendChatState(
       "chatState",
       promptEchoIds,
       assistantEchoIds,
-      mountedState.pendingAssistantEchoByUserId,
     );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
     clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
@@ -2217,7 +2213,6 @@ function applyBackendResponseToMountedStore(
   reason: string,
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
-  assistantEchoByUserId: Map<string, string> = new Map<string, string>(),
 ): ChatMessage[] {
   const responseMessages = sanitizeChatMessages(response.messages);
 
@@ -2249,7 +2244,6 @@ function applyBackendResponseToMountedStore(
     responseMessages,
     optimisticEchoIds,
     assistantEchoIds,
-    assistantEchoByUserId,
   ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
@@ -3477,13 +3471,12 @@ function mergeChatMessages(
   backendMessages: ChatMessage[],
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
-  assistantEchoByUserId: Map<string, string> = new Map<string, string>(),
 ): ChatMessage[] {
   const promptEchoIds = toEchoIdList(optimisticEchoIds);
   const assistantEchoIdList = toEchoIdList(assistantEchoIds);
   const merged = new Map<string, ChatMessage>();
   const orderById = new Map<string, number>();
-  const pendingAssistantByBackendUserId = new Map<string, string>(assistantEchoByUserId);
+  const assistantEchoByBackendUserId = new Map<string, string>();
   let localOrder = backendMessages.length;
 
   for (const message of localMessages) {
@@ -3507,8 +3500,7 @@ function mergeChatMessages(
       );
 
       if (assistantEchoId) {
-        pendingAssistantByBackendUserId.set(message.id, assistantEchoId);
-        assistantEchoByUserId.set(message.id, assistantEchoId);
+        assistantEchoByBackendUserId.set(message.id, assistantEchoId);
       }
 
       replaceMergedMessage(merged, orderById, promptDuplicate.id, message, backendOrder);
@@ -3522,12 +3514,11 @@ function mergeChatMessages(
       backendOrder,
       assistantEchoIdList,
       usedAssistantEchoIds,
-      pendingAssistantByBackendUserId,
+      assistantEchoByBackendUserId,
     );
 
     if (assistantDuplicateId) {
       usedAssistantEchoIds.add(assistantDuplicateId);
-      removeAssistantEchoById(assistantEchoByUserId, assistantDuplicateId);
       replaceMergedMessage(merged, orderById, assistantDuplicateId, message, backendOrder);
       return;
     }
@@ -3549,14 +3540,6 @@ function mergeChatMessages(
 
 function toEchoIdList(echoIds: string | string[]): string[] {
   return Array.isArray(echoIds) ? echoIds : [echoIds].filter(Boolean);
-}
-
-function removeAssistantEchoById(assistantEchoByUserId: Map<string, string>, assistantEchoId: string): void {
-  for (const [userId, echoId] of assistantEchoByUserId) {
-    if (echoId === assistantEchoId) {
-      assistantEchoByUserId.delete(userId);
-    }
-  }
 }
 
 function replaceMergedMessage(
@@ -3601,7 +3584,7 @@ function immediateAssistantEchoIdForBackendMessage(
   backendOrder: number,
   assistantEchoIds: string[],
   usedAssistantEchoIds: Set<string>,
-  pendingAssistantByBackendUserId: Map<string, string>,
+  assistantEchoByBackendUserId: Map<string, string>,
 ): string {
   if (backendMessage.role !== "assistant" || backendOrder <= 0) {
     return "";
@@ -3613,7 +3596,7 @@ function immediateAssistantEchoIdForBackendMessage(
     return "";
   }
 
-  const sameMergeAssistantId = pendingAssistantByBackendUserId.get(previousBackendMessage.id) || "";
+  const sameMergeAssistantId = assistantEchoByBackendUserId.get(previousBackendMessage.id) || "";
 
   if (sameMergeAssistantId && !usedAssistantEchoIds.has(sameMergeAssistantId)) {
     return sameMergeAssistantId;
