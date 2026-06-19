@@ -62,6 +62,7 @@ const STREAM_RENDER_MIN_MS = 250;
 const STREAM_SAVE_MIN_MS = 100;
 const SPINNER_DOT_COUNT = 6;
 const STEERING_CANCEL_WINDOW_MS = 100;
+const ASSISTANT_ONLY_ANCHOR_META_KEY = "piWebChatAssistantOnlyAnchorUsed";
 const mountedExpandedToolCards: Set<string> = new Set<string>();
 const mountedMessageSignatures: WeakMap<HTMLElement, string> = new WeakMap<HTMLElement, string>();
 
@@ -2085,7 +2086,7 @@ async function openMountedSessionEvents(
       const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
       const promptEchoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
       const assistantEchoIds = pendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho);
-      const messages = applyBackendResponseToMountedStore(
+      const result = applyBackendResponseToMountedStore(
         context,
         store,
         response,
@@ -2098,9 +2099,13 @@ async function openMountedSessionEvents(
         },
       );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
-      clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
-      clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-      if (messages.length || Array.isArray(response.messages)) {
+
+      if (result.changed) {
+        clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, result.messages, promptEchoIds);
+        clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, result.messages, assistantEchoIds);
+      }
+
+      if (result.messages.length || Array.isArray(response.messages)) {
         render.request();
       }
     });
@@ -2137,7 +2142,7 @@ async function refreshMountedBackendChatState(
     const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
     const promptEchoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
     const assistantEchoIds = pendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho);
-    const messages = applyBackendResponseToMountedStore(
+    const result = applyBackendResponseToMountedStore(
       context,
       store,
       response,
@@ -2150,10 +2155,14 @@ async function refreshMountedBackendChatState(
       },
     );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
-    clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
-    clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-    if (messages.length || Array.isArray(response.messages)) {
-      renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
+
+    if (result.changed) {
+      clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, result.messages, promptEchoIds);
+      clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, result.messages, assistantEchoIds);
+    }
+
+    if (result.messages.length || Array.isArray(response.messages)) {
+      renderMountedBackendMessages(chatSurface, result.messages, store.activeSessionId);
     }
   } catch {
     // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
@@ -2253,6 +2262,11 @@ function workspaceSelectionForSelectedSession(
   return activeWorkspaceSelection(context);
 }
 
+type MountedStoreApplyResult = {
+  messages: ChatMessage[];
+  changed: boolean;
+};
+
 function applyBackendResponseToMountedStore(
   context: PluginContext,
   store: ChatStore,
@@ -2261,7 +2275,7 @@ function applyBackendResponseToMountedStore(
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
   options: MergeChatMessagesOptions = {},
-): ChatMessage[] {
+): MountedStoreApplyResult {
   const hasResponseMessages: boolean = Array.isArray(response.messages);
   const responseMessages = sanitizeChatMessages(response.messages);
 
@@ -2283,7 +2297,7 @@ function applyBackendResponseToMountedStore(
   }
 
   if (!hasResponseMessages) {
-    return [];
+    return { messages: [], changed: false };
   }
 
   const session = activeSession(store);
@@ -2296,7 +2310,7 @@ function applyBackendResponseToMountedStore(
     options,
   ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
-    return [];
+    return { messages: session.messages, changed: false };
   }
 
   session.messages = nextMessages;
@@ -2307,7 +2321,7 @@ function applyBackendResponseToMountedStore(
   if (title) {
     publishMountedSessionTitleIfChanged(session.id, title);
   }
-  return session.messages;
+  return { messages: session.messages, changed: true };
 }
 
 function sessionMessagesChanged(current: ChatMessage[], next: ChatMessage[]): boolean {
@@ -2328,6 +2342,7 @@ function messageSignature(message: ChatMessage): string {
     streaming: message.streaming,
     toolCalls: message.toolCalls,
     attachments: message.attachments,
+    meta: message.meta,
   });
 }
 
@@ -3532,19 +3547,29 @@ function mergeChatMessages(
   options: MergeChatMessagesOptions = {},
 ): ChatMessage[] {
   const promptEchoIds = toEchoIdList(optimisticEchoIds);
+  const consumedPromptAnchorIds = localMessages
+    .filter(isAssistantOnlyPromptAnchor)
+    .map((message: ChatMessage): string => message.id);
+  const promptAnchorIds = [...promptEchoIds, ...consumedPromptAnchorIds];
   const assistantEchoIdList = toEchoIdList(assistantEchoIds);
-  const preservedLocalIds: Set<string> = new Set<string>([...promptEchoIds, ...assistantEchoIdList]);
+  const preservedLocalIds: Set<string> = new Set<string>([...promptAnchorIds, ...assistantEchoIdList]);
   const backendMessageIds: Set<string> = new Set<string>(backendMessages.map((message: ChatMessage): string => message.id));
   const preserveOnlyEchoMessages: boolean = options.preserveOnlyEchoMessages === true;
   const allowAssistantOnlyTailEcho: boolean = options.allowAssistantOnlyTailEcho === true;
   const mergeLocalMessages: ChatMessage[] = preserveOnlyEchoMessages
     ? localMessages.filter((message: ChatMessage): boolean => {
-      return backendMessageIds.has(message.id) || preservedLocalIds.has(message.id) || isPendingMountedSteeringMessage(message);
+      return backendMessageIds.has(message.id)
+        || preservedLocalIds.has(message.id)
+        || isAssistantOnlyPromptAnchor(message)
+        || isPendingMountedSteeringMessage(message);
     })
     : localMessages;
   const merged = new Map<string, ChatMessage>();
   const orderById = new Map<string, number>();
   const assistantEchoByBackendUserId = new Map<string, string>();
+  const promptAnchorByBackendUserId = new Map<string, string>();
+  const hasBackendUserMessages = backendMessages.some((message: ChatMessage): boolean => message.role === "user");
+  const lastKnownBackendOrder = lastKnownBackendMessageOrder(mergeLocalMessages, backendMessages);
   let localOrder = backendMessages.length;
 
   for (const message of mergeLocalMessages) {
@@ -3554,12 +3579,19 @@ function mergeChatMessages(
 
   const usedPromptEchoIds: Set<string> = new Set<string>();
   const usedAssistantEchoIds: Set<string> = new Set<string>();
+  const usedAssistantAnchorIds: Set<string> = new Set<string>();
 
   backendMessages.forEach((message: ChatMessage, backendOrder: number): void => {
-    const promptDuplicate = findOptimisticPromptEchoMessage(mergeLocalMessages, message, promptEchoIds, usedPromptEchoIds);
+    const promptDuplicate = findOptimisticPromptEchoMessage(
+      mergeLocalMessages,
+      message,
+      promptAnchorIds,
+      usedPromptEchoIds,
+    );
 
     if (promptDuplicate) {
       usedPromptEchoIds.add(promptDuplicate.id);
+      promptAnchorByBackendUserId.set(message.id, promptDuplicate.id);
       const assistantEchoId = nextAssistantEchoIdAfterMessage(
         mergeLocalMessages,
         promptDuplicate.id,
@@ -3586,44 +3618,68 @@ function mergeChatMessages(
     );
 
     if (assistantDuplicateId) {
+      const previousBackendMessage = backendMessages[backendOrder - 1];
+      const promptAnchorId = previousBackendMessage
+        ? promptAnchorByBackendUserId.get(previousBackendMessage.id)
+        : undefined;
       usedAssistantEchoIds.add(assistantDuplicateId);
+
+      if (promptAnchorId) {
+        usedAssistantAnchorIds.add(promptAnchorId);
+      }
+
       replaceMergedMessage(merged, orderById, assistantDuplicateId, message, backendOrder);
       return;
     }
 
-    const pendingAssistantDuplicateId = tailAssistantEchoIdForAssistantOnlyBackendState(
-      mergeLocalMessages,
-      backendMessages,
-      message,
-      backendOrder,
-      promptEchoIds,
-      assistantEchoIdList,
-      usedAssistantEchoIds,
-      allowAssistantOnlyTailEcho,
-    );
+    const existingPromptAnchor = existingPromptAnchorForBackendAssistant(mergeLocalMessages, message, promptAnchorIds);
 
-    if (pendingAssistantDuplicateId) {
-      usedAssistantEchoIds.add(pendingAssistantDuplicateId);
-      replaceMergedMessage(
-        merged,
-        orderById,
-        pendingAssistantDuplicateId,
-        message,
-        orderById.get(pendingAssistantDuplicateId) ?? backendOrder,
-      );
+    if (existingPromptAnchor && allowAssistantOnlyTailEcho) {
+      usedAssistantAnchorIds.add(existingPromptAnchor.id);
+      const anchoredOrder = (orderById.get(existingPromptAnchor.id) ?? backendOrder) + (backendOrder + 1) / 1_000;
+      markAssistantOnlyPromptAnchor(merged, existingPromptAnchor);
+      orderById.set(message.id, anchoredOrder);
+      merged.set(message.id, { ...merged.get(message.id), ...message });
       return;
     }
 
-    const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
-      mergeLocalMessages,
-      backendMessages,
+    const canAnchorAssistant = canAnchorBackendAssistant(
       message,
-      promptEchoIds,
+      backendOrder,
+      hasBackendUserMessages,
+      lastKnownBackendOrder,
+      usedPromptEchoIds,
+      usedAssistantAnchorIds,
       allowAssistantOnlyTailEcho,
+    );
+    const requiresCurrentAssistant = !hasBackendUserMessages
+      || (usedPromptEchoIds.size === 0 && usedAssistantAnchorIds.size === 0);
+    const promptAnchor = nextPromptAnchorForBackendAssistant(
+      mergeLocalMessages,
+      message,
+      promptAnchorIds,
+      usedAssistantAnchorIds,
+      canAnchorAssistant,
+      requiresCurrentAssistant,
     );
 
     if (promptAnchor) {
+      usedAssistantAnchorIds.add(promptAnchor.id);
       const anchoredOrder = (orderById.get(promptAnchor.id) ?? backendOrder) + (backendOrder + 1) / 1_000;
+      markAssistantOnlyPromptAnchor(merged, promptAnchor);
+      const assistantEchoId = nextAssistantEchoIdAfterMessage(
+        mergeLocalMessages,
+        promptAnchor.id,
+        assistantEchoIdList,
+        usedAssistantEchoIds,
+      );
+
+      if (assistantEchoId) {
+        usedAssistantEchoIds.add(assistantEchoId);
+        replaceMergedMessage(merged, orderById, assistantEchoId, message, anchoredOrder);
+        return;
+      }
+
       orderById.set(message.id, anchoredOrder);
       merged.set(message.id, { ...merged.get(message.id), ...message });
       return;
@@ -3633,7 +3689,7 @@ function mergeChatMessages(
     merged.set(message.id, { ...merged.get(message.id), ...message });
   });
 
-  return [...merged.values()].sort((a, b): number => {
+  const orderedMessages = [...merged.values()].sort((a, b): number => {
     const orderDelta = (orderById.get(a.id) ?? 0) - (orderById.get(b.id) ?? 0);
 
     if (orderDelta !== 0) {
@@ -3641,6 +3697,31 @@ function mergeChatMessages(
     }
 
     return a.createdAt - b.createdAt;
+  });
+  return removeLateBackendUserEchoDuplicates(orderedMessages);
+}
+
+function removeLateBackendUserEchoDuplicates(messages: ChatMessage[]): ChatMessage[] {
+  const usedBackendUserIds = new Set<string>();
+  return messages.filter((message: ChatMessage): boolean => {
+    if (message.role !== "user" || !isAssistantOnlyPromptAnchor(message)) {
+      return true;
+    }
+
+    const duplicate = messages.find((candidate: ChatMessage): boolean => {
+      return candidate.role === "user"
+        && !isAssistantOnlyPromptAnchor(candidate)
+        && !usedBackendUserIds.has(candidate.id)
+        && candidate.text.trim() === message.text.trim()
+        && candidate.createdAt >= message.createdAt;
+    });
+
+    if (!duplicate) {
+      return true;
+    }
+
+    usedBackendUserIds.add(duplicate.id);
+    return false;
   });
 }
 
@@ -3711,50 +3792,100 @@ function immediateAssistantEchoIdForBackendMessage(
   return nextAssistantEchoIdAfterMessage(localMessages, previousBackendMessage.id, assistantEchoIds, usedAssistantEchoIds);
 }
 
-function tailAssistantEchoIdForAssistantOnlyBackendState(
-  localMessages: ChatMessage[],
-  backendMessages: ChatMessage[],
-  backendMessage: ChatMessage,
-  backendOrder: number,
-  promptEchoIds: string[],
-  assistantEchoIds: string[],
-  usedAssistantEchoIds: Set<string>,
-  allowed: boolean,
-): string {
-  const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
-    localMessages,
-    backendMessages,
-    backendMessage,
-    promptEchoIds,
-    allowed,
-  );
+function lastKnownBackendMessageOrder(localMessages: ChatMessage[], backendMessages: ChatMessage[]): number {
+  const localMessageIds = new Set<string>(localMessages.map((message: ChatMessage): string => message.id));
+  let lastKnownOrder = -1;
 
-  if (!promptAnchor || backendOrder !== backendMessages.length - 1) {
-    return "";
-  }
+  backendMessages.forEach((message: ChatMessage, backendOrder: number): void => {
+    if (localMessageIds.has(message.id)) {
+      lastKnownOrder = backendOrder;
+    }
+  });
 
-  return nextAssistantEchoIdAfterMessage(localMessages, promptAnchor.id, assistantEchoIds, usedAssistantEchoIds);
+  return lastKnownOrder;
 }
 
-function pendingPromptAnchorForAssistantOnlyBackendState(
+function canAnchorBackendAssistant(
+  backendMessage: ChatMessage,
+  backendOrder: number,
+  hasBackendUserMessages: boolean,
+  lastKnownBackendOrder: number,
+  usedPromptEchoIds: Set<string>,
+  usedAssistantAnchorIds: Set<string>,
+  allowed: boolean,
+): boolean {
+  if (!allowed || backendMessage.role !== "assistant") {
+    return false;
+  }
+
+  if (!hasBackendUserMessages) {
+    return true;
+  }
+
+  return usedPromptEchoIds.size > 0
+    || usedAssistantAnchorIds.size > 0
+    || (lastKnownBackendOrder >= 0 && backendOrder > lastKnownBackendOrder);
+}
+
+function existingPromptAnchorForBackendAssistant(
   localMessages: ChatMessage[],
-  backendMessages: ChatMessage[],
   backendMessage: ChatMessage,
   promptEchoIds: string[],
-  allowed: boolean,
 ): ChatMessage | undefined {
-  if (
-    !allowed
-    || backendMessage.role !== "assistant"
-    || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
-  ) {
+  if (backendMessage.role !== "assistant") {
     return undefined;
   }
 
-  return localMessages.find((message: ChatMessage): boolean => {
+  const backendIndex = localMessages.findIndex((message: ChatMessage): boolean => message.id === backendMessage.id);
+
+  if (backendIndex <= 0) {
+    return undefined;
+  }
+
+  const previousMessage = localMessages[backendIndex - 1];
+
+  if (previousMessage?.role === "user" && promptEchoIds.includes(previousMessage.id)) {
+    return previousMessage;
+  }
+
+  return undefined;
+}
+
+function nextPromptAnchorForBackendAssistant(
+  localMessages: ChatMessage[],
+  backendMessage: ChatMessage,
+  promptEchoIds: string[],
+  usedPromptAnchorIds: Set<string>,
+  allowed: boolean,
+  requireCurrentTimestamp: boolean,
+): ChatMessage | undefined {
+  if (!allowed || backendMessage.role !== "assistant") {
+    return undefined;
+  }
+
+  const unusedAnchor = localMessages.find((message: ChatMessage): boolean => {
     return promptEchoIds.includes(message.id)
       && message.role === "user"
-      && backendMessage.createdAt >= message.createdAt;
+      && !usedPromptAnchorIds.has(message.id)
+      && (!requireCurrentTimestamp || backendMessage.createdAt >= message.createdAt);
+  });
+
+  if (unusedAnchor) {
+    return unusedAnchor;
+  }
+
+  const lastUsedAnchorId = [...usedPromptAnchorIds].at(-1);
+  return localMessages.find((message: ChatMessage): boolean => message.id === lastUsedAnchorId);
+}
+
+function isAssistantOnlyPromptAnchor(message: ChatMessage): boolean {
+  return message.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] === true;
+}
+
+function markAssistantOnlyPromptAnchor(merged: Map<string, ChatMessage>, promptAnchor: ChatMessage): void {
+  merged.set(promptAnchor.id, {
+    ...promptAnchor,
+    meta: { ...(promptAnchor.meta || {}), [ASSISTANT_ONLY_ANCHOR_META_KEY]: true },
   });
 }
 
@@ -3824,7 +3955,9 @@ function clearMatchedPendingEchoIds(
   }
 
   const remaining = optimisticEchoIds.filter((echoId: string): boolean => {
-    return mergedMessages.some((message: ChatMessage): boolean => message.id === echoId);
+    return mergedMessages.some((message: ChatMessage): boolean => {
+      return message.id === echoId && !isAssistantOnlyPromptAnchor(message);
+    });
   });
 
   if (remaining.length) {
