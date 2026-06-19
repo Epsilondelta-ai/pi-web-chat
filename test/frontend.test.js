@@ -1917,6 +1917,109 @@ test("mounted streaming render preserves unchanged transcript item nodes", async
   });
 });
 
+test("mounted streaming save throttles localStorage writes during rapid deltas", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    let writeCount = 0;
+    const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+    window.localStorage.setItem = (key, value) => {
+      if (key === "pi-web-chat.sessions.v1") {
+        writeCount += 1;
+      }
+
+      return originalSetItem(key, value);
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "throttle-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "rapid stream";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    writeCount = 0;
+
+    for (const delta of ["a", "b", "c", "d", "e"]) {
+      runController.enqueue(encoder.encode(`event: text.delta\ndata: {"type":"text.delta","delta":"${delta}"}\n\n`));
+    }
+
+    await tick(30);
+
+    assert.ok(writeCount < 5);
+    cleanup();
+  });
+});
+
+test("mounted streaming save flushes latest content when stream closes", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "flush-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "flush stream";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"latest"}\n\n'));
+    runController.close();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.messages.some((message) => message.text === "flush stream"));
+    assert.equal(session.messages.find((message) => message.role === "assistant").text, "latest");
+    cleanup();
+  });
+});
+
 test("mounted submit emits backend warnings as toasts", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

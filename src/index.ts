@@ -59,6 +59,7 @@ const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
 const MAX_SHELL_OUTPUT_BYTES = 64_000;
 const MOUNTED_CHAT_POLL_MS = 250;
 const STREAM_RENDER_MIN_MS = 250;
+const STREAM_SAVE_MIN_MS = 100;
 const SPINNER_FRAME_COUNT = 6;
 const SPINNER_INTERVAL_MS = 150;
 const STEERING_CANCEL_WINDOW_MS = 100;
@@ -1622,7 +1623,7 @@ async function consumeStreamingRun(
   }
 
   const render = throttledRender(renderCurrent);
-  const save = throttledSaveStore(store, STREAM_RENDER_MIN_MS);
+  const save = throttledSaveStore(store, STREAM_SAVE_MIN_MS);
   assistant.streaming = true;
   render.flush();
 
