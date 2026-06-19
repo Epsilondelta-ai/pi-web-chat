@@ -24,7 +24,7 @@ const MATERIAL_ICONS: Record<"attachFile" | "stop" | "send" | "terminal", string
 };
 
 function spinnerIcon(label: string): string {
-  return `<span class="spinner" data-frame="0" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></span><span class="sr-only">${escapeHtml(label)}</span>`;
+  return `<span class="composer-spinner" aria-hidden="true"></span><span class="sr-only">${escapeHtml(label)}</span>`;
 }
 
 function materialIcon(name: string, path: string): string {
@@ -710,6 +710,26 @@ export function pluginStyleText(): string {
       color: #2a1500;
       cursor: progress;
       opacity: 1;
+    }
+
+    .pi-web-chat-composer .composer-spinner {
+      animation: pi-web-chat-composer-spin 800ms linear infinite;
+      border: 2px solid currentColor;
+      border-radius: 999px;
+      border-right-color: transparent;
+      display: inline-block;
+      height: 16px;
+      width: 16px;
+    }
+
+    @keyframes pi-web-chat-composer-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .pi-web-chat-composer .composer-spinner {
+        animation: none;
+      }
     }
 
     .pi-web-chat-composer .prompt-bar.shell-mode .send-btn {

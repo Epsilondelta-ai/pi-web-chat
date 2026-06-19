@@ -135,6 +135,8 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /data-composer-mode="shell"\]\[data-shell-attachments\][\s\S]*pi-web-chat-shell-note[\s\S]*display: block/);
   assert.match(styles, /prompt-bar\.shell-mode \.attach-btn[\s\S]*var\(--warning, #facc15\)/);
   assert.match(styles, /prompt-bar\.shell-mode \.send-btn[\s\S]*var\(--warning, #facc15\)/);
+  assert.match(styles, /composer-spinner[\s\S]*animation: pi-web-chat-composer-spin/);
+  assert.match(styles, /composer-spinner[\s\S]*border-right-color: transparent/);
   assert.match(styles, /data-composer-mode="shell"\] \.pi-web-chat-send[\s\S]*var\(--warning, #facc15\)/);
 });
 
@@ -1530,6 +1532,8 @@ test("mounted composer shows loading send and stop aborts active run", async () 
 
     assert.ok(streamController);
     assert.equal(sendButton.dataset.mode, "loading");
+    assert.equal(sendButton.querySelector(".spinner"), null);
+    assert.equal(sendButton.querySelector(".composer-spinner") !== null, true);
     assert.equal(stopButton.hidden, false);
 
     activeWorkspaceId = "workspace-2";
@@ -1906,9 +1910,112 @@ test("mounted streaming render preserves unchanged transcript item nodes", async
     assert.equal(firstItems.length, 2);
     assert.equal(secondItems.length, 2);
     assert.equal(secondItems[0], firstItems[0]);
+    assert.equal(secondItems[1], firstItems[1]);
     assert.equal(window.document.activeElement, firstItems[0]);
-    assert.notEqual(secondItems[1], firstItems[1]);
     assert.match(secondItems[1].textContent, /ab/);
+    cleanup();
+  });
+});
+
+test("mounted streaming save throttles localStorage writes during rapid deltas", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    let writeCount = 0;
+    const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+    window.localStorage.setItem = (key, value) => {
+      if (key === "pi-web-chat.sessions.v1") {
+        writeCount += 1;
+      }
+
+      return originalSetItem(key, value);
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "throttle-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "rapid stream";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    writeCount = 0;
+
+    for (const delta of ["a", "b", "c", "d", "e"]) {
+      runController.enqueue(encoder.encode(`event: text.delta\ndata: {"type":"text.delta","delta":"${delta}"}\n\n`));
+    }
+
+    await tick(30);
+
+    assert.ok(writeCount < 5);
+    cleanup();
+  });
+});
+
+test("mounted streaming save flushes latest content when stream closes", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: input.data.sessionId, runId: "flush-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "flush stream";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"latest"}\n\n'));
+    runController.close();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.messages.some((message) => message.text === "flush stream"));
+    assert.equal(session.messages.find((message) => message.role === "assistant").text, "latest");
     cleanup();
   });
 });
