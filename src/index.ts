@@ -3523,6 +3523,28 @@ function mergeChatMessages(
       return;
     }
 
+    const pendingAssistantDuplicateId = tailAssistantEchoIdForAssistantOnlyBackendState(
+      localMessages,
+      backendMessages,
+      message,
+      backendOrder,
+      promptEchoIds,
+      assistantEchoIdList,
+      usedAssistantEchoIds,
+    );
+
+    if (pendingAssistantDuplicateId) {
+      usedAssistantEchoIds.add(pendingAssistantDuplicateId);
+      replaceMergedMessage(
+        merged,
+        orderById,
+        pendingAssistantDuplicateId,
+        message,
+        orderById.get(pendingAssistantDuplicateId) ?? backendOrder,
+      );
+      return;
+    }
+
     orderById.set(message.id, backendOrder);
     merged.set(message.id, { ...merged.get(message.id), ...message });
   });
@@ -3603,6 +3625,39 @@ function immediateAssistantEchoIdForBackendMessage(
   }
 
   return nextAssistantEchoIdAfterMessage(localMessages, previousBackendMessage.id, assistantEchoIds, usedAssistantEchoIds);
+}
+
+function tailAssistantEchoIdForAssistantOnlyBackendState(
+  localMessages: ChatMessage[],
+  backendMessages: ChatMessage[],
+  backendMessage: ChatMessage,
+  backendOrder: number,
+  promptEchoIds: string[],
+  assistantEchoIds: string[],
+  usedAssistantEchoIds: Set<string>,
+): string {
+  if (
+    backendMessage.role !== "assistant"
+    || backendOrder !== backendMessages.length - 1
+    || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
+  ) {
+    return "";
+  }
+
+  for (const promptEchoId of promptEchoIds) {
+    const assistantEchoId = nextAssistantEchoIdAfterMessage(
+      localMessages,
+      promptEchoId,
+      assistantEchoIds,
+      usedAssistantEchoIds,
+    );
+
+    if (assistantEchoId) {
+      return assistantEchoId;
+    }
+  }
+
+  return "";
 }
 
 function nextAssistantEchoIdAfterMessage(
