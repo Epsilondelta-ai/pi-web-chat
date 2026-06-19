@@ -248,7 +248,6 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
   installMountedScrollLock(disposables, chatSurface);
   startMountedSpinners(disposables, chatSurface);
-  startMountedSpinners(disposables, composerSurface);
   if (cleanupChat) {
     disposables.add(cleanupChat);
   }
@@ -1623,6 +1622,7 @@ async function consumeStreamingRun(
   }
 
   const render = throttledRender(renderCurrent);
+  const save = throttledSaveStore(store, STREAM_RENDER_MIN_MS);
   assistant.streaming = true;
   render.flush();
 
@@ -1631,14 +1631,45 @@ async function consumeStreamingRun(
       applyChatEvents(assistant, [event]);
       assistant.streaming = event.type !== "run.end";
       session.updatedAt = Date.now();
-      saveStore(store);
+      save.request();
       render.request();
     });
   } finally {
     assistant.streaming = false;
-    saveStore(store);
+    save.flush();
     render.flush();
   }
+}
+
+function throttledSaveStore(store: ChatStore, minDelayMs: number): { request: () => void; flush: () => void } {
+  let lastSave = 0;
+  let pending: ReturnType<typeof setTimeout> | undefined;
+
+  const cancel = (): void => {
+    if (pending) {
+      clearTimeout(pending);
+      pending = undefined;
+    }
+  };
+
+  const flush = (): void => {
+    cancel();
+    lastSave = Date.now();
+    saveStore(store);
+  };
+
+  const request = (): void => {
+    const delay = minDelayMs - (Date.now() - lastSave);
+
+    if (delay <= 0) {
+      flush();
+      return;
+    }
+
+    pending ||= setTimeout(flush, delay);
+  };
+
+  return { request, flush };
 }
 
 function throttledRender(renderNow: () => void): { request: () => void; flush: () => void; cancel: () => void } {
@@ -2572,7 +2603,11 @@ function reconcileMountedBackendMessages(container: HTMLElement, messages: ChatM
     const signature: string = `${sessionId}:${messageSignature(message)}`;
     const existing: HTMLElement | undefined = existingItems.get(message.id);
 
-    if (existing && mountedMessageSignatures.get(existing) === signature) {
+    if (existing) {
+      if (mountedMessageSignatures.get(existing) !== signature) {
+        patchMountedBackendMessage(existing, message, sessionId, signature);
+      }
+
       return existing;
     }
 
@@ -2601,6 +2636,21 @@ function reconcileMountedBackendMessages(container: HTMLElement, messages: ChatM
       child.remove();
     }
   }
+}
+
+function patchMountedBackendMessage(item: HTMLElement, message: ChatMessage, sessionId: string, signature: string): void {
+  const nextItem = renderMountedBackendMessage(message, sessionId);
+  item.replaceChildren(...Array.from(nextItem.childNodes));
+  item.className = nextItem.className;
+  item.dataset.messageId = message.id;
+
+  if (message.streaming) {
+    item.dataset.streaming = "true";
+  } else {
+    delete item.dataset.streaming;
+  }
+
+  mountedMessageSignatures.set(item, signature);
 }
 
 function mountedTranscriptItemsById(container: HTMLElement): Map<string, HTMLElement> {
