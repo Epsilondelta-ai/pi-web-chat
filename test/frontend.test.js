@@ -3387,6 +3387,54 @@ test("mounted attach button sends selected files with prompt", async () => {
   });
 });
 
+test("mounted activation removes stale appended plugin surfaces before remount", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const mount = createAppendMount(window);
+    const backendCalls = [];
+
+    activate({ app, backend: async () => ({}), mount });
+    delete app.piWebChat;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: input.data.sessionId,
+            messages: [{ id: "remount-user", role: "user", text: input.data.text, createdAt: Date.now() }],
+          };
+        }
+
+        return {};
+      },
+      mount,
+    });
+
+    assert.equal(window.document.querySelectorAll(".pi-web-chat-surface").length, 1);
+    assert.equal(window.document.querySelectorAll(".pi-web-chat-composer").length, 1);
+    assert.equal(window.document.querySelectorAll(".prompt-textarea").length, 1);
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "remount prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
+    assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 1);
+    assert.equal(window.document.querySelectorAll(".transcript-item").length, 1);
+    assert.match(window.document.querySelector(".term-inner").textContent, /remount prompt/);
+    cleanup();
+  });
+});
+
 function createMount(window, app) {
   return {
     chat: (element) => {
@@ -3397,6 +3445,31 @@ function createMount(window, app) {
       window.document.querySelector("[data-composer-host]").replaceChildren(element);
       return () => element.remove();
     },
+  };
+}
+
+function createAppendMount(window) {
+  const mountSurface = (selector, attribute, element) => {
+    const host = window.document.querySelector("[data-chat-host]");
+    const existingRoot = host.querySelector(selector);
+    const root = existingRoot || element;
+
+    if (!existingRoot) {
+      element.dataset[attribute] = "";
+      host.append(element);
+    } else {
+      existingRoot.append(element);
+    }
+
+    return () => {
+      element.remove();
+      root.hidden = true;
+    };
+  };
+
+  return {
+    chat: (element) => mountSurface("[data-plugin-chat-root]", "pluginChatRoot", element),
+    composer: (element) => mountSurface("[data-plugin-composer-root]", "pluginComposerRoot", element),
   };
 }
 

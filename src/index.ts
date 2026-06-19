@@ -244,6 +244,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
 function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | undefined): Cleanup {
   const disposables = new Disposables();
   const style = disposables.add(installStyles());
+  removeMountedPluginSurfaces(app);
   const chatSurface = createChatSurface();
   const composerSurface = createComposerSurface();
   const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
@@ -293,6 +294,16 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
 
   return cleanup;
+}
+
+function removeMountedPluginSurfaces(app: AppWithRuntime | undefined): void {
+  if (!app) {
+    return;
+  }
+
+  app.querySelectorAll<HTMLElement>(".pi-web-chat-surface, .pi-web-chat-composer").forEach((surface: HTMLElement): void => {
+    surface.remove();
+  });
 }
 
 function bindMountedPromptMeta(context: PluginContext, composerSurface: HTMLElement): void {
