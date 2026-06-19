@@ -1524,7 +1524,12 @@ test("mounted submit keeps pending user before assistant-only backend state", as
             type: "chat.state",
             activeSessionId: "assistant-only-session",
             runId: "assistant-only-run",
-            messages: [{ id: "backend-assistant", role: "assistant", text: "assistant only final", createdAt: 1 }],
+            messages: [{
+              id: "backend-assistant",
+              role: "assistant",
+              text: "assistant only final",
+              createdAt: Date.now() + 1_000,
+            }],
           });
 
           return new ReadableStream({
@@ -1557,6 +1562,107 @@ test("mounted submit keeps pending user before assistant-only backend state", as
       "you >assistant only prompt",
       "pi >assistant only final",
     ]);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps all current assistant-only backend messages after pending user", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    let startCount = 0;
+    let steerCount = 0;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          startCount += 1;
+          return {
+            activeSessionId: "assistant-only-multi-session",
+            runId: `assistant-only-multi-run-${startCount}`,
+            isStreaming: true,
+          };
+        }
+
+        if (method === "steerPrompt") {
+          steerCount += 1;
+          return { accepted: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "assistant-only-multi-session",
+            runId: "assistant-only-multi-run-1",
+            isStreaming: true,
+            messages: [
+              {
+                id: "backend-assistant-1",
+                role: "assistant",
+                text: "assistant current one",
+                createdAt: Date.now() + 1_000,
+              },
+              {
+                id: "backend-assistant-2",
+                role: "assistant",
+                text: "assistant current two",
+                createdAt: Date.now() + 2_000,
+              },
+            ],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "assistant only multi prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"partial"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    assert.deepEqual([...window.document.querySelectorAll(".transcript-item")].map((item) => item.textContent), [
+      "you >assistant only multi prompt",
+      "pi >assistant current one",
+      "pi >assistant current two",
+    ]);
+
+    textarea.value = "second normal prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(startCount, 2);
+    assert.equal(steerCount, 0);
     cleanup();
   });
 });

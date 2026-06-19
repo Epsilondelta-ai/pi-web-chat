@@ -104,6 +104,7 @@ type MountedState = {
   backendChatToken: number;
   pendingPromptEchoIds: Map<string, string[]>;
   pendingAssistantEchoIds: Map<string, string[]>;
+  completedRunIds: Set<string>;
   activeRunId?: string;
   activeRunSessionId?: string;
   activeRunWorkspacePath?: string;
@@ -262,6 +263,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     backendChatToken: 0,
     pendingPromptEchoIds: new Map<string, string[]>(),
     pendingAssistantEchoIds: new Map<string, string[]>(),
+    completedRunIds: new Set<string>(),
   };
 
   if (!selected?.sessionId) {
@@ -1446,6 +1448,8 @@ async function submitMountedPromptWithStreaming(
       runController.signal,
     );
   } finally {
+    rememberCompletedRunId(mountedState, start.runId);
+
     if (mountedState.activeRunId === start.runId) {
       mountedState.activeRunId = undefined;
       mountedState.activeRunSessionId = undefined;
@@ -2164,7 +2168,12 @@ function syncMountedRunStateFromBackendResponse(
   workspacePath: string,
   workspaceId: string,
 ): void {
-  if (response.isStreaming === true && typeof response.runId === "string" && response.runId) {
+  if (
+    response.isStreaming === true
+    && typeof response.runId === "string"
+    && response.runId
+    && !mountedState.completedRunIds.has(response.runId)
+  ) {
     mountedState.activeRunId = response.runId;
     mountedState.activeRunSessionId = typeof response.activeSessionId === "string" && response.activeSessionId ? response.activeSessionId : sessionId;
     mountedState.activeRunWorkspacePath = workspacePath;
@@ -2179,6 +2188,20 @@ function syncMountedRunStateFromBackendResponse(
     mountedState.activeRunWorkspacePath = undefined;
     mountedState.activeRunWorkspaceId = undefined;
     mountedState.onRunStateChange?.();
+  }
+}
+
+function rememberCompletedRunId(mountedState: MountedState, runId: string): void {
+  mountedState.completedRunIds.add(runId);
+
+  if (mountedState.completedRunIds.size <= 50) {
+    return;
+  }
+
+  const oldestRunId = mountedState.completedRunIds.values().next().value;
+
+  if (typeof oldestRunId === "string") {
+    mountedState.completedRunIds.delete(oldestRunId);
   }
 }
 
@@ -3559,6 +3582,21 @@ function mergeChatMessages(
       return;
     }
 
+    const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
+      localMessages,
+      backendMessages,
+      message,
+      promptEchoIds,
+      allowAssistantOnlyTailEcho,
+    );
+
+    if (promptAnchor) {
+      const anchoredOrder = (orderById.get(promptAnchor.id) ?? backendOrder) + (backendOrder + 1) / 1_000;
+      orderById.set(message.id, anchoredOrder);
+      merged.set(message.id, { ...merged.get(message.id), ...message });
+      return;
+    }
+
     orderById.set(message.id, backendOrder);
     merged.set(message.id, { ...merged.get(message.id), ...message });
   });
@@ -3651,29 +3689,41 @@ function tailAssistantEchoIdForAssistantOnlyBackendState(
   usedAssistantEchoIds: Set<string>,
   allowed: boolean,
 ): string {
-  if (
-    !allowed
-    || backendMessage.role !== "assistant"
-    || backendOrder !== backendMessages.length - 1
-    || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
-  ) {
+  const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
+    localMessages,
+    backendMessages,
+    backendMessage,
+    promptEchoIds,
+    allowed,
+  );
+
+  if (!promptAnchor || backendOrder !== backendMessages.length - 1) {
     return "";
   }
 
-  for (const promptEchoId of promptEchoIds) {
-    const assistantEchoId = nextAssistantEchoIdAfterMessage(
-      localMessages,
-      promptEchoId,
-      assistantEchoIds,
-      usedAssistantEchoIds,
-    );
+  return nextAssistantEchoIdAfterMessage(localMessages, promptAnchor.id, assistantEchoIds, usedAssistantEchoIds);
+}
 
-    if (assistantEchoId) {
-      return assistantEchoId;
-    }
+function pendingPromptAnchorForAssistantOnlyBackendState(
+  localMessages: ChatMessage[],
+  backendMessages: ChatMessage[],
+  backendMessage: ChatMessage,
+  promptEchoIds: string[],
+  allowed: boolean,
+): ChatMessage | undefined {
+  if (
+    !allowed
+    || backendMessage.role !== "assistant"
+    || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
+  ) {
+    return undefined;
   }
 
-  return "";
+  return localMessages.find((message: ChatMessage): boolean => {
+    return promptEchoIds.includes(message.id)
+      && message.role === "user"
+      && backendMessage.createdAt >= message.createdAt;
+  });
 }
 
 function nextAssistantEchoIdAfterMessage(
