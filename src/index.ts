@@ -103,6 +103,8 @@ type MountedSteeringRequest = {
 type MountedState = {
   backendChatToken: number;
   pendingPromptEchoIds: Map<string, string[]>;
+  pendingAssistantEchoIds: Map<string, string[]>;
+  pendingAssistantEchoByUserId: Map<string, string>;
   activeRunId?: string;
   activeRunSessionId?: string;
   activeRunWorkspacePath?: string;
@@ -257,7 +259,12 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const selected = readSidebarSelection(context);
   persistSidebarSelection(context, selected || undefined);
   const mountedStore = selected?.sessionId ? loadStore(selected.sessionId) : createNoSelectionStore();
-  const mountedState: MountedState = { backendChatToken: 0, pendingPromptEchoIds: new Map<string, string[]>() };
+  const mountedState: MountedState = {
+    backendChatToken: 0,
+    pendingPromptEchoIds: new Map<string, string[]>(),
+    pendingAssistantEchoIds: new Map<string, string[]>(),
+    pendingAssistantEchoByUserId: new Map<string, string>(),
+  };
 
   if (!selected?.sessionId) {
     renderMountedDocumentation(chatSurface);
@@ -1316,7 +1323,7 @@ async function submitMountedPromptWithStreaming(
     createdAt: Date.now(),
   };
   const submitSession = sessionById(store, targetSessionId);
-  pushPendingPromptEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
+  pushPendingEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
   submitSession.messages.push(pendingUserMessage);
   submitSession.updatedAt = Date.now();
   saveStore(store);
@@ -1390,9 +1397,9 @@ async function submitMountedPromptWithStreaming(
     const responseSessionId = typeof response.activeSessionId === "string" && response.activeSessionId
       ? response.activeSessionId
       : targetSessionId;
-    const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, targetSessionId);
+    const echoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, targetSessionId);
     const messages = applyBackendResponseToMountedSession(context, store, response, "submitPrompt", targetSessionId, echoIds);
-    clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, responseSessionId, messages, response.messages, echoIds);
+    clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, responseSessionId, messages, echoIds);
 
     if (store.activeSessionId === targetSessionId || store.activeSessionId === responseSessionId) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
@@ -1423,6 +1430,7 @@ async function submitMountedPromptWithStreaming(
   }
 
   const assistant = ensureStreamingAssistant(session);
+  pushPendingEchoId(mountedState.pendingAssistantEchoIds, targetSessionId, assistant.id);
   try {
     await consumeStreamingRun(
       context,
@@ -1513,7 +1521,7 @@ async function steerMountedPrompt(
     controller,
     sent: false,
   };
-  pushPendingPromptEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
+  pushPendingEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
   session.messages.push(pendingUserMessage);
   session.updatedAt = Date.now();
   saveStore(store);
@@ -2057,10 +2065,20 @@ async function openMountedSessionEvents(
 
       const response = chatStateEventResponse(event);
       const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
-      const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
-      const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoIds);
+      const promptEchoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
+      const assistantEchoIds = pendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho);
+      const messages = applyBackendResponseToMountedStore(
+        context,
+        store,
+        response,
+        "chatState",
+        promptEchoIds,
+        assistantEchoIds,
+        mountedState.pendingAssistantEchoByUserId,
+      );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
-      clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoIds);
+      clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
+      clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
       if (messages.length) {
         render.request();
       }
@@ -2070,7 +2088,7 @@ async function openMountedSessionEvents(
       await refreshMountedBackendChatState(context, chatSurface, store, mountedState, sessionId, workspacePath);
     }
   } finally {
-    render.cancel();
+    render.flush();
 
     if (mountedState.sessionEventsAbort === controller) {
       mountedState.sessionEventsAbort = undefined;
@@ -2096,10 +2114,20 @@ async function refreshMountedBackendChatState(
     }
 
     const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
-    const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
-    const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoIds);
+    const promptEchoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
+    const assistantEchoIds = pendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho);
+    const messages = applyBackendResponseToMountedStore(
+      context,
+      store,
+      response,
+      "chatState",
+      promptEchoIds,
+      assistantEchoIds,
+      mountedState.pendingAssistantEchoByUserId,
+    );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
-    clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoIds);
+    clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
+    clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
     if (messages.length) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     }
@@ -2188,6 +2216,8 @@ function applyBackendResponseToMountedStore(
   response: BackendResponse,
   reason: string,
   optimisticEchoIds: string | string[] = "",
+  assistantEchoIds: string | string[] = "",
+  assistantEchoByUserId: Map<string, string> = new Map<string, string>(),
 ): ChatMessage[] {
   const responseMessages = sanitizeChatMessages(response.messages);
 
@@ -2214,7 +2244,13 @@ function applyBackendResponseToMountedStore(
     return [];
   }
 
-  const nextMessages = mergeChatMessages(session.messages, responseMessages, optimisticEchoIds).slice(-MAX_MESSAGES_PER_SESSION);
+  const nextMessages = mergeChatMessages(
+    session.messages,
+    responseMessages,
+    optimisticEchoIds,
+    assistantEchoIds,
+    assistantEchoByUserId,
+  ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
   }
@@ -3436,48 +3472,107 @@ function sessionForBackendState(store: ChatStore, backendSessionId: string | nul
   return session;
 }
 
-function mergeChatMessages(localMessages: ChatMessage[], backendMessages: ChatMessage[], optimisticEchoIds: string | string[] = ""): ChatMessage[] {
-  const echoIds = Array.isArray(optimisticEchoIds) ? optimisticEchoIds : [optimisticEchoIds].filter(Boolean);
+function mergeChatMessages(
+  localMessages: ChatMessage[],
+  backendMessages: ChatMessage[],
+  optimisticEchoIds: string | string[] = "",
+  assistantEchoIds: string | string[] = "",
+  assistantEchoByUserId: Map<string, string> = new Map<string, string>(),
+): ChatMessage[] {
+  const promptEchoIds = toEchoIdList(optimisticEchoIds);
+  const assistantEchoIdList = toEchoIdList(assistantEchoIds);
   const merged = new Map<string, ChatMessage>();
   const orderById = new Map<string, number>();
-  let order = 0;
+  const pendingAssistantByBackendUserId = new Map<string, string>(assistantEchoByUserId);
+  let localOrder = backendMessages.length;
 
   for (const message of localMessages) {
     merged.set(message.id, message);
-    orderById.set(message.id, order++);
+    orderById.set(message.id, localOrder++);
   }
 
-  const usedEchoIds: Set<string> = new Set<string>();
-  for (const message of backendMessages) {
-    const duplicate = findOptimisticEchoMessage(localMessages, message, echoIds, usedEchoIds);
+  const usedPromptEchoIds: Set<string> = new Set<string>();
+  const usedAssistantEchoIds: Set<string> = new Set<string>();
 
-    if (duplicate) {
-      usedEchoIds.add(duplicate.id);
-      merged.delete(duplicate.id);
-      merged.set(message.id, message);
-      orderById.set(message.id, orderById.get(duplicate.id) ?? order++);
-      continue;
+  backendMessages.forEach((message: ChatMessage, backendOrder: number): void => {
+    const promptDuplicate = findOptimisticPromptEchoMessage(localMessages, message, promptEchoIds, usedPromptEchoIds);
+
+    if (promptDuplicate) {
+      usedPromptEchoIds.add(promptDuplicate.id);
+      const assistantEchoId = nextAssistantEchoIdAfterMessage(
+        localMessages,
+        promptDuplicate.id,
+        assistantEchoIdList,
+        usedAssistantEchoIds,
+      );
+
+      if (assistantEchoId) {
+        pendingAssistantByBackendUserId.set(message.id, assistantEchoId);
+        assistantEchoByUserId.set(message.id, assistantEchoId);
+      }
+
+      replaceMergedMessage(merged, orderById, promptDuplicate.id, message, backendOrder);
+      return;
     }
 
-    if (!orderById.has(message.id)) {
-      orderById.set(message.id, order++);
+    const assistantDuplicateId = immediateAssistantEchoIdForBackendMessage(
+      localMessages,
+      backendMessages,
+      message,
+      backendOrder,
+      assistantEchoIdList,
+      usedAssistantEchoIds,
+      pendingAssistantByBackendUserId,
+    );
+
+    if (assistantDuplicateId) {
+      usedAssistantEchoIds.add(assistantDuplicateId);
+      removeAssistantEchoById(assistantEchoByUserId, assistantDuplicateId);
+      replaceMergedMessage(merged, orderById, assistantDuplicateId, message, backendOrder);
+      return;
     }
 
+    orderById.set(message.id, backendOrder);
     merged.set(message.id, { ...merged.get(message.id), ...message });
-  }
+  });
 
   return [...merged.values()].sort((a, b): number => {
-    const createdAtDelta = a.createdAt - b.createdAt;
+    const orderDelta = (orderById.get(a.id) ?? 0) - (orderById.get(b.id) ?? 0);
 
-    if (createdAtDelta !== 0) {
-      return createdAtDelta;
+    if (orderDelta !== 0) {
+      return orderDelta;
     }
 
-    return (orderById.get(a.id) ?? 0) - (orderById.get(b.id) ?? 0);
+    return a.createdAt - b.createdAt;
   });
 }
 
-function findOptimisticEchoMessage(
+function toEchoIdList(echoIds: string | string[]): string[] {
+  return Array.isArray(echoIds) ? echoIds : [echoIds].filter(Boolean);
+}
+
+function removeAssistantEchoById(assistantEchoByUserId: Map<string, string>, assistantEchoId: string): void {
+  for (const [userId, echoId] of assistantEchoByUserId) {
+    if (echoId === assistantEchoId) {
+      assistantEchoByUserId.delete(userId);
+    }
+  }
+}
+
+function replaceMergedMessage(
+  merged: Map<string, ChatMessage>,
+  orderById: Map<string, number>,
+  duplicateId: string,
+  message: ChatMessage,
+  order: number,
+): void {
+  merged.delete(duplicateId);
+  merged.set(message.id, message);
+  orderById.delete(duplicateId);
+  orderById.set(message.id, order);
+}
+
+function findOptimisticPromptEchoMessage(
   localMessages: ChatMessage[],
   backendMessage: ChatMessage,
   optimisticEchoIds: string[],
@@ -3491,23 +3586,73 @@ function findOptimisticEchoMessage(
     return undefined;
   }
 
-  const localMessage = localMessages.find((message: ChatMessage): boolean => {
-    return optimisticEchoIds.includes(message.id) && !usedEchoIds.has(message.id) && message.text.trim() === backendMessage.text.trim();
+  return localMessages.find((message: ChatMessage): boolean => {
+    return optimisticEchoIds.includes(message.id)
+      && !usedEchoIds.has(message.id)
+      && message.role === backendMessage.role
+      && message.text.trim() === backendMessage.text.trim();
   });
+}
 
-  if (localMessage?.role !== backendMessage.role || localMessage.text.trim() !== backendMessage.text.trim()) {
-    return undefined;
+function immediateAssistantEchoIdForBackendMessage(
+  localMessages: ChatMessage[],
+  backendMessages: ChatMessage[],
+  backendMessage: ChatMessage,
+  backendOrder: number,
+  assistantEchoIds: string[],
+  usedAssistantEchoIds: Set<string>,
+  pendingAssistantByBackendUserId: Map<string, string>,
+): string {
+  if (backendMessage.role !== "assistant" || backendOrder <= 0) {
+    return "";
   }
 
-  return localMessage;
+  const previousBackendMessage = backendMessages[backendOrder - 1];
+
+  if (previousBackendMessage?.role !== "user") {
+    return "";
+  }
+
+  const sameMergeAssistantId = pendingAssistantByBackendUserId.get(previousBackendMessage.id) || "";
+
+  if (sameMergeAssistantId && !usedAssistantEchoIds.has(sameMergeAssistantId)) {
+    return sameMergeAssistantId;
+  }
+
+  return nextAssistantEchoIdAfterMessage(localMessages, previousBackendMessage.id, assistantEchoIds, usedAssistantEchoIds);
 }
 
-function pushPendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, sessionId: string, echoId: string): void {
-  pendingPromptEchoIds.set(sessionId, [...(pendingPromptEchoIds.get(sessionId) || []), echoId]);
+function nextAssistantEchoIdAfterMessage(
+  localMessages: ChatMessage[],
+  previousMessageId: string,
+  assistantEchoIds: string[],
+  usedAssistantEchoIds: Set<string>,
+): string {
+  const previousIndex = localMessages.findIndex((message: ChatMessage): boolean => message.id === previousMessageId);
+
+  if (previousIndex < 0) {
+    return "";
+  }
+
+  const nextMessage = localMessages[previousIndex + 1];
+
+  if (
+    nextMessage?.role === "assistant"
+    && assistantEchoIds.includes(nextMessage.id)
+    && !usedAssistantEchoIds.has(nextMessage.id)
+  ) {
+    return nextMessage.id;
+  }
+
+  return "";
 }
 
-function pendingPromptEchoIds(pendingPromptEchoIds: Map<string, string[]>, sessionId: string): string[] {
-  return pendingPromptEchoIds.get(sessionId) || [];
+function pushPendingEchoId(pendingEchoIds: Map<string, string[]>, sessionId: string, echoId: string): void {
+  pendingEchoIds.set(sessionId, [...(pendingEchoIds.get(sessionId) || []), echoId]);
+}
+
+function pendingEchoIds(pendingEchoIds: Map<string, string[]>, sessionId: string): string[] {
+  return pendingEchoIds.get(sessionId) || [];
 }
 
 function removePendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, sessionId: string, echoId: string): void {
@@ -3532,11 +3677,10 @@ function movePendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, fr
   pendingPromptEchoIds.set(toSessionId, [...(pendingPromptEchoIds.get(toSessionId) || []), ...echoIds]);
 }
 
-function clearMatchedPendingPromptEchoIds(
-  pendingPromptEchoIds: Map<string, string[]>,
+function clearMatchedPendingEchoIds(
+  pendingEchoIds: Map<string, string[]>,
   sessionId: string,
   mergedMessages: ChatMessage[],
-  _rawBackendMessages: unknown,
   optimisticEchoIds: string[],
 ): void {
   if (!optimisticEchoIds.length || !mergedMessages.length) {
@@ -3548,11 +3692,11 @@ function clearMatchedPendingPromptEchoIds(
   });
 
   if (remaining.length) {
-    pendingPromptEchoIds.set(sessionId, remaining);
+    pendingEchoIds.set(sessionId, remaining);
     return;
   }
 
-  pendingPromptEchoIds.delete(sessionId);
+  pendingEchoIds.delete(sessionId);
 }
 
 function render(state: State, dom: ChatDom): void {

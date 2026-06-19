@@ -1339,6 +1339,92 @@ test("mounted submit deduplicates streaming chat state echo of current prompt", 
   });
 });
 
+test("mounted submit replaces streaming assistant with backend final assistant", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "final-assistant-session", runId: "final-assistant-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const userOnlyState = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "final-assistant-session",
+            messages: [
+              { id: "previous-assistant", role: "assistant", text: "final answer was old", createdAt: 10 },
+              { id: "backend-user", role: "user", text: "dedupe final", createdAt: 3000 },
+            ],
+          });
+          const finalState = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "final-assistant-session",
+            messages: [
+              { id: "previous-assistant", role: "assistant", text: "final answer was old", createdAt: 10 },
+              { id: "backend-user", role: "user", text: "dedupe final", createdAt: 3000 },
+              { id: "backend-assistant", role: "assistant", text: "final answer completed", createdAt: 2000 },
+            ],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${userOnlyState}\n\n`));
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${finalState}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "dedupe final";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"final answer"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "final-assistant-session");
+    assert.deepEqual(session.messages.map((message) => `${message.role}:${message.id}`), [
+      "assistant:previous-assistant",
+      "user:backend-user",
+      "assistant:backend-assistant",
+    ]);
+    assert.deepEqual([...window.document.querySelectorAll(".transcript-item")].map((item) => item.textContent), [
+      "pi >final answer was old",
+      "you >dedupe final",
+      "pi >final answer completed",
+    ]);
+    cleanup();
+  });
+});
+
 test("mounted submit preserves draft during async context resolution before run starts", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
