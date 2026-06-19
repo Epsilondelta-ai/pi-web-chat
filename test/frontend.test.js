@@ -1495,6 +1495,207 @@ test("mounted submit replaces streaming assistant from one final backend state",
   });
 });
 
+test("mounted submit keeps pending user before assistant-only backend state", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "assistant-only-session", runId: "assistant-only-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "assistant-only-session",
+            runId: "assistant-only-run",
+            messages: [{ id: "backend-assistant", role: "assistant", text: "assistant only final", createdAt: 1 }],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "assistant only prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"partial"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    assert.deepEqual([...window.document.querySelectorAll(".transcript-item")].map((item) => item.textContent), [
+      "you >assistant only prompt",
+      "pi >assistant only final",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit does not bind stale assistant-only history to pending prompt", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "stale-assistant-session", runId: "stale-assistant-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "stale-assistant-session",
+            messages: [{ id: "stale-assistant", role: "assistant", text: "stale answer", createdAt: 1 }],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "fresh prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"fresh partial"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    assert.deepEqual([...window.document.querySelectorAll(".transcript-item")].map((item) => item.textContent), [
+      "pi >stale answer",
+      "you >fresh prompt",
+      "pi >fresh partial",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit does not bind previous assistant history to pending prompt", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "assistant-history-session", runId: "assistant-history-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "assistant-history-session",
+            messages: [
+              { id: "old-assistant", role: "assistant", text: "old answer", createdAt: 1 },
+              { id: "backend-user", role: "user", text: "history prompt", createdAt: 2 },
+            ],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "history prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"current partial"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    assert.deepEqual([...window.document.querySelectorAll(".transcript-item")].map((item) => item.textContent), [
+      "pi >old answer",
+      "you >history prompt",
+      "pi >current partial",
+    ]);
+    cleanup();
+  });
+});
+
 test("mounted submit preserves draft during async context resolution before run starts", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
