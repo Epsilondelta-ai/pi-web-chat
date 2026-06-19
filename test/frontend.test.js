@@ -572,6 +572,143 @@ test("mounted activation loads sidebar-selected session and sends chatState for 
   });
 });
 
+test("mounted chatState drops stale local-only cached messages", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "stale-cache-session", activeWorkspaceId: "workspace-2" }) };
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stale-cache-session",
+      sessions: [{
+        id: "stale-cache-session",
+        title: "New chat",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [
+          { id: "stale-local", role: "user", text: "stale local prompt", createdAt: 1 },
+          { id: "stale-local-assistant", role: "assistant", text: "stale local answer", createdAt: 2 },
+        ],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return {
+            activeSessionId: "stale-cache-session",
+            messages: [{ id: "backend-only", role: "assistant", text: "backend transcript", createdAt: 3 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "stale-cache-session");
+    assert.match(text, /backend transcript/);
+    assert.doesNotMatch(text, /stale local/);
+    assert.deepEqual(session.messages.map((message) => message.id), ["backend-only"]);
+    cleanup();
+  });
+});
+
+test("mounted chatState preserves cache when backend omits messages", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "omitted-messages-session", activeWorkspaceId: "workspace-2" }) };
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "omitted-messages-session",
+      sessions: [{
+        id: "omitted-messages-session",
+        title: "New chat",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "cached-message", role: "assistant", text: "cached transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? { activeSessionId: "omitted-messages-session" } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "omitted-messages-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /cached transcript/);
+    assert.deepEqual(session.messages.map((message) => message.id), ["cached-message"]);
+    cleanup();
+  });
+});
+
+test("mounted chatState switches active session when backend omits messages", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "requested-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? { activeSessionId: "backend-switched-session" } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "backend-switched-session");
+    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "backend-switched-session");
+    cleanup();
+  });
+});
+
+test("mounted chatState clears stale cache when backend session is empty", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "empty-backend-session", activeWorkspaceId: "workspace-2" }) };
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "empty-backend-session",
+      sessions: [{
+        id: "empty-backend-session",
+        title: "New chat",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "stale-local", role: "user", text: "stale local prompt", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return { activeSessionId: "empty-backend-session", messages: [] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "empty-backend-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.deepEqual(session.messages, []);
+    cleanup();
+  });
+});
+
 test("mounted chat starts at bottom and scroll-bottom button controls pinned scrolling", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

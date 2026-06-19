@@ -125,6 +125,11 @@ type MountedComposerTriggers = {
   fileSearchTimer?: ReturnType<typeof setTimeout>;
 };
 
+type MergeChatMessagesOptions = {
+  allowAssistantOnlyTailEcho?: boolean;
+  preserveOnlyEchoMessages?: boolean;
+};
+
 type MountedScrollLock = {
   term: HTMLElement;
   button: HTMLButtonElement;
@@ -2087,12 +2092,15 @@ async function openMountedSessionEvents(
         "chatState",
         promptEchoIds,
         assistantEchoIds,
-        activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+        {
+          allowAssistantOnlyTailEcho: activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+          preserveOnlyEchoMessages: true,
+        },
       );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
       clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
       clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-      if (messages.length) {
+      if (messages.length || Array.isArray(response.messages)) {
         render.request();
       }
     });
@@ -2136,12 +2144,15 @@ async function refreshMountedBackendChatState(
       "chatState",
       promptEchoIds,
       assistantEchoIds,
-      activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+      {
+        allowAssistantOnlyTailEcho: activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+        preserveOnlyEchoMessages: true,
+      },
     );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
     clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
     clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-    if (messages.length) {
+    if (messages.length || Array.isArray(response.messages)) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     }
   } catch {
@@ -2249,8 +2260,9 @@ function applyBackendResponseToMountedStore(
   reason: string,
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
-  allowAssistantOnlyTailEcho = false,
+  options: MergeChatMessagesOptions = {},
 ): ChatMessage[] {
+  const hasResponseMessages: boolean = Array.isArray(response.messages);
   const responseMessages = sanitizeChatMessages(response.messages);
 
   if (typeof response.activeSessionId === "string" && response.activeSessionId) {
@@ -2270,18 +2282,18 @@ function applyBackendResponseToMountedStore(
     }
   }
 
-  const session = activeSession(store);
-
-  if (!responseMessages.length) {
+  if (!hasResponseMessages) {
     return [];
   }
+
+  const session = activeSession(store);
 
   const nextMessages = mergeChatMessages(
     session.messages,
     responseMessages,
     optimisticEchoIds,
     assistantEchoIds,
-    allowAssistantOnlyTailEcho,
+    options,
   ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
@@ -3517,16 +3529,25 @@ function mergeChatMessages(
   backendMessages: ChatMessage[],
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
-  allowAssistantOnlyTailEcho = false,
+  options: MergeChatMessagesOptions = {},
 ): ChatMessage[] {
   const promptEchoIds = toEchoIdList(optimisticEchoIds);
   const assistantEchoIdList = toEchoIdList(assistantEchoIds);
+  const preservedLocalIds: Set<string> = new Set<string>([...promptEchoIds, ...assistantEchoIdList]);
+  const backendMessageIds: Set<string> = new Set<string>(backendMessages.map((message: ChatMessage): string => message.id));
+  const preserveOnlyEchoMessages: boolean = options.preserveOnlyEchoMessages === true;
+  const allowAssistantOnlyTailEcho: boolean = options.allowAssistantOnlyTailEcho === true;
+  const mergeLocalMessages: ChatMessage[] = preserveOnlyEchoMessages
+    ? localMessages.filter((message: ChatMessage): boolean => {
+      return backendMessageIds.has(message.id) || preservedLocalIds.has(message.id) || isPendingMountedSteeringMessage(message);
+    })
+    : localMessages;
   const merged = new Map<string, ChatMessage>();
   const orderById = new Map<string, number>();
   const assistantEchoByBackendUserId = new Map<string, string>();
   let localOrder = backendMessages.length;
 
-  for (const message of localMessages) {
+  for (const message of mergeLocalMessages) {
     merged.set(message.id, message);
     orderById.set(message.id, localOrder++);
   }
@@ -3535,12 +3556,12 @@ function mergeChatMessages(
   const usedAssistantEchoIds: Set<string> = new Set<string>();
 
   backendMessages.forEach((message: ChatMessage, backendOrder: number): void => {
-    const promptDuplicate = findOptimisticPromptEchoMessage(localMessages, message, promptEchoIds, usedPromptEchoIds);
+    const promptDuplicate = findOptimisticPromptEchoMessage(mergeLocalMessages, message, promptEchoIds, usedPromptEchoIds);
 
     if (promptDuplicate) {
       usedPromptEchoIds.add(promptDuplicate.id);
       const assistantEchoId = nextAssistantEchoIdAfterMessage(
-        localMessages,
+        mergeLocalMessages,
         promptDuplicate.id,
         assistantEchoIdList,
         usedAssistantEchoIds,
@@ -3555,7 +3576,7 @@ function mergeChatMessages(
     }
 
     const assistantDuplicateId = immediateAssistantEchoIdForBackendMessage(
-      localMessages,
+      mergeLocalMessages,
       backendMessages,
       message,
       backendOrder,
@@ -3571,7 +3592,7 @@ function mergeChatMessages(
     }
 
     const pendingAssistantDuplicateId = tailAssistantEchoIdForAssistantOnlyBackendState(
-      localMessages,
+      mergeLocalMessages,
       backendMessages,
       message,
       backendOrder,
@@ -3594,7 +3615,7 @@ function mergeChatMessages(
     }
 
     const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
-      localMessages,
+      mergeLocalMessages,
       backendMessages,
       message,
       promptEchoIds,
