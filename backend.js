@@ -88,8 +88,14 @@ async function runtimeStatusWithPluginQuota(stdout) {
 
   if (!payload || typeof payload !== "object") return stdout;
   const status = payload.status && typeof payload.status === "object" ? payload.status : {};
-  payload.status = { ...status, ...(await codexQuotaStatus()) };
+  payload.status = shouldFetchCodexQuota(status) ? { ...status, ...(await codexQuotaStatus()) } : status;
   return `${JSON.stringify(payload)}\n`;
+}
+
+function shouldFetchCodexQuota(status) {
+  const provider = typeof status.modelProvider === "string" ? status.modelProvider.toLowerCase() : "";
+  const model = typeof status.model === "string" ? status.model.toLowerCase() : "";
+  return provider === "openai-codex" || (!provider && model.includes("codex"));
 }
 
 async function codexQuotaStatus() {

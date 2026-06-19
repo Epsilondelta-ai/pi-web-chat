@@ -172,7 +172,9 @@ test("runtimeStatus fetches codex quotas through plugin backend launcher", async
   const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
   await mkdir(join(root, ".pi"));
   await mkdir(join(home, ".pi", "agent"), { recursive: true });
-  await writeFile(join(root, ".pi", "pi-web.json"), JSON.stringify({ status: { model: "GPT-5.5" } }));
+  await writeFile(join(root, ".pi", "pi-web.json"), JSON.stringify({
+    status: { model: "GPT-5.5", modelProvider: "openai-codex" },
+  }));
   await writeFile(join(home, ".pi", "agent", "auth.json"), JSON.stringify({
     "openai-codex": {
       type: "oauth",
@@ -217,6 +219,45 @@ test("runtimeStatus fetches codex quotas through plugin backend launcher", async
       authorization: "Bearer test-token",
       accountId: "account-1",
     }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("runtimeStatus does not overlay codex quotas for non-codex providers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-runtime-noncodex-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
+  await mkdir(join(root, ".pi"));
+  await mkdir(join(home, ".pi", "agent"), { recursive: true });
+  await writeFile(join(root, ".pi", "pi-web.json"), JSON.stringify({
+    status: { model: "kimi-k2", modelProvider: "zai", fiveHourQuota: 61, weeklyQuota: 42 },
+  }));
+  await writeFile(join(home, ".pi", "agent", "auth.json"), JSON.stringify({
+    "openai-codex": { type: "oauth", access: "test-token", accountId: "account-1" },
+  }));
+
+  let requestCount = 0;
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ rate_limit: { primary_window: { used_percent: 1 } } }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    const response = await callBackend("runtimeStatus", root, {}, {
+      HOME: home,
+      PI_CODEX_CHATGPT_BASE_URL: `http://127.0.0.1:${address.port}/backend-api/`,
+    });
+
+    assert.equal(response.status.modelProvider, "zai");
+    assert.equal(response.status.fiveHourQuota, 61);
+    assert.equal(response.status.weeklyQuota, 42);
+    assert.equal(requestCount, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
