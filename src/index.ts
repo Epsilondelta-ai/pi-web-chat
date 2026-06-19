@@ -3535,7 +3535,7 @@ function mergeChatMessages(
 ): ChatMessage[] {
   const promptEchoIds = toEchoIdList(optimisticEchoIds);
   const consumedPromptAnchorIds = localMessages
-    .filter((message: ChatMessage): boolean => message.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] === true)
+    .filter(isAssistantOnlyPromptAnchor)
     .map((message: ChatMessage): string => message.id);
   const promptAnchorIds = [...promptEchoIds, ...consumedPromptAnchorIds];
   const assistantEchoIdList = toEchoIdList(assistantEchoIds);
@@ -3547,7 +3547,7 @@ function mergeChatMessages(
     ? localMessages.filter((message: ChatMessage): boolean => {
       return backendMessageIds.has(message.id)
         || preservedLocalIds.has(message.id)
-        || message.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] === true
+        || isAssistantOnlyPromptAnchor(message)
         || isPendingMountedSteeringMessage(message);
     })
     : localMessages;
@@ -3691,13 +3691,13 @@ function mergeChatMessages(
 function removeLateBackendUserEchoDuplicates(messages: ChatMessage[]): ChatMessage[] {
   const usedBackendUserIds = new Set<string>();
   return messages.filter((message: ChatMessage): boolean => {
-    if (message.role !== "user" || message.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] !== true) {
+    if (message.role !== "user" || !isAssistantOnlyPromptAnchor(message)) {
       return true;
     }
 
     const duplicate = messages.find((candidate: ChatMessage): boolean => {
       return candidate.role === "user"
-        && candidate.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] !== true
+        && !isAssistantOnlyPromptAnchor(candidate)
         && !usedBackendUserIds.has(candidate.id)
         && candidate.text.trim() === message.text.trim()
         && candidate.createdAt >= message.createdAt;
@@ -3865,6 +3865,10 @@ function nextPromptAnchorForBackendAssistant(
   return localMessages.find((message: ChatMessage): boolean => message.id === lastUsedAnchorId);
 }
 
+function isAssistantOnlyPromptAnchor(message: ChatMessage): boolean {
+  return message.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] === true;
+}
+
 function markAssistantOnlyPromptAnchor(merged: Map<string, ChatMessage>, promptAnchor: ChatMessage): void {
   merged.set(promptAnchor.id, {
     ...promptAnchor,
@@ -3939,7 +3943,7 @@ function clearMatchedPendingEchoIds(
 
   const remaining = optimisticEchoIds.filter((echoId: string): boolean => {
     return mergedMessages.some((message: ChatMessage): boolean => {
-      return message.id === echoId && message.meta?.[ASSISTANT_ONLY_ANCHOR_META_KEY] !== true;
+      return message.id === echoId && !isAssistantOnlyPromptAnchor(message);
     });
   });
 
