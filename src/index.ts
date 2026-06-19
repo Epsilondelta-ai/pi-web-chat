@@ -2072,6 +2072,7 @@ async function openMountedSessionEvents(
         "chatState",
         promptEchoIds,
         assistantEchoIds,
+        activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
       );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
       clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
@@ -2120,6 +2121,7 @@ async function refreshMountedBackendChatState(
       "chatState",
       promptEchoIds,
       assistantEchoIds,
+      activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
     );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
     clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
@@ -2213,6 +2215,7 @@ function applyBackendResponseToMountedStore(
   reason: string,
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
+  allowAssistantOnlyTailEcho = false,
 ): ChatMessage[] {
   const responseMessages = sanitizeChatMessages(response.messages);
 
@@ -2244,6 +2247,7 @@ function applyBackendResponseToMountedStore(
     responseMessages,
     optimisticEchoIds,
     assistantEchoIds,
+    allowAssistantOnlyTailEcho,
   ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
@@ -3466,11 +3470,20 @@ function sessionForBackendState(store: ChatStore, backendSessionId: string | nul
   return session;
 }
 
+function activeAssistantTailEchoAllowed(
+  _mountedState: MountedState,
+  response: BackendResponse,
+  sessionId: string,
+): boolean {
+  return Boolean(typeof response.runId === "string" && response.runId && sessionId);
+}
+
 function mergeChatMessages(
   localMessages: ChatMessage[],
   backendMessages: ChatMessage[],
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
+  allowAssistantOnlyTailEcho = false,
 ): ChatMessage[] {
   const promptEchoIds = toEchoIdList(optimisticEchoIds);
   const assistantEchoIdList = toEchoIdList(assistantEchoIds);
@@ -3531,6 +3544,7 @@ function mergeChatMessages(
       promptEchoIds,
       assistantEchoIdList,
       usedAssistantEchoIds,
+      allowAssistantOnlyTailEcho,
     );
 
     if (pendingAssistantDuplicateId) {
@@ -3635,9 +3649,11 @@ function tailAssistantEchoIdForAssistantOnlyBackendState(
   promptEchoIds: string[],
   assistantEchoIds: string[],
   usedAssistantEchoIds: Set<string>,
+  allowed: boolean,
 ): string {
   if (
-    backendMessage.role !== "assistant"
+    !allowed
+    || backendMessage.role !== "assistant"
     || backendOrder !== backendMessages.length - 1
     || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
   ) {
