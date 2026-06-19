@@ -1731,6 +1731,68 @@ test("mounted submit keeps pending user before assistant-only backend state", as
   });
 });
 
+test("mounted submit keeps pending echo through unchanged chatState before assistant-only backend state", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "startPrompt"
+        ? { activeSessionId: "unchanged-before-assistant-session", runId: "unchanged-before-assistant-run", isStreaming: true }
+        : {},
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return captureStream((controller) => { runController = controller; });
+        }
+
+        if (method === "sessionEventsSse") {
+          const unchanged = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "unchanged-before-assistant-session",
+            runId: "unchanged-before-assistant-run",
+            messages: [],
+          });
+          const assistantOnly = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "unchanged-before-assistant-session",
+            runId: "unchanged-before-assistant-run",
+            messages: [{
+              id: "backend-assistant",
+              role: "assistant",
+              text: "assistant after unchanged",
+              createdAt: Date.now() + 1_000,
+            }],
+          });
+          return sseFrameStream(encoder, [unchanged, assistantOnly]);
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "prompt before unchanged";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >prompt before unchanged",
+      "pi >assistant after unchanged",
+    ]);
+    cleanup();
+  });
+});
+
 test("mounted submit keeps all current assistant-only backend messages after pending user", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

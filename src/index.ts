@@ -2086,7 +2086,7 @@ async function openMountedSessionEvents(
       const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
       const promptEchoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
       const assistantEchoIds = pendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho);
-      const messages = applyBackendResponseToMountedStore(
+      const result = applyBackendResponseToMountedStore(
         context,
         store,
         response,
@@ -2099,9 +2099,13 @@ async function openMountedSessionEvents(
         },
       );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
-      clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
-      clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-      if (messages.length || Array.isArray(response.messages)) {
+
+      if (result.changed) {
+        clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, result.messages, promptEchoIds);
+        clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, result.messages, assistantEchoIds);
+      }
+
+      if (result.messages.length || Array.isArray(response.messages)) {
         render.request();
       }
     });
@@ -2138,7 +2142,7 @@ async function refreshMountedBackendChatState(
     const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
     const promptEchoIds = pendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
     const assistantEchoIds = pendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho);
-    const messages = applyBackendResponseToMountedStore(
+    const result = applyBackendResponseToMountedStore(
       context,
       store,
       response,
@@ -2151,10 +2155,14 @@ async function refreshMountedBackendChatState(
       },
     );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
-    clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
-    clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-    if (messages.length || Array.isArray(response.messages)) {
-      renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
+
+    if (result.changed) {
+      clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, result.messages, promptEchoIds);
+      clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, result.messages, assistantEchoIds);
+    }
+
+    if (result.messages.length || Array.isArray(response.messages)) {
+      renderMountedBackendMessages(chatSurface, result.messages, store.activeSessionId);
     }
   } catch {
     // The mounted chat still shows any localStorage-backed messages when backend state is unavailable.
@@ -2254,6 +2262,11 @@ function workspaceSelectionForSelectedSession(
   return activeWorkspaceSelection(context);
 }
 
+type MountedStoreApplyResult = {
+  messages: ChatMessage[];
+  changed: boolean;
+};
+
 function applyBackendResponseToMountedStore(
   context: PluginContext,
   store: ChatStore,
@@ -2262,7 +2275,7 @@ function applyBackendResponseToMountedStore(
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
   options: MergeChatMessagesOptions = {},
-): ChatMessage[] {
+): MountedStoreApplyResult {
   const hasResponseMessages: boolean = Array.isArray(response.messages);
   const responseMessages = sanitizeChatMessages(response.messages);
 
@@ -2284,7 +2297,7 @@ function applyBackendResponseToMountedStore(
   }
 
   if (!hasResponseMessages) {
-    return [];
+    return { messages: [], changed: false };
   }
 
   const session = activeSession(store);
@@ -2297,7 +2310,7 @@ function applyBackendResponseToMountedStore(
     options,
   ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
-    return session.messages;
+    return { messages: session.messages, changed: false };
   }
 
   session.messages = nextMessages;
@@ -2308,7 +2321,7 @@ function applyBackendResponseToMountedStore(
   if (title) {
     publishMountedSessionTitleIfChanged(session.id, title);
   }
-  return session.messages;
+  return { messages: session.messages, changed: true };
 }
 
 function sessionMessagesChanged(current: ChatMessage[], next: ChatMessage[]): boolean {
