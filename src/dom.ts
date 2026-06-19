@@ -23,6 +23,10 @@ const MATERIAL_ICONS: Record<"attachFile" | "stop" | "send" | "terminal", string
   terminal: materialIcon("terminal", MATERIAL_PATHS.terminal),
 };
 
+function spinnerIcon(label: string): string {
+  return `<span class="spinner" data-frame="0" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></span><span class="sr-only">${escapeHtml(label)}</span>`;
+}
+
 function materialIcon(name: string, path: string): string {
   return `<svg class="material-icon" data-material-icon="${name}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="${path}"></path></svg>`;
 }
@@ -341,6 +345,33 @@ export function setComposerMode(dom: Pick<ChatDom, "root" | "attachButton">, mod
   setAttachButtonMode(dom.attachButton, mode);
 }
 
+type SendButtonMode = "idle" | "loading" | "steering";
+
+export function setSendButtonMode(sendButton: HTMLButtonElement, mode: SendButtonMode, enabled: boolean): void {
+  sendButton.disabled = mode === "steering" || (mode === "loading" && !enabled);
+  sendButton.dataset.mode = mode;
+  sendButton.setAttribute("aria-disabled", enabled ? "false" : "true");
+
+  if (mode === "loading") {
+    const label: string = enabled ? "send steering message" : "loading";
+    sendButton.innerHTML = spinnerIcon(label);
+    sendButton.title = label;
+    sendButton.setAttribute("aria-label", label);
+    return;
+  }
+
+  if (mode === "steering") {
+    sendButton.innerHTML = spinnerIcon("steering");
+    sendButton.title = "steering message pending";
+    sendButton.setAttribute("aria-label", "steering message pending");
+    return;
+  }
+
+  sendButton.innerHTML = MATERIAL_ICONS.send;
+  sendButton.title = "send";
+  sendButton.setAttribute("aria-label", "send");
+}
+
 export function setAttachButtonMode(attachButton: HTMLButtonElement, mode: "normal" | "shell" | "file-ref"): void {
   attachButton.disabled = mode === "shell";
   attachButton.setAttribute("aria-disabled", mode === "shell" ? "true" : "false");
@@ -537,6 +568,32 @@ export function pluginStyleText(): string {
       color: var(--fg-2, #a3a3a3);
     }
 
+    .pi-web-chat-surface .msg.pending-steering {
+      align-items: center;
+      margin-bottom: 10px;
+      opacity: 0.62;
+    }
+
+    .pi-web-chat-surface .pending-steering-text {
+      font-size: var(--text-sm, 13px);
+      color: var(--fg-3, #8b8b8b);
+    }
+
+    .pi-web-chat-surface .pending-steering-cancel {
+      border: 0;
+      background: transparent;
+      color: var(--fg-3, #8b8b8b);
+      cursor: pointer;
+      font: inherit;
+      line-height: 1;
+      padding: 2px 6px;
+    }
+
+    .pi-web-chat-surface .pending-steering-cancel:hover,
+    .pi-web-chat-surface .pending-steering-cancel:focus-visible {
+      color: var(--fg-1, #d4d4d4);
+    }
+
     .pi-web-chat-composer {
       display: block;
       border-top: 1px solid var(--border, #24313a);
@@ -641,6 +698,18 @@ export function pluginStyleText(): string {
     .pi-web-chat-composer .send-btn {
       background: var(--accent, #00ff88);
       color: #021;
+    }
+
+    .pi-web-chat-composer .send-btn[data-mode="loading"] {
+      cursor: pointer;
+      opacity: 1;
+    }
+
+    .pi-web-chat-composer .send-btn[data-mode="steering"] {
+      background: var(--warning, #facc15);
+      color: #2a1500;
+      cursor: progress;
+      opacity: 1;
     }
 
     .pi-web-chat-composer .prompt-bar.shell-mode .send-btn {
@@ -849,6 +918,20 @@ export function pluginStyleText(): string {
       color: var(--accent, #00ff88);
     }
 
+    .pi-web-chat-composer .sr-only,
+    .pi-web-chat-surface .sr-only {
+      border: 0;
+      clip: rect(0 0 0 0);
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      padding: 0;
+      position: absolute;
+      white-space: nowrap;
+      width: 1px;
+    }
+
+    .pi-web-chat-composer .spinner,
     .pi-web-chat-surface .spinner {
       color: var(--accent, #00ff88);
       display: inline-grid;
@@ -862,6 +945,7 @@ export function pluginStyleText(): string {
       width: 0.84ch;
     }
 
+    .pi-web-chat-composer .spinner span,
     .pi-web-chat-surface .spinner span {
       align-items: center;
       color: #000;
@@ -873,13 +957,20 @@ export function pluginStyleText(): string {
       width: 0.42ch;
     }
 
+    .pi-web-chat-composer .spinner span::before,
     .pi-web-chat-surface .spinner span::before { content: "."; }
-    .pi-web-chat-surface .spinner span:nth-child(1) { grid-column: 1; grid-row: 1; }
-    .pi-web-chat-surface .spinner span:nth-child(2) { grid-column: 2; grid-row: 1; }
-    .pi-web-chat-surface .spinner span:nth-child(3) { grid-column: 2; grid-row: 2; }
-    .pi-web-chat-surface .spinner span:nth-child(4) { grid-column: 2; grid-row: 3; }
-    .pi-web-chat-surface .spinner span:nth-child(5) { grid-column: 1; grid-row: 3; }
-    .pi-web-chat-surface .spinner span:nth-child(6) { grid-column: 1; grid-row: 2; }
+    .pi-web-chat-composer .spinner span:nth-child(1), .pi-web-chat-surface .spinner span:nth-child(1) { grid-column: 1; grid-row: 1; }
+    .pi-web-chat-composer .spinner span:nth-child(2), .pi-web-chat-surface .spinner span:nth-child(2) { grid-column: 2; grid-row: 1; }
+    .pi-web-chat-composer .spinner span:nth-child(3), .pi-web-chat-surface .spinner span:nth-child(3) { grid-column: 2; grid-row: 2; }
+    .pi-web-chat-composer .spinner span:nth-child(4), .pi-web-chat-surface .spinner span:nth-child(4) { grid-column: 2; grid-row: 3; }
+    .pi-web-chat-composer .spinner span:nth-child(5), .pi-web-chat-surface .spinner span:nth-child(5) { grid-column: 1; grid-row: 3; }
+    .pi-web-chat-composer .spinner span:nth-child(6), .pi-web-chat-surface .spinner span:nth-child(6) { grid-column: 1; grid-row: 2; }
+    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(1),
+    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(2),
+    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(3),
+    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(4),
+    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(5),
+    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(6),
     .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(1),
     .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(2),
     .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(3),
@@ -890,6 +981,12 @@ export function pluginStyleText(): string {
       opacity: 1;
     }
 
+    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(6),
+    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(1),
+    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(2),
+    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(3),
+    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(4),
+    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(5),
     .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(6),
     .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(1),
     .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(2),
@@ -900,6 +997,12 @@ export function pluginStyleText(): string {
       opacity: 0.68;
     }
 
+    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(5),
+    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(6),
+    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(1),
+    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(2),
+    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(3),
+    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(4),
     .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(5),
     .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(6),
     .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(1),
@@ -910,6 +1013,12 @@ export function pluginStyleText(): string {
       opacity: 0.42;
     }
 
+    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(4),
+    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(5),
+    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(6),
+    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(1),
+    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(2),
+    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(3),
     .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(4),
     .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(5),
     .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(6),
@@ -921,12 +1030,12 @@ export function pluginStyleText(): string {
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .pi-web-chat-surface .spinner[data-frame] span:nth-child(1) { color: currentColor; opacity: 1; }
-      .pi-web-chat-surface .spinner[data-frame] span:nth-child(2) { color: currentColor; opacity: 0.68; }
-      .pi-web-chat-surface .spinner[data-frame] span:nth-child(3) { color: currentColor; opacity: 0.42; }
-      .pi-web-chat-surface .spinner[data-frame] span:nth-child(4) { color: currentColor; opacity: 0.24; }
-      .pi-web-chat-surface .spinner[data-frame] span:nth-child(5) { color: #000; opacity: 1; }
-      .pi-web-chat-surface .spinner[data-frame] span:nth-child(6) { color: #000; opacity: 1; }
+      .pi-web-chat-composer .spinner[data-frame] span:nth-child(1), .pi-web-chat-surface .spinner[data-frame] span:nth-child(1) { color: currentColor; opacity: 1; }
+      .pi-web-chat-composer .spinner[data-frame] span:nth-child(2), .pi-web-chat-surface .spinner[data-frame] span:nth-child(2) { color: currentColor; opacity: 0.68; }
+      .pi-web-chat-composer .spinner[data-frame] span:nth-child(3), .pi-web-chat-surface .spinner[data-frame] span:nth-child(3) { color: currentColor; opacity: 0.42; }
+      .pi-web-chat-composer .spinner[data-frame] span:nth-child(4), .pi-web-chat-surface .spinner[data-frame] span:nth-child(4) { color: currentColor; opacity: 0.24; }
+      .pi-web-chat-composer .spinner[data-frame] span:nth-child(5), .pi-web-chat-surface .spinner[data-frame] span:nth-child(5) { color: #000; opacity: 1; }
+      .pi-web-chat-composer .spinner[data-frame] span:nth-child(6), .pi-web-chat-surface .spinner[data-frame] span:nth-child(6) { color: #000; opacity: 1; }
     }
 
     .pi-web-chat-surface .tool-card .tc-meta .err {

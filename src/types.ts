@@ -133,6 +133,7 @@ export type BackendResponse = {
 export type ChatEvent = {
   seq?: number;
   type: string;
+  runId?: string;
   delta?: string;
   toolCallId?: string;
   toolName?: string;

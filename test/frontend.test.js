@@ -22,6 +22,8 @@ import activate, {
   submittedAttachmentsForText,
 } from "./.generated/index.js";
 
+const STEERING_CANCEL_WAIT_MS = 140;
+
 function createPiWeb() {
   const subjects = new Map();
   const kinds = new Map();
@@ -231,6 +233,12 @@ test("mounted composer ignores host runtime meta and uses plugin backend", async
     window.setInterval = () => {
       throw new Error("prompt meta must not poll");
     };
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId: "workspace-2",
+        workspaces: [{ id: "workspace-2", path: "/tmp/runtime-workspace" }],
+      }),
+    };
 
     const cleanup = activate({
       app,
@@ -259,7 +267,10 @@ test("mounted composer ignores host runtime meta and uses plugin backend", async
     assert.notEqual(window.document.querySelector(".prompt-meta-battery-full svg"), null);
     assert.notEqual(window.document.querySelector(".prompt-meta-battery-low svg"), null);
     assert.notEqual(window.document.querySelector(".prompt-meta-branch svg"), null);
-    assert.deepEqual(backendCalls[0], { method: "runtimeStatus", input: { data: {} } });
+    assert.deepEqual(backendCalls[0], {
+      method: "runtimeStatus",
+      input: { workspaceId: "workspace-2", data: { workspacePath: "/tmp/runtime-workspace" } },
+    });
     cleanup();
     window.setInterval = originalSetInterval;
   });
@@ -1419,7 +1430,7 @@ test("mounted submit rejects steering without starting a competing run when back
     textarea.value = "second";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
-    await tick();
+    await tick(STEERING_CANCEL_WAIT_MS);
     await tick();
 
     assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 1);
@@ -1429,12 +1440,278 @@ test("mounted submit rejects steering without starting a competing run when back
   });
 });
 
+test("mounted activation restores loading controls for streaming selected session", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "restored-session", activeWorkspaceId: "workspace-1" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "chatState") {
+          return {
+            activeSessionId: input.data.sessionId,
+            runId: "restored-run",
+            isStreaming: true,
+            messages: [{ id: "a1", role: "assistant", text: "partial", createdAt: 1, streaming: true }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const sendButton = window.document.querySelector(".send-btn");
+    const stopButton = window.document.querySelector(".stop-btn");
+    assert.equal(sendButton.dataset.mode, "loading");
+    assert.equal(sendButton.getAttribute("aria-label"), "loading");
+    assert.equal(stopButton.hidden, false);
+
+    stopButton.click();
+    await tick();
+
+    assert.equal(backendCalls.find((call) => call.method === "abortPrompt").input.data.runId, "restored-run");
+    cleanup();
+  });
+});
+
+test("mounted composer shows loading send and stop aborts active run", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let activeWorkspaceId = "workspace-1";
+    let streamController;
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId,
+        workspaces: [{ id: "workspace-1", path: "/tmp/workspace-1" }, { id: "workspace-2", path: "/tmp/workspace-2" }],
+      }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "loading-session", runId: "loading-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method, _input, options) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              streamController = controller;
+              options?.signal?.addEventListener("abort", () => controller.close());
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const sendButton = window.document.querySelector(".send-btn");
+    const stopButton = window.document.querySelector(".stop-btn");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    sendButton.click();
+    await tick();
+
+    assert.ok(streamController);
+    assert.equal(sendButton.dataset.mode, "loading");
+    assert.equal(stopButton.hidden, false);
+
+    activeWorkspaceId = "workspace-2";
+    stopButton.click();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "abortPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "abortPrompt").input.data.runId, "loading-run");
+    assert.equal(backendCalls.find((call) => call.method === "abortPrompt").input.workspaceId, "workspace-1");
+    cleanup();
+  });
+});
+
+test("mounted stop during start aborts backend run after run id arrives", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let resolveStart;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          await new Promise((resolve) => { resolveStart = resolve; });
+          return { activeSessionId: "starting-session", runId: "late-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async () => new ReadableStream({ start() {} }),
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const stopButton = window.document.querySelector(".stop-btn");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(stopButton.hidden, false);
+    stopButton.click();
+    resolveStart();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "abortPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "abortPrompt").input.data.runId, "late-run");
+    cleanup();
+  });
+});
+
+test("mounted steering can be cancelled before backend dispatch", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+    let streamController;
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "steer-cancel-session", runId: "steer-cancel-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId, isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method, _input, options) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              streamController = controller;
+              options?.signal?.addEventListener("abort", () => controller.close(), { once: true });
+            },
+          });
+        }
+
+        return new ReadableStream({ start() {} });
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    const sendButton = window.document.querySelector(".send-btn");
+    const stopButton = window.document.querySelector(".stop-btn");
+    try {
+      textarea.value = "first";
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      sendButton.click();
+      await tick();
+      assert.ok(streamController);
+
+      textarea.value = "second";
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      sendButton.click();
+      await tick();
+
+      assert.equal(sendButton.dataset.mode, "steering");
+      assert.equal(stopButton.title, "cancel steering");
+      assert.equal(window.document.querySelector(".pending-steering-text").textContent, "second");
+      assert.equal(window.document.querySelector("[data-action='cancel-steering']").title, "cancel steering");
+      window.document.querySelector("[data-action='cancel-steering']").click();
+      await tick(STEERING_CANCEL_WAIT_MS);
+
+      const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+      const session = store.sessions.find((item) => item.id === "steer-cancel-session");
+      assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 0);
+      assert.deepEqual(session.messages.filter((message) => message.role === "user").map((message) => message.text), ["first"]);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test("mounted pending steering ignores keyboard resubmit until it is dispatched", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const backendCalls = [];
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return { activeSessionId: "steer-guard-session", runId: "steer-guard-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId, isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async () => new ReadableStream({ start() {} }),
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "first";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    textarea.value = "second";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    textarea.value = "third";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    await tick(STEERING_CANCEL_WAIT_MS);
+
+    assert.equal(backendCalls.filter((call) => call.method === "steerPrompt").length, 1);
+    assert.equal(backendCalls.find((call) => call.method === "steerPrompt").input.data.text, "second");
+    cleanup();
+  });
+});
+
 test("mounted submit while streaming sends steering without aborting or starting a new run", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
     const backendCalls = [];
     const encoder = new TextEncoder();
+    let activeWorkspaceId = "workspace-1";
     let streamController;
+    app.piWebSidebar = {
+      getSnapshot: () => ({
+        activeWorkspaceId,
+        workspaces: [{ id: "workspace-1", path: "/tmp/workspace-1" }, { id: "workspace-2", path: "/tmp/workspace-2" }],
+      }),
+    };
 
     const cleanup = activate({
       app,
@@ -1490,15 +1767,18 @@ test("mounted submit while streaming sends steering without aborting or starting
     await tick();
     assert.ok(streamController);
 
+    activeWorkspaceId = "workspace-2";
     textarea.value = "second";
     textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     window.document.querySelector(".send-btn").click();
-    await tick();
+    await tick(STEERING_CANCEL_WAIT_MS);
 
     assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
     assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 0);
     assert.equal(backendCalls.filter((call) => call.method === "abortPrompt").length, 0);
     const steerCall = backendCalls.find((call) => call.method === "steerPrompt");
+    assert.equal(steerCall.input.workspaceId, "workspace-1");
+    assert.equal(steerCall.input.data.workspacePath, "/tmp/workspace-1");
     assert.equal(steerCall.input.data.runId, "active-run");
     assert.equal(steerCall.input.data.text, "second");
 

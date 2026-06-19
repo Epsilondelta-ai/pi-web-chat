@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,10 +36,12 @@ const (
 	maxChatToolArgsBytes             = 1000
 	maxChatToolCallsPerMessage       = 100
 	maxChatMessageBlocks             = 200
+	maxActiveRunStateScan            = 512
 	defaultMaxSkillDiscoveryDirs     = 4000
 	defaultMaxWorkspaceSearchEntries = 20000
 	envMaxSkillDiscoveryDirs         = "PI_WEB_CHAT_MAX_SKILL_DISCOVERY_DIRS"
 	envMaxWorkspaceSearchEntries     = "PI_WEB_CHAT_MAX_WORKSPACE_SEARCH_ENTRIES"
+	activeRunStateTtl                = time.Hour
 )
 
 var skipDirs = map[string]bool{
@@ -318,7 +319,11 @@ func handle(method, workspaceRoot string, input request) (any, error) {
 	case "commands":
 		return map[string]any{"commands": allSlashCommands()}, nil
 	case "runtimeStatus":
-		return map[string]any{"status": workspaceRuntimeStatus(context.Background(), workspaceRoot)}, nil
+		root, err := runtimeStatusWorkspaceRoot(workspaceRoot, input)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": workspaceRuntimeStatus(context.Background(), root)}, nil
 	case "chatState":
 		return readPiChatState(workspaceRoot, input)
 	case "submitPrompt":
@@ -353,8 +358,42 @@ func workspaceRuntimeStatus(ctx context.Context, workspaceRoot string) runtimeSt
 		status.CurrentBranch = branch
 	}
 
-	status.FiveHourQuota, status.WeeklyQuota = liveQuotaForModel(ctx, status.Model)
 	return status
+}
+
+func mergeRuntimeStatus(primary, fallback runtimeStatusInfo) runtimeStatusInfo {
+	if primary.Model == "" {
+		primary.Model = fallback.Model
+	}
+	if primary.ModelProvider == "" {
+		primary.ModelProvider = fallback.ModelProvider
+	}
+	if (primary.ThinkingLevel == "" || primary.ThinkingLevel == "off") && fallback.ThinkingLevel != "" {
+		primary.ThinkingLevel = fallback.ThinkingLevel
+	}
+	if primary.FiveHourQuota == nil {
+		primary.FiveHourQuota = fallback.FiveHourQuota
+	}
+	if primary.WeeklyQuota == nil {
+		primary.WeeklyQuota = fallback.WeeklyQuota
+	}
+	return primary
+}
+
+func runtimeStatusWorkspaceRoot(workspaceRoot string, input request) (string, error) {
+	root, err := resolveRoot(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	workspacePath := strings.TrimSpace(stringInput(input, "workspacePath"))
+	if workspacePath == "" {
+		return root, nil
+	}
+	selectedRoot, selectedErr := resolveRoot(workspacePath)
+	if selectedErr != nil {
+		return root, nil
+	}
+	return selectedRoot, nil
 }
 
 func runtimeStatusFromSettings(workspaceRoot string) runtimeStatusInfo {
@@ -367,6 +406,8 @@ func runtimeStatusFromSettings(workspaceRoot string) runtimeStatusInfo {
 		Model:         strings.TrimSpace(stringMapValue(settings, "defaultModel")),
 		ModelProvider: strings.TrimSpace(stringMapValue(settings, "defaultProvider")),
 		ThinkingLevel: strings.TrimSpace(stringMapValue(settings, "defaultThinkingLevel")),
+		FiveHourQuota: intPointerFromMap(settings, "fiveHourQuota"),
+		WeeklyQuota:   intPointerFromMap(settings, "weeklyQuota"),
 	}
 }
 
@@ -397,16 +438,60 @@ func readJSONMap(path string) map[string]any {
 }
 
 func mergeRuntimeSettings(target map[string]any, source map[string]any) {
-	for _, key := range []string{"defaultProvider", "defaultModel", "defaultThinkingLevel"} {
+	mergeRuntimeSettingsFields(target, source)
+	if status, ok := source["status"].(map[string]any); ok {
+		mergeRuntimeSettingsFields(target, status)
+	}
+}
+
+func mergeRuntimeSettingsFields(target map[string]any, source map[string]any) {
+	for _, key := range []string{"defaultProvider", "defaultModel", "defaultThinkingLevel", "fiveHourQuota", "weeklyQuota"} {
 		if value, ok := source[key]; ok {
 			target[key] = value
 		}
+	}
+	if value, ok := source["model"]; ok {
+		target["defaultModel"] = value
+	}
+	if value, ok := source["modelProvider"]; ok {
+		target["defaultProvider"] = value
+	}
+	if value, ok := source["thinkingLevel"]; ok {
+		target["defaultThinkingLevel"] = value
 	}
 }
 
 func stringMapValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)
 	return value
+}
+
+func firstStringFromMap(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func intPointerFromMap(values map[string]any, keys ...string) *int {
+	for _, key := range keys {
+		switch value := values[key].(type) {
+		case float64:
+			out := int(value)
+			return &out
+		case int:
+			out := value
+			return &out
+		case json.Number:
+			if parsed, err := value.Int64(); err == nil {
+				out := int(parsed)
+				return &out
+			}
+		}
+	}
+	return nil
 }
 
 func currentGitBranch(ctx context.Context, workspaceRoot string) string {
@@ -423,353 +508,6 @@ func currentGitBranch(ctx context.Context, workspaceRoot string) string {
 		return ""
 	}
 	return branch
-}
-
-func liveQuotaForModel(ctx context.Context, model string) (*int, *int) {
-	name := strings.ToLower(model)
-	switch {
-	case strings.Contains(name, "gpt") || strings.Contains(name, "codex"):
-		return fetchCodexQuota(ctx)
-	case strings.Contains(name, "kimi"):
-		return fetchKimiCodeQuota(ctx)
-	case strings.Contains(name, "glm") || strings.Contains(name, "zai") || strings.Contains(name, "z.ai"):
-		return fetchZaiQuota(ctx)
-	default:
-		return nil, nil
-	}
-}
-
-func fetchCodexQuota(ctx context.Context) (*int, *int) {
-	var auth struct {
-		OpenAICodex struct {
-			Access    string `json:"access"`
-			AccountID string `json:"accountId"`
-		} `json:"openai-codex"`
-	}
-	if !readAuthJSON(&auth) || auth.OpenAICodex.Access == "" || auth.OpenAICodex.AccountID == "" {
-		return nil, nil
-	}
-	var payload struct {
-		RateLimit struct {
-			PrimaryWindow   *quotaUsageWindow `json:"primary_window"`
-			SecondaryWindow *quotaUsageWindow `json:"secondary_window"`
-		} `json:"rate_limit"`
-	}
-	ok := getJSON(ctx, "https://chatgpt.com/backend-api/wham/usage", map[string]string{
-		"Authorization":      "Bearer " + auth.OpenAICodex.Access,
-		"chatgpt-account-id": auth.OpenAICodex.AccountID,
-		"Content-Type":       "application/json",
-	}, &payload)
-	if !ok {
-		return nil, nil
-	}
-	return remainingFromWindow(payload.RateLimit.PrimaryWindow), remainingFromWindow(payload.RateLimit.SecondaryWindow)
-}
-
-func fetchKimiCodeQuota(ctx context.Context) (*int, *int) {
-	var auth struct {
-		KimiCoding struct {
-			Access string `json:"access"`
-			Key    string `json:"key"`
-		} `json:"kimi-coding"`
-	}
-	_ = readAuthJSON(&auth)
-	token := firstNonEmpty(auth.KimiCoding.Access, auth.KimiCoding.Key)
-	if token == "" {
-		return nil, nil
-	}
-	var payload kimiUsagePayload
-	if !getJSON(ctx, "https://api.kimi.com/coding/v1/usages", bearerHeaders(token), &payload) {
-		return nil, nil
-	}
-	return kimiWindow(&payload, "5H:"), kimiWindow(&payload, "7D:")
-}
-
-func fetchZaiQuota(ctx context.Context) (*int, *int) {
-	var auth struct {
-		Zai struct {
-			Key    string `json:"key"`
-			Access string `json:"access"`
-		} `json:"zai"`
-	}
-	_ = readAuthJSON(&auth)
-	token := firstNonEmpty(auth.Zai.Key, auth.Zai.Access)
-	if token == "" {
-		return nil, nil
-	}
-	urls := []string{"https://api.z.ai/api/monitor/usage/quota/limit", "https://open.bigmodel.cn/api/monitor/usage/quota/limit"}
-	for _, url := range urls {
-		var payload zaiQuotaPayload
-		if getJSON(ctx, url, bearerHeaders(token), &payload) {
-			return zaiWindow(&payload, "5H:"), zaiWindow(&payload, "7D:")
-		}
-	}
-	return nil, nil
-}
-
-func readAuthJSON(target any) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".pi", "agent", "auth.json"))
-	return err == nil && json.Unmarshal(data, target) == nil
-}
-
-func getJSON(ctx context.Context, url string, headers map[string]string, target any) bool {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return false
-	}
-	return json.NewDecoder(res.Body).Decode(target) == nil
-}
-
-func bearerHeaders(token string) map[string]string {
-	return map[string]string{"Authorization": "Bearer " + token, "Content-Type": "application/json"}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-type quotaUsageWindow struct {
-	UsedPercent any `json:"used_percent"`
-}
-
-type kimiUsagePayload struct {
-	Usage  *kimiLimit  `json:"usage"`
-	Limits []kimiLimit `json:"limits"`
-}
-
-type kimiLimit struct {
-	Label          string       `json:"label"`
-	Name           string       `json:"name"`
-	Type           string       `json:"type"`
-	UsedPercent    any          `json:"used_percent"`
-	UsedPercentage any          `json:"usedPercentage"`
-	Limit          any          `json:"limit"`
-	Used           any          `json:"used"`
-	Remaining      any          `json:"remaining"`
-	Window         *quotaWindow `json:"window"`
-	Detail         *kimiLimit   `json:"detail"`
-	Details        *kimiLimit   `json:"details"`
-}
-
-type quotaWindow struct {
-	Duration any    `json:"duration"`
-	Minutes  any    `json:"minutes"`
-	Unit     string `json:"unit"`
-}
-
-type zaiQuotaPayload struct {
-	Data struct {
-		Limits []zaiLimit `json:"limits"`
-	} `json:"data"`
-	Limits []zaiLimit `json:"limits"`
-}
-
-type zaiLimit struct {
-	Type           string `json:"type"`
-	Percentage     any    `json:"percentage"`
-	UsedPercent    any    `json:"used_percent"`
-	UsedPercentage any    `json:"usedPercentage"`
-}
-
-func remainingFromWindow(window *quotaUsageWindow) *int {
-	if window == nil {
-		return nil
-	}
-	used, ok := numberFromAny(window.UsedPercent)
-	if !ok {
-		return nil
-	}
-	return remainingFromUsedPercent(used, true)
-}
-
-func kimiWindow(payload *kimiUsagePayload, label string) *int {
-	for i := range payload.Limits {
-		if kimiLimitMatches(payload.Limits[i], label) {
-			return remainingFromUsedPercent(kimiUsedPercent(&payload.Limits[i]))
-		}
-	}
-	if payload.Usage != nil {
-		return remainingFromUsedPercent(kimiUsedPercent(payload.Usage))
-	}
-	return nil
-}
-
-func kimiLimitMatches(limit kimiLimit, label string) bool {
-	minutes := quotaWindowMinutes(limit.Window)
-	text := strings.ToLower(limit.Label + " " + limit.Name + " " + limit.Type)
-	if label == "5H:" {
-		return minutes == 300 || strings.Contains(text, "5h") || strings.Contains(text, "5 h") || strings.Contains(text, "five")
-	}
-	return minutes == 10080 || strings.Contains(text, "week") || strings.Contains(text, "7d") || strings.Contains(text, "7 d")
-}
-
-func kimiUsedPercent(limit *kimiLimit) (float64, bool) {
-	if limit == nil {
-		return 0, false
-	}
-	source := *limit
-	if source.Details != nil {
-		source = mergeKimiLimit(source, *source.Details)
-	}
-	if source.Detail != nil {
-		source = mergeKimiLimit(source, *source.Detail)
-	}
-	if used, ok := firstNumberFromAny(source.UsedPercent, source.UsedPercentage); ok {
-		if used <= 1 {
-			return used * 100, true
-		}
-		return used, true
-	}
-	limitValue, hasLimit := numberFromAny(source.Limit)
-	if !hasLimit || limitValue <= 0 {
-		return 0, false
-	}
-	if used, ok := numberFromAny(source.Used); ok {
-		return used / limitValue * 100, true
-	}
-	if remaining, ok := numberFromAny(source.Remaining); ok {
-		return (limitValue - remaining) / limitValue * 100, true
-	}
-	return 0, false
-}
-
-func mergeKimiLimit(base, overlay kimiLimit) kimiLimit {
-	if overlay.UsedPercent != nil {
-		base.UsedPercent = overlay.UsedPercent
-	}
-	if overlay.UsedPercentage != nil {
-		base.UsedPercentage = overlay.UsedPercentage
-	}
-	if overlay.Limit != nil {
-		base.Limit = overlay.Limit
-	}
-	if overlay.Used != nil {
-		base.Used = overlay.Used
-	}
-	if overlay.Remaining != nil {
-		base.Remaining = overlay.Remaining
-	}
-	return base
-}
-
-func zaiWindow(payload *zaiQuotaPayload, label string) *int {
-	limits := payload.Data.Limits
-	if len(limits) == 0 {
-		limits = payload.Limits
-	}
-	if len(limits) == 0 {
-		return nil
-	}
-	index := 0
-	if label == "7D:" && len(limits) > 1 {
-		index = 1
-	}
-	for i, limit := range limits {
-		if strings.EqualFold(limit.Type, "TOKENS_LIMIT") {
-			index = i
-			break
-		}
-	}
-	if label == "7D:" {
-		for i := range limits {
-			if i != index && remainingFromUsedPercent(zaiUsedPercent(limits[i])) != nil {
-				index = i
-				break
-			}
-		}
-	}
-	return remainingFromUsedPercent(zaiUsedPercent(limits[index]))
-}
-
-func zaiUsedPercent(limit zaiLimit) (float64, bool) {
-	return firstNumberFromAny(limit.Percentage, limit.UsedPercent, limit.UsedPercentage)
-}
-
-func remainingFromUsedPercent(used float64, ok bool) *int {
-	if !ok {
-		return nil
-	}
-	remaining := int(100 - used + 0.5)
-	return normalizePercent(remaining)
-}
-
-func quotaWindowMinutes(window *quotaWindow) int {
-	if window == nil {
-		return 0
-	}
-	direct, ok := firstNumberFromAny(window.Duration, window.Minutes)
-	if !ok {
-		return 0
-	}
-	unit := strings.ToLower(window.Unit)
-	switch {
-	case strings.HasPrefix(unit, "hour"):
-		return int(direct * 60)
-	case strings.HasPrefix(unit, "day"):
-		return int(direct * 1440)
-	case strings.HasPrefix(unit, "second"):
-		return int((direct + 59) / 60)
-	default:
-		return int(direct)
-	}
-}
-
-func firstNumberFromAny(values ...any) (float64, bool) {
-	for _, value := range values {
-		if number, ok := numberFromAny(value); ok {
-			return number, true
-		}
-	}
-	return 0, false
-}
-
-func numberFromAny(value any) (float64, bool) {
-	switch v := value.(type) {
-	case float64:
-		return v, true
-	case int:
-		return float64(v), true
-	case json.Number:
-		parsed, err := v.Float64()
-		return parsed, err == nil
-	case string:
-		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		return parsed, err == nil
-	default:
-		return 0, false
-	}
-}
-
-func normalizePercent(value int) *int {
-	if value < 0 {
-		value = 0
-	}
-	if value > 100 {
-		value = 100
-	}
-	return &value
 }
 
 func stringInput(input request, key string) string {
@@ -1133,7 +871,11 @@ func abortPiPrompt(input request) (any, error) {
 	_ = os.Remove(state.PromptPath)
 	_ = os.Remove(state.SteeringPath)
 	_ = os.Remove(state.SteeringAckPath)
-	if err := writeGoStreamState(goStreamStatePath(state.RunID), state); err != nil {
+	statePath, err := streamStatePath(state.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeGoStreamState(statePath, state); err != nil {
 		return nil, err
 	}
 	return map[string]any{"aborted": true, "runId": state.RunID}, nil
@@ -1491,10 +1233,11 @@ func readGoStreamEvents(path string, cursor int) ([]streamEvent, int, error) {
 }
 
 func readGoStreamState(runID string) (streamRunState, error) {
-	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") || strings.Contains(runID, "..") || runID == "" {
-		return streamRunState{}, errors.New("invalid runId")
+	statePath, err := streamStatePath(runID)
+	if err != nil {
+		return streamRunState{}, err
 	}
-	return readGoStreamStateByPath(goStreamStatePath(runID))
+	return readGoStreamStateByPath(statePath)
 }
 
 func readGoStreamStateByPath(path string) (streamRunState, error) {
@@ -1529,8 +1272,35 @@ func goStreamRunDir() string {
 	return filepath.Join(os.TempDir(), "pi-web-chat-runs-go")
 }
 
+func jsStreamRunDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+	return filepath.Join(home, ".pi", "web-chat", "runs")
+}
+
 func goStreamStatePath(runID string) string {
 	return filepath.Join(goStreamRunDir(), runID+".json")
+}
+
+func jsStreamStatePath(runID string) string {
+	return filepath.Join(jsStreamRunDir(), runID+".json")
+}
+
+func streamStatePath(runID string) (string, error) {
+	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") || strings.Contains(runID, "..") || runID == "" {
+		return "", errors.New("invalid runId")
+	}
+	goPath := goStreamStatePath(runID)
+	if _, err := os.Stat(goPath); err == nil {
+		return goPath, nil
+	}
+	jsPath := jsStreamStatePath(runID)
+	if _, err := os.Stat(jsPath); err == nil {
+		return jsPath, nil
+	}
+	return goPath, nil
 }
 
 func stringFromAny(value any) string {
@@ -1880,7 +1650,67 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 		last := messages[len(messages)-1]
 		isStreaming = isAssistantMessageStreaming(last)
 	}
-	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": isStreaming}, nil
+	activeRunID := activeRunIDForSession(sessionID, sessionFile)
+	if activeRunID != "" {
+		isStreaming = true
+	}
+	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "runId": activeRunID, "isStreaming": isStreaming}, nil
+}
+
+func activeRunIDForSession(sessionID string, sessionFile string) string {
+	latestRunID := ""
+	latestUpdatedAt := int64(0)
+	for _, statePath := range recentRunStatePaths([]string{goStreamRunDir(), jsStreamRunDir()}) {
+		state, err := readGoStreamStateByPath(statePath)
+		if err != nil || (state.Status != "running" && state.Status != "starting") {
+			continue
+		}
+		if sessionFile != "" {
+			if state.SessionFile != sessionFile {
+				continue
+			}
+		} else if state.ActiveSessionID != sessionID {
+			continue
+		}
+		if state.UpdatedAt >= latestUpdatedAt {
+			latestUpdatedAt = state.UpdatedAt
+			latestRunID = state.RunID
+		}
+	}
+	return latestRunID
+}
+
+func recentRunStatePaths(dirs []string) []string {
+	paths := []string{}
+	cutoff := time.Now().Add(-activeRunStateTtl)
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	sort.Slice(paths, func(left int, right int) bool {
+		leftInfo, leftErr := os.Stat(paths[left])
+		rightInfo, rightErr := os.Stat(paths[right])
+		if leftErr != nil || rightErr != nil {
+			return leftErr == nil
+		}
+		return leftInfo.ModTime().After(rightInfo.ModTime())
+	})
+	if len(paths) > maxActiveRunStateScan {
+		return paths[:maxActiveRunStateScan]
+	}
+	return paths
 }
 
 func promptWorkspaceRoot(workspaceRoot string, input request) (string, error) {

@@ -13,6 +13,7 @@ import {
   renderPromptMeta,
   renderSlashCommands,
   setAttachButtonMode,
+  setSendButtonMode,
   toolArgsBodyText,
   toolArgsInlineText,
   setComposerMode,
@@ -60,6 +61,7 @@ const MOUNTED_CHAT_POLL_MS = 250;
 const STREAM_RENDER_MIN_MS = 250;
 const SPINNER_FRAME_COUNT = 6;
 const SPINNER_INTERVAL_MS = 150;
+const STEERING_CANCEL_WINDOW_MS = 100;
 const mountedExpandedToolCards: Set<string> = new Set<string>();
 const mountedMessageSignatures: WeakMap<HTMLElement, string> = new WeakMap<HTMLElement, string>();
 
@@ -90,14 +92,26 @@ type State = {
   sessionEventsAbort?: AbortController;
 };
 
+type MountedSteeringRequest = {
+  sessionId: string;
+  messageId: string;
+  timeout: ReturnType<typeof setTimeout>;
+  controller: AbortController;
+  sent: boolean;
+};
+
 type MountedState = {
   backendChatToken: number;
   pendingPromptEchoIds: Map<string, string[]>;
   activeRunId?: string;
   activeRunSessionId?: string;
+  activeRunWorkspacePath?: string;
+  activeRunWorkspaceId?: string;
   startingRunSessionId?: string;
   fallbackSubmittingSessionId?: string;
   resolvingSubmit?: boolean;
+  pendingSteering?: MountedSteeringRequest;
+  onRunStateChange?: () => void;
   runEventsAbort?: AbortController;
   sessionEventsAbort?: AbortController;
 };
@@ -234,6 +248,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const cleanupComposer = context.mount?.composer(composerSurface, { replace: true });
   installMountedScrollLock(disposables, chatSurface);
   startMountedSpinners(disposables, chatSurface);
+  startMountedSpinners(disposables, composerSurface);
   if (cleanupChat) {
     disposables.add(cleanupChat);
   }
@@ -253,6 +268,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected.sessionId);
   }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
+  bindMountedSteeringCancel(disposables, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
   bindMountedPromptMeta(context, composerSurface);
   app?.classList.add(pluginClass());
@@ -281,7 +297,9 @@ function bindMountedPromptMeta(context: PluginContext, composerSurface: HTMLElem
 
 async function refreshMountedPromptMetaFromBackend(context: PluginContext, composerSurface: HTMLElement): Promise<void> {
   try {
-    const response = await context.backend?.("runtimeStatus", { data: {} });
+    const workspace: { id: string; path: string } = activeWorkspaceSelection(context);
+    const data: JsonRecord = workspace.path ? { workspacePath: workspace.path } : {};
+    const response = await backendCall(context, "runtimeStatus", data, workspace.id);
     const responseRecord = isRecord(response) ? response : {};
     const status = isRecord(responseRecord.status) ? runtimeStatusFromRecord(responseRecord.status) : undefined;
 
@@ -344,6 +362,7 @@ function bindMountedComposer(
   const textarea = composerSurface.querySelector<HTMLTextAreaElement>(".prompt-textarea");
   const sendButton = composerSurface.querySelector<HTMLButtonElement>(".send-btn");
   const attachButton = composerSurface.querySelector<HTMLButtonElement>(".attach-btn");
+  const stopButton = composerSurface.querySelector<HTMLButtonElement>(".stop-btn");
   const fileInput = composerSurface.querySelector<HTMLInputElement>("[data-file-input]");
   const attachmentChips = composerSurface.querySelector<HTMLElement>(".attach-chips");
   const shellAttachmentNote = composerSurface.querySelector<HTMLElement>(".shell-attachment-note");
@@ -364,10 +383,26 @@ function bindMountedComposer(
     syncMountedShellUi(promptBar, textarea, attachButton, shellAttachmentNote, triggers);
   };
   const sync = (): void => {
-    const value = textarea.value;
-    const isStarting = Boolean(mountedState.startingRunSessionId || mountedState.fallbackSubmittingSessionId);
-    sendButton.disabled = isStarting;
-    sendButton.setAttribute("aria-disabled", value.trim() && !isStarting ? "false" : "true");
+    const value: string = textarea.value;
+    const isBusy: boolean = isMountedRunBusy(mountedState);
+    const isSteering: boolean = Boolean(mountedState.pendingSteering);
+    const canSteer: boolean = Boolean(mountedState.activeRunId && mountedState.activeRunSessionId === store.activeSessionId);
+    const sendMode: "idle" | "loading" | "steering" = isSteering ? "steering" : isBusy ? "loading" : "idle";
+    const canSend: boolean = Boolean(value.trim()) && !isSteering && !mountedState.resolvingSubmit && (!isBusy || canSteer);
+    setSendButtonMode(sendButton, sendMode, canSend);
+
+    if (promptBar) {
+      promptBar.dataset.runState = sendMode;
+    }
+
+    if (stopButton) {
+      const canCancelSteering: boolean = Boolean(mountedState.pendingSteering && !mountedState.pendingSteering.sent);
+      stopButton.hidden = !isBusy && !canCancelSteering;
+      stopButton.disabled = false;
+      stopButton.title = canCancelSteering ? "cancel steering" : "stop response";
+      stopButton.setAttribute("aria-label", canCancelSteering ? "cancel steering" : "stop response");
+    }
+
     syncAttachments();
     clearMountedFileSearchTimer(triggers);
 
@@ -401,7 +436,11 @@ function bindMountedComposer(
     const text = textarea.value.trim();
     sync();
 
-    if (mountedState.resolvingSubmit || mountedState.startingRunSessionId || mountedState.fallbackSubmittingSessionId) {
+    if (mountedState.resolvingSubmit || mountedState.pendingSteering) {
+      return;
+    }
+
+    if (mountedState.startingRunSessionId || mountedState.fallbackSubmittingSessionId) {
       return;
     }
 
@@ -430,8 +469,9 @@ function bindMountedComposer(
         triggers.selectedAttachments = [];
         syncAttachments();
         publishChatInputSubmitted(text, attachments);
-        const submitPromise = submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments);
+        const submitPromise = submitMountedPromptWithStreaming(context, chatSurface, store, mountedState, text, attachments, sync);
         mountedState.resolvingSubmit = false;
+        sync();
         await submitPromise;
       }
 
@@ -485,6 +525,15 @@ function bindMountedComposer(
     void submit(event);
   });
 
+  if (stopButton) {
+    disposables.listen(stopButton, "click", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void stopMountedRun(context, chatSurface, store, mountedState).finally(sync);
+      sync();
+    });
+  }
+
   if (attachButton && fileInput) {
     disposables.listen(attachButton, "click", () => {
       if (!triggers.shellMode) {
@@ -499,10 +548,118 @@ function bindMountedComposer(
     });
   }
 
+  mountedState.onRunStateChange = sync;
   disposables.add({
-    remove: (): void => clearMountedFileSearchTimer(triggers),
+    remove: (): void => {
+      clearMountedFileSearchTimer(triggers);
+
+      if (mountedState.onRunStateChange === sync) {
+        mountedState.onRunStateChange = undefined;
+      }
+    },
   });
   syncMode();
+  sync();
+}
+
+function isMountedRunBusy(mountedState: MountedState): boolean {
+  return Boolean(
+    mountedState.activeRunId ||
+    mountedState.startingRunSessionId ||
+    mountedState.fallbackSubmittingSessionId ||
+    mountedState.pendingSteering,
+  );
+}
+
+function bindMountedSteeringCancel(
+  disposables: Disposables,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+): void {
+  disposables.listen(chatSurface, "click", (event: Event): void => {
+    const target = event.target as { closest?: (selector: string) => HTMLButtonElement | null } | null;
+    const button = target?.closest?.("[data-action='cancel-steering']");
+
+    if (!button) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const sessionId = button.dataset.sessionId || "";
+    const messageId = button.dataset.messageId || "";
+    const cancelled = cancelMountedSteering(store, mountedState);
+
+    if (!cancelled && sessionId && messageId) {
+      discardMountedPendingMessage(store, sessionId, messageId);
+    }
+
+    if (sessionId && store.activeSessionId === sessionId) {
+      renderMountedBackendMessages(chatSurface, sessionById(store, sessionId).messages, sessionId);
+    }
+  });
+}
+
+async function stopMountedRun(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+): Promise<void> {
+  if (mountedState.pendingSteering && !mountedState.pendingSteering.sent) {
+    const steeringSessionId = mountedState.pendingSteering.sessionId;
+    cancelMountedSteering(store, mountedState);
+
+    if (store.activeSessionId === steeringSessionId) {
+      renderMountedBackendMessages(chatSurface, sessionById(store, steeringSessionId).messages, steeringSessionId);
+    }
+
+    return;
+  }
+
+  const runId = mountedState.activeRunId;
+  const sessionId = mountedState.activeRunSessionId || mountedState.startingRunSessionId || mountedState.fallbackSubmittingSessionId || store.activeSessionId;
+  const workspaceId = mountedState.activeRunWorkspaceId || activeWorkspaceSelection(context).id;
+
+  if (!runId) {
+    mountedState.runEventsAbort?.abort();
+    mountedState.startingRunSessionId = undefined;
+    mountedState.fallbackSubmittingSessionId = undefined;
+    return;
+  }
+
+  mountedState.runEventsAbort?.abort();
+
+  try {
+    await abortPromptToPluginBackend(context, runId, sessionId, workspaceId);
+  } catch (error) {
+    globalThis.piWeb?.subject<ToastRequest>("toast.requested").next({
+      level: "error",
+      message: `stop failed: ${errorText(error)}`,
+    });
+  } finally {
+    if (mountedState.activeRunId === runId) {
+      mountedState.activeRunId = undefined;
+      mountedState.activeRunSessionId = undefined;
+      mountedState.activeRunWorkspacePath = undefined;
+      mountedState.activeRunWorkspaceId = undefined;
+    }
+  }
+}
+
+function cancelMountedSteering(store: ChatStore, mountedState: MountedState): boolean {
+  const pending = mountedState.pendingSteering;
+
+  if (!pending || pending.sent) {
+    return false;
+  }
+
+  clearTimeout(pending.timeout);
+  pending.controller.abort();
+  mountedState.pendingSteering = undefined;
+  discardMountedPendingMessage(store, pending.sessionId, pending.messageId);
+  return true;
 }
 
 function syncMountedAttachmentChips(
@@ -1130,12 +1287,15 @@ async function submitMountedPromptWithStreaming(
   mountedState: MountedState,
   text: string,
   attachments: FileAttachment[],
+  onStateChange: () => void = (): void => {},
 ): Promise<void> {
   let targetSessionId: string = syncMountedStoreToViewedSession(context, store);
   const targetWorkspace = activeWorkspaceSelection(context);
 
   if (mountedState.activeRunId && mountedState.activeRunSessionId === targetSessionId) {
-    await steerMountedPrompt(context, chatSurface, store, mountedState, text, attachments, targetWorkspace.path, targetWorkspace.id);
+    const runWorkspacePath: string = mountedState.activeRunWorkspacePath || targetWorkspace.path;
+    const runWorkspaceId: string = mountedState.activeRunWorkspaceId || targetWorkspace.id;
+    await steerMountedPrompt(context, chatSurface, store, mountedState, text, attachments, runWorkspacePath, runWorkspaceId, onStateChange);
     return;
   }
 
@@ -1145,6 +1305,7 @@ async function submitMountedPromptWithStreaming(
 
   mountedState.backendChatToken += 1;
   mountedState.startingRunSessionId = targetSessionId;
+  onStateChange();
   mountedState.runEventsAbort?.abort();
   const runController = new AbortController();
   mountedState.runEventsAbort = runController;
@@ -1168,12 +1329,19 @@ async function submitMountedPromptWithStreaming(
     start = await startStreamingPrompt(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
   } catch (error) {
     mountedState.startingRunSessionId = undefined;
+    onStateChange();
     throw error;
   }
 
   if (runController.signal.aborted) {
     mountedState.startingRunSessionId = undefined;
+
+    if (typeof start.runId === "string" && start.runId) {
+      await abortPromptToPluginBackend(context, start.runId, targetSessionId, targetWorkspace.id);
+    }
+
     discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+    onStateChange();
     return;
   }
 
@@ -1203,17 +1371,20 @@ async function submitMountedPromptWithStreaming(
   if (typeof start.runId !== "string" || !start.runId) {
     mountedState.startingRunSessionId = undefined;
     mountedState.fallbackSubmittingSessionId = targetSessionId;
+    onStateChange();
     let response: BackendResponse;
     try {
       response = await submitPromptToPluginBackend(context, text, attachments, targetSessionId, targetWorkspace.path, targetWorkspace.id);
     } catch (error) {
       mountedState.fallbackSubmittingSessionId = undefined;
+      onStateChange();
       throw error;
     }
 
     if (runController.signal.aborted) {
       mountedState.fallbackSubmittingSessionId = undefined;
       discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+      onStateChange();
       return;
     }
 
@@ -1235,13 +1406,17 @@ async function submitMountedPromptWithStreaming(
 
     mountedState.startingRunSessionId = undefined;
     mountedState.fallbackSubmittingSessionId = undefined;
+    onStateChange();
     return;
   }
 
   const session = sessionById(store, targetSessionId);
   mountedState.activeRunId = start.runId;
   mountedState.activeRunSessionId = targetSessionId;
+  mountedState.activeRunWorkspacePath = targetWorkspace.path;
+  mountedState.activeRunWorkspaceId = targetWorkspace.id;
   mountedState.startingRunSessionId = undefined;
+  onStateChange();
   const title = updateSessionTitleFromFirstUser(session);
 
   if (title) {
@@ -1270,8 +1445,11 @@ async function submitMountedPromptWithStreaming(
     if (mountedState.activeRunId === start.runId) {
       mountedState.activeRunId = undefined;
       mountedState.activeRunSessionId = undefined;
+      mountedState.activeRunWorkspacePath = undefined;
+      mountedState.activeRunWorkspaceId = undefined;
       mountedState.startingRunSessionId = undefined;
       mountedState.fallbackSubmittingSessionId = undefined;
+      onStateChange();
     }
 
     if (mountedState.runEventsAbort === runController) {
@@ -1293,6 +1471,7 @@ async function steerMountedPrompt(
   attachments: FileAttachment[],
   workspacePath: string,
   workspaceId: string,
+  onStateChange: () => void = (): void => {},
 ): Promise<void> {
   const runId = mountedState.activeRunId;
   const targetSessionId = mountedState.activeRunSessionId;
@@ -1301,14 +1480,41 @@ async function steerMountedPrompt(
     throw new Error("active run is unavailable for steering");
   }
 
+  if (mountedState.pendingSteering) {
+    return;
+  }
+
   const pendingUserMessage: ChatMessage = {
     id: id(),
     role: "user",
     text,
     attachments: sanitizeAttachmentsForStorage(attachments),
     createdAt: Date.now(),
+    meta: { piWebChatSteeringState: "pending" },
   };
   const session = sessionById(store, targetSessionId);
+  const controller = new AbortController();
+  const delay = createMountedSteeringDelay(controller.signal, (): void => {
+    const pending = mountedState.pendingSteering;
+
+    if (pending) {
+      pending.sent = true;
+      markMountedSteeringMessageSent(store, pending.sessionId, pending.messageId);
+
+      if (store.activeSessionId === pending.sessionId) {
+        renderMountedBackendMessages(chatSurface, sessionById(store, pending.sessionId).messages, pending.sessionId);
+      }
+
+      onStateChange();
+    }
+  });
+  mountedState.pendingSteering = {
+    sessionId: targetSessionId,
+    messageId: pendingUserMessage.id,
+    timeout: delay.timeout,
+    controller,
+    sent: false,
+  };
   pushPendingPromptEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
   session.messages.push(pendingUserMessage);
   session.updatedAt = Date.now();
@@ -1318,11 +1524,24 @@ async function steerMountedPrompt(
     renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
   }
 
+  onStateChange();
+
   try {
+    await delay.promise;
+
+    if (controller.signal.aborted) {
+      return;
+    }
+
     const response = await steerPromptToPluginBackend(context, runId, text, attachments, targetSessionId, workspacePath, workspaceId);
     emitBackendWarnings(response);
   } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+
     discardMountedPendingMessage(store, targetSessionId, pendingUserMessage.id);
+    removePendingPromptEchoId(mountedState.pendingPromptEchoIds, targetSessionId, pendingUserMessage.id);
 
     if (isUnsupportedStreamingBackend(error)) {
       renderMountedBackendMessages(chatSurface, session.messages, targetSessionId);
@@ -1334,7 +1553,30 @@ async function steerMountedPrompt(
     }
 
     throw error;
+  } finally {
+    if (mountedState.pendingSteering?.controller === controller) {
+      mountedState.pendingSteering = undefined;
+      onStateChange();
+    }
   }
+}
+
+function createMountedSteeringDelay(
+  signal: AbortSignal,
+  onDispatch: () => void,
+): { timeout: ReturnType<typeof setTimeout>; promise: Promise<void> } {
+  let timeout: ReturnType<typeof setTimeout>;
+  const promise = new Promise<void>((resolve, reject): void => {
+    timeout = setTimeout((): void => {
+      onDispatch();
+      resolve();
+    }, STEERING_CANCEL_WINDOW_MS);
+    signal.addEventListener("abort", (): void => {
+      clearTimeout(timeout);
+      reject(new DOMException("Steering cancelled", "AbortError"));
+    }, { once: true });
+  });
+  return { timeout: timeout!, promise };
 }
 
 function discardMountedPendingMessage(store: ChatStore, sessionId: string, messageId: string): void {
@@ -1346,6 +1588,20 @@ function discardMountedPendingMessage(store: ChatStore, sessionId: string, messa
 
   session.messages = session.messages.filter((message) => message.id !== messageId);
   removeEmptyInactiveSession(store, session.id);
+  saveStore(store);
+}
+
+function markMountedSteeringMessageSent(store: ChatStore, sessionId: string, messageId: string): void {
+  const message = sessionById(store, sessionId).messages.find((item: ChatMessage): boolean => item.id === messageId);
+
+  if (!message?.meta) {
+    return;
+  }
+
+  delete message.meta.piWebChatSteeringState;
+  if (Object.keys(message.meta).length === 0) {
+    delete message.meta;
+  }
   saveStore(store);
 }
 
@@ -1586,6 +1842,15 @@ async function steerPromptToPluginBackend(
   return backendCall(context, "steerPrompt", data, workspaceId);
 }
 
+async function abortPromptToPluginBackend(
+  context: PluginContext,
+  runId: string,
+  sessionId = "",
+  workspaceId = activeWorkspaceSelection(context).id,
+): Promise<BackendResponse> {
+  return backendCall(context, "abortPrompt", { runId, sessionId }, workspaceId);
+}
+
 function promptRequestData(text: string, attachments: FileAttachment[], sessionId: string, workspacePath: string): JsonRecord {
   const data: JsonRecord = { text, attachments, sessionId };
 
@@ -1764,6 +2029,7 @@ async function openMountedSessionEvents(
       const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
       const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
       const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoIds);
+      syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
       clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoIds);
       if (messages.length) {
         render.request();
@@ -1802,6 +2068,7 @@ async function refreshMountedBackendChatState(
     const sessionIdForEcho = typeof response.activeSessionId === "string" ? response.activeSessionId : sessionId;
     const echoIds = pendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho);
     const messages = applyBackendResponseToMountedStore(context, store, response, "chatState", echoIds);
+    syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
     clearMatchedPendingPromptEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, response.messages, echoIds);
     if (messages.length) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
@@ -1829,8 +2096,34 @@ function chatStateEventResponse(event: ChatEvent): BackendResponse {
   return {
     activeSessionId: event.activeSessionId,
     messages: event.messages,
+    runId: event.runId,
     isStreaming: event.isStreaming,
   };
+}
+
+function syncMountedRunStateFromBackendResponse(
+  mountedState: MountedState,
+  response: BackendResponse,
+  sessionId: string,
+  workspacePath: string,
+  workspaceId: string,
+): void {
+  if (response.isStreaming === true && typeof response.runId === "string" && response.runId) {
+    mountedState.activeRunId = response.runId;
+    mountedState.activeRunSessionId = typeof response.activeSessionId === "string" && response.activeSessionId ? response.activeSessionId : sessionId;
+    mountedState.activeRunWorkspacePath = workspacePath;
+    mountedState.activeRunWorkspaceId = workspaceId;
+    mountedState.onRunStateChange?.();
+    return;
+  }
+
+  if (response.isStreaming === false && (!response.activeSessionId || response.activeSessionId === mountedState.activeRunSessionId)) {
+    mountedState.activeRunId = undefined;
+    mountedState.activeRunSessionId = undefined;
+    mountedState.activeRunWorkspacePath = undefined;
+    mountedState.activeRunWorkspaceId = undefined;
+    mountedState.onRunStateChange?.();
+  }
 }
 
 function activeWorkspacePath(context: PluginContext): string {
@@ -2454,7 +2747,9 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   item.className = "transcript-item";
   item.dataset.messageId = message.id;
 
-  if (hasRenderableMessageBlocks(message)) {
+  if (isPendingMountedSteeringMessage(message)) {
+    appendMountedPendingSteeringRow(item, message, sessionId);
+  } else if (hasRenderableMessageBlocks(message)) {
     const skipTextBlocks = shouldRenderTextFallbackBeforeBlocks(message);
 
     if (skipTextBlocks) {
@@ -2471,6 +2766,37 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   }
 
   return item;
+}
+
+function isPendingMountedSteeringMessage(message: ChatMessage): boolean {
+  return message.role === "user" && message.meta?.piWebChatSteeringState === "pending";
+}
+
+function appendMountedPendingSteeringRow(item: HTMLElement, message: ChatMessage, sessionId: string): void {
+  const row = document.createElement("div");
+  row.className = "msg pending-steering";
+  row.dataset.kind = "user";
+
+  const prefix = document.createElement("span");
+  prefix.className = "prefix user";
+  prefix.textContent = mountedMessagePrefix("user");
+
+  const body = document.createElement("small");
+  body.className = "body user pending-steering-text";
+  body.textContent = message.text;
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "pending-steering-cancel";
+  cancel.dataset.action = "cancel-steering";
+  cancel.dataset.sessionId = sessionId;
+  cancel.dataset.messageId = message.id;
+  cancel.setAttribute("aria-label", "cancel steering");
+  cancel.title = "cancel steering";
+  cancel.textContent = "×";
+
+  row.append(prefix, body, cancel);
+  item.append(row);
 }
 
 function hasRenderableMessageBlocks(message: ChatMessage): boolean {
@@ -3185,6 +3511,17 @@ function pushPendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, se
 
 function pendingPromptEchoIds(pendingPromptEchoIds: Map<string, string[]>, sessionId: string): string[] {
   return pendingPromptEchoIds.get(sessionId) || [];
+}
+
+function removePendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, sessionId: string, echoId: string): void {
+  const remaining: string[] = (pendingPromptEchoIds.get(sessionId) || []).filter((item: string): boolean => item !== echoId);
+
+  if (remaining.length) {
+    pendingPromptEchoIds.set(sessionId, remaining);
+    return;
+  }
+
+  pendingPromptEchoIds.delete(sessionId);
 }
 
 function movePendingPromptEchoId(pendingPromptEchoIds: Map<string, string[]>, fromSessionId: string, toSessionId: string): void {
