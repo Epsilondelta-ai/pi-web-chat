@@ -572,6 +572,34 @@ test("mounted activation loads sidebar-selected session and sends chatState for 
   });
 });
 
+test("mounted session SSE keeps transcript on repeated unchanged chatState", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "repeat-state-session" }) };
+    const state = JSON.stringify({
+      type: "chat.state",
+      activeSessionId: "repeat-state-session",
+      messages: [{ id: "a1", role: "assistant", text: "stable answer", createdAt: 1 }],
+    });
+    const cleanup = activate({
+      app,
+      backend: async () => ({}),
+      backendStream: async (method) => method === "sessionEventsSse"
+        ? sseFrameStream(encoder, [state, state])
+        : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), ["pi >stable answer"]);
+    assert.doesNotMatch(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    cleanup();
+  });
+});
+
 test("mounted chatState drops stale local-only cached messages", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
@@ -1800,6 +1828,485 @@ test("mounted submit keeps all current assistant-only backend messages after pen
 
     assert.equal(startCount, 2);
     assert.equal(steerCount, 0);
+    cleanup();
+  });
+});
+
+test("mounted submit pairs assistant-only backend messages with consecutive pending prompts", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "consecutive-session", runId: "consecutive-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const now = Date.now();
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "consecutive-session",
+            runId: "consecutive-run",
+            messages: [
+              { id: "a1", role: "assistant", text: "answer one", createdAt: now + 1 },
+              { id: "a2", role: "assistant", text: "answer two", createdAt: now + 2 },
+              { id: "a3", role: "assistant", text: "answer three", createdAt: now + 3 },
+            ],
+          });
+          return sseFrameStream(encoder, [state]);
+        }
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    const textarea = window.document.querySelector(".prompt-textarea");
+    for (const text of ["prompt one", "prompt two", "prompt three"]) {
+      textarea.value = text;
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      window.document.querySelector(".send-btn").click();
+      await tick(STEERING_CANCEL_WAIT_MS);
+      await tick();
+    }
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >prompt one", "pi >answer one", "you >prompt two", "pi >answer two", "you >prompt three", "pi >answer three",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit pairs mixed backend user and assistant-only steering replies with pending prompts", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "mixed-session", runId: "mixed-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "mixed-session",
+            runId: "mixed-run",
+            messages: [
+              { id: "u1", role: "user", text: "prompt one", createdAt: 1 },
+              { id: "a1", role: "assistant", text: "answer one", createdAt: 2 },
+              { id: "a2", role: "assistant", text: "answer two", createdAt: 3 },
+              { id: "a3", role: "assistant", text: "answer three", createdAt: 4 },
+            ],
+          });
+          return sseFrameStream(encoder, [state]);
+        }
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    const textarea = window.document.querySelector(".prompt-textarea");
+    for (const text of ["prompt one", "prompt two", "prompt three"]) {
+      textarea.value = text;
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      window.document.querySelector(".send-btn").click();
+      await tick(STEERING_CANCEL_WAIT_MS);
+      await tick();
+    }
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >prompt one", "pi >answer one", "you >prompt two", "pi >answer two", "you >prompt three", "pi >answer three",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps incremental assistant-only growth after its prompt", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "incremental-session", runId: "incremental-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const now = Date.now();
+          const first = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "incremental-session",
+            runId: "incremental-run",
+            messages: [{ id: "a1", role: "assistant", text: "answer 1", createdAt: now + 1 }],
+          });
+          const second = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "incremental-session",
+            runId: "incremental-run",
+            messages: [
+              { id: "a1", role: "assistant", text: "answer 1", createdAt: now + 1 },
+              { id: "a2", role: "assistant", text: "answer 2", createdAt: now + 2 },
+            ],
+          });
+          return sseFrameStream(encoder, [first, second]);
+        }
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "prompt one";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), ["you >prompt one", "pi >answer 1", "pi >answer 2"]);
+    cleanup();
+  });
+});
+
+test("mounted submit clears consumed assistant-only prompt anchors before the next run", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    const runControllers = [];
+    let runCount = 0;
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          runCount += 1;
+          return { activeSessionId: "consumed-anchor-session", runId: `consumed-run-${runCount}`, isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return captureStream((controller) => { runControllers.push(controller); });
+        }
+
+        if (method === "sessionEventsSse") {
+          const now = Date.now();
+          const messages = Array.from({ length: runCount }, (_, index) => ({
+            id: `assistant-${index + 1}`,
+            role: "assistant",
+            text: `answer ${index + 1}`,
+            createdAt: now + index + 1,
+          }));
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "consumed-anchor-session",
+            runId: `consumed-run-${runCount}`,
+            messages,
+          });
+          return sseFrameStream(encoder, [state]);
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    const textarea = window.document.querySelector(".prompt-textarea");
+
+    for (const text of ["first anchor", "second anchor"]) {
+      textarea.value = text;
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      window.document.querySelector(".send-btn").click();
+      await tick();
+      const controller = runControllers[runControllers.length - 1];
+      controller.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+      controller.close();
+      await tick(300);
+      await tick();
+      await tick();
+    }
+
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >first anchor", "pi >answer 1", "you >second anchor", "pi >answer 2",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit deduplicates late backend user echo after assistant-only anchor", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "startPrompt"
+        ? { activeSessionId: "late-user-echo-session", runId: "late-user-echo-run", isStreaming: true }
+        : {},
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const now = Date.now();
+          const assistantOnly = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "late-user-echo-session",
+            runId: "late-user-echo-run",
+            messages: [{ id: "assistant-1", role: "assistant", text: "answer", createdAt: now + 1 }],
+          });
+          const withUserEcho = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "late-user-echo-session",
+            runId: "late-user-echo-run",
+            messages: [
+              { id: "backend-user-1", role: "user", text: "late echo prompt", createdAt: now + 2 },
+              { id: "assistant-1", role: "assistant", text: "answer", createdAt: now + 3 },
+            ],
+          });
+          return sseFrameStream(encoder, [assistantOnly, withUserEcho]);
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "late echo prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), ["you >late echo prompt", "pi >answer"]);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps repeated consumed anchors when one late echo arrives", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "startPrompt") {
+          return { activeSessionId: "repeat-late-echo-session", runId: "repeat-late-run", isStreaming: true };
+        }
+
+        if (method === "steerPrompt") {
+          return { accepted: true, activeSessionId: input.data.sessionId, runId: input.data.runId };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const now = Date.now();
+          const assistantOnly = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "repeat-late-echo-session",
+            runId: "repeat-late-run",
+            messages: [
+              { id: "assistant-1", role: "assistant", text: "answer one", createdAt: now + 1 },
+              { id: "assistant-2", role: "assistant", text: "answer two", createdAt: now + 2 },
+            ],
+          });
+          const withOneUserEcho = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "repeat-late-echo-session",
+            runId: "repeat-late-run",
+            messages: [
+              { id: "backend-user-1", role: "user", text: "repeat prompt", createdAt: now + 3 },
+              { id: "assistant-1", role: "assistant", text: "answer one", createdAt: now + 4 },
+              { id: "assistant-2", role: "assistant", text: "answer two", createdAt: now + 5 },
+            ],
+          });
+          return sseFrameStream(encoder, [assistantOnly, withOneUserEcho]);
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    const textarea = window.document.querySelector(".prompt-textarea");
+
+    for (const _text of ["repeat prompt", "repeat prompt"]) {
+      textarea.value = "repeat prompt";
+      textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+      window.document.querySelector(".send-btn").click();
+      await tick(STEERING_CANCEL_WAIT_MS);
+      await tick();
+    }
+
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >repeat prompt", "pi >answer one", "you >repeat prompt", "pi >answer two",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit anchors new assistant tail after known backend history", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    let started = false;
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-tail-session" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          started = true;
+          return { activeSessionId: "history-tail-session", runId: "history-tail-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const messages = [
+            { id: "old-user", role: "user", text: "old prompt", createdAt: 1 },
+            { id: "old-assistant", role: "assistant", text: "old answer", createdAt: 2 },
+          ];
+
+          if (started) {
+            messages.push({
+              id: "fresh-assistant",
+              role: "assistant",
+              text: "fresh answer",
+              createdAt: Date.now() + 1,
+            });
+          }
+
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "history-tail-session",
+            runId: started ? "history-tail-run" : undefined,
+            messages,
+          });
+          return sseFrameStream(encoder, [state]);
+        }
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "fresh prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >old prompt", "pi >old answer", "you >fresh prompt", "pi >fresh answer",
+    ]);
+    cleanup();
+  });
+});
+
+test("mounted submit does not anchor stale unseen backend history after known history", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    let started = false;
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "stale-tail-session" }) };
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          started = true;
+          return { activeSessionId: "stale-tail-session", runId: "stale-tail-run", isStreaming: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") return captureStream((controller) => { runController = controller; });
+        if (method === "sessionEventsSse") {
+          const messages = [
+            { id: "old-user", role: "user", text: "old prompt", createdAt: 1 },
+            { id: "old-assistant", role: "assistant", text: "old answer", createdAt: 2 },
+          ];
+
+          if (started) {
+            messages.push({ id: "stale-assistant", role: "assistant", text: "stale tail", createdAt: 3 });
+          }
+
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "stale-tail-session",
+            runId: started ? "stale-tail-run" : undefined,
+            messages,
+          });
+          return sseFrameStream(encoder, [state]);
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+    await tick();
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "fresh prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+    assert.deepEqual(visibleTranscriptText(window), [
+      "you >old prompt", "pi >old answer", "pi >stale tail", "you >fresh prompt",
+    ]);
     cleanup();
   });
 });
@@ -3571,6 +4078,32 @@ test("mounted activation removes stale appended plugin surfaces before remount",
     cleanup();
   });
 });
+
+function visibleTranscriptText(window) {
+  return [...window.document.querySelectorAll(".transcript-item")]
+    .map((item) => item.textContent.replace(/×$/, ""))
+    .filter((text) => text.length > 0);
+}
+
+function captureStream(onStart) {
+  return new ReadableStream({
+    start(controller) {
+      onStart(controller);
+    },
+  });
+}
+
+function sseFrameStream(encoder, states) {
+  return new ReadableStream({
+    start(controller) {
+      for (const state of states) {
+        controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+      }
+
+      controller.close();
+    },
+  });
+}
 
 function createMount(window, app) {
   return {
