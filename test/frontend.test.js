@@ -572,6 +572,143 @@ test("mounted activation loads sidebar-selected session and sends chatState for 
   });
 });
 
+test("mounted chatState drops stale local-only cached messages", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "stale-cache-session", activeWorkspaceId: "workspace-2" }) };
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "stale-cache-session",
+      sessions: [{
+        id: "stale-cache-session",
+        title: "New chat",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [
+          { id: "stale-local", role: "user", text: "stale local prompt", createdAt: 1 },
+          { id: "stale-local-assistant", role: "assistant", text: "stale local answer", createdAt: 2 },
+        ],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return {
+            activeSessionId: "stale-cache-session",
+            messages: [{ id: "backend-only", role: "assistant", text: "backend transcript", createdAt: 3 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "stale-cache-session");
+    assert.match(text, /backend transcript/);
+    assert.doesNotMatch(text, /stale local/);
+    assert.deepEqual(session.messages.map((message) => message.id), ["backend-only"]);
+    cleanup();
+  });
+});
+
+test("mounted chatState preserves cache when backend omits messages", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "omitted-messages-session", activeWorkspaceId: "workspace-2" }) };
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "omitted-messages-session",
+      sessions: [{
+        id: "omitted-messages-session",
+        title: "New chat",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "cached-message", role: "assistant", text: "cached transcript", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? { activeSessionId: "omitted-messages-session" } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "omitted-messages-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /cached transcript/);
+    assert.deepEqual(session.messages.map((message) => message.id), ["cached-message"]);
+    cleanup();
+  });
+});
+
+test("mounted chatState switches active session when backend omits messages", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "requested-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => method === "chatState" ? { activeSessionId: "backend-switched-session" } : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    assert.equal(store.activeSessionId, "backend-switched-session");
+    assert.equal(window.localStorage.getItem("plugin.pi-web-sidebar.activeSessionId"), "backend-switched-session");
+    cleanup();
+  });
+});
+
+test("mounted chatState clears stale cache when backend session is empty", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "empty-backend-session", activeWorkspaceId: "workspace-2" }) };
+    window.localStorage.setItem("pi-web-chat.sessions.v1", JSON.stringify({
+      activeSessionId: "empty-backend-session",
+      sessions: [{
+        id: "empty-backend-session",
+        title: "New chat",
+        createdAt: 1,
+        updatedAt: 1,
+        messages: [{ id: "stale-local", role: "user", text: "stale local prompt", createdAt: 1 }],
+      }],
+    }));
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "chatState") {
+          return { activeSessionId: "empty-backend-session", messages: [] };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "empty-backend-session");
+    assert.match(window.document.querySelector(".term-inner").textContent, /pi-web-chat guide/);
+    assert.deepEqual(session.messages, []);
+    cleanup();
+  });
+});
+
 test("mounted chat starts at bottom and scroll-bottom button controls pinned scrolling", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");
@@ -1524,7 +1661,12 @@ test("mounted submit keeps pending user before assistant-only backend state", as
             type: "chat.state",
             activeSessionId: "assistant-only-session",
             runId: "assistant-only-run",
-            messages: [{ id: "backend-assistant", role: "assistant", text: "assistant only final", createdAt: 1 }],
+            messages: [{
+              id: "backend-assistant",
+              role: "assistant",
+              text: "assistant only final",
+              createdAt: Date.now() + 1_000,
+            }],
           });
 
           return new ReadableStream({
@@ -1557,6 +1699,107 @@ test("mounted submit keeps pending user before assistant-only backend state", as
       "you >assistant only prompt",
       "pi >assistant only final",
     ]);
+    cleanup();
+  });
+});
+
+test("mounted submit keeps all current assistant-only backend messages after pending user", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let runController;
+    let startCount = 0;
+    let steerCount = 0;
+
+    const cleanup = activate({
+      app,
+      backend: async (method) => {
+        if (method === "startPrompt") {
+          startCount += 1;
+          return {
+            activeSessionId: "assistant-only-multi-session",
+            runId: `assistant-only-multi-run-${startCount}`,
+            isStreaming: true,
+          };
+        }
+
+        if (method === "steerPrompt") {
+          steerCount += 1;
+          return { accepted: true };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => {
+        if (method === "streamEventsSse") {
+          return new ReadableStream({
+            start(controller) {
+              runController = controller;
+            },
+          });
+        }
+
+        if (method === "sessionEventsSse") {
+          const state = JSON.stringify({
+            type: "chat.state",
+            activeSessionId: "assistant-only-multi-session",
+            runId: "assistant-only-multi-run-1",
+            isStreaming: true,
+            messages: [
+              {
+                id: "backend-assistant-1",
+                role: "assistant",
+                text: "assistant current one",
+                createdAt: Date.now() + 1_000,
+              },
+              {
+                id: "backend-assistant-2",
+                role: "assistant",
+                text: "assistant current two",
+                createdAt: Date.now() + 2_000,
+              },
+            ],
+          });
+
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(`event: chat.state\ndata: ${state}\n\n`));
+              controller.close();
+            },
+          });
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "assistant only multi prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    runController.enqueue(encoder.encode('event: text.delta\ndata: {"type":"text.delta","delta":"partial"}\n\n'));
+    runController.enqueue(encoder.encode('event: run.end\ndata: {"type":"run.end"}\n\n'));
+    runController.close();
+    await tick(300);
+    await tick();
+    await tick();
+
+    assert.deepEqual([...window.document.querySelectorAll(".transcript-item")].map((item) => item.textContent), [
+      "you >assistant only multi prompt",
+      "pi >assistant current one",
+      "pi >assistant current two",
+    ]);
+
+    textarea.value = "second normal prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+
+    assert.equal(startCount, 2);
+    assert.equal(steerCount, 0);
     cleanup();
   });
 });
@@ -3281,6 +3524,54 @@ test("mounted attach button sends selected files with prompt", async () => {
   });
 });
 
+test("mounted activation removes stale appended plugin surfaces before remount", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const mount = createAppendMount(window);
+    const backendCalls = [];
+
+    activate({ app, backend: async () => ({}), mount });
+    delete app.piWebChat;
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method === "startPrompt") {
+          return {};
+        }
+
+        if (method === "submitPrompt") {
+          return {
+            activeSessionId: input.data.sessionId,
+            messages: [{ id: "remount-user", role: "user", text: input.data.text, createdAt: Date.now() }],
+          };
+        }
+
+        return {};
+      },
+      mount,
+    });
+
+    assert.equal(window.document.querySelectorAll(".pi-web-chat-surface").length, 1);
+    assert.equal(window.document.querySelectorAll(".pi-web-chat-composer").length, 1);
+    assert.equal(window.document.querySelectorAll(".prompt-textarea").length, 1);
+
+    const textarea = window.document.querySelector(".prompt-textarea");
+    textarea.value = "remount prompt";
+    textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+    window.document.querySelector(".send-btn").click();
+    await tick();
+    await tick();
+
+    assert.equal(backendCalls.filter((call) => call.method === "startPrompt").length, 1);
+    assert.equal(backendCalls.filter((call) => call.method === "submitPrompt").length, 1);
+    assert.equal(window.document.querySelectorAll(".transcript-item").length, 1);
+    assert.match(window.document.querySelector(".term-inner").textContent, /remount prompt/);
+    cleanup();
+  });
+});
+
 function createMount(window, app) {
   return {
     chat: (element) => {
@@ -3291,6 +3582,31 @@ function createMount(window, app) {
       window.document.querySelector("[data-composer-host]").replaceChildren(element);
       return () => element.remove();
     },
+  };
+}
+
+function createAppendMount(window) {
+  const mountSurface = (selector, attribute, element) => {
+    const host = window.document.querySelector("[data-chat-host]");
+    const existingRoot = host.querySelector(selector);
+    const root = existingRoot || element;
+
+    if (!existingRoot) {
+      element.dataset[attribute] = "";
+      host.append(element);
+    } else {
+      existingRoot.append(element);
+    }
+
+    return () => {
+      element.remove();
+      root.hidden = true;
+    };
+  };
+
+  return {
+    chat: (element) => mountSurface("[data-plugin-chat-root]", "pluginChatRoot", element),
+    composer: (element) => mountSurface("[data-plugin-composer-root]", "pluginComposerRoot", element),
   };
 }
 

@@ -104,6 +104,7 @@ type MountedState = {
   backendChatToken: number;
   pendingPromptEchoIds: Map<string, string[]>;
   pendingAssistantEchoIds: Map<string, string[]>;
+  completedRunIds: Set<string>;
   activeRunId?: string;
   activeRunSessionId?: string;
   activeRunWorkspacePath?: string;
@@ -122,6 +123,11 @@ type MountedComposerTriggers = {
   shellMode: boolean;
   commands: PluginCommand[];
   fileSearchTimer?: ReturnType<typeof setTimeout>;
+};
+
+type MergeChatMessagesOptions = {
+  allowAssistantOnlyTailEcho?: boolean;
+  preserveOnlyEchoMessages?: boolean;
 };
 
 type MountedScrollLock = {
@@ -243,6 +249,7 @@ export default function activate(context: PluginContext = {}): Cleanup {
 function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | undefined): Cleanup {
   const disposables = new Disposables();
   const style = disposables.add(installStyles());
+  removeMountedPluginSurfaces(app);
   const chatSurface = createChatSurface();
   const composerSurface = createComposerSurface();
   const cleanupChat = context.mount?.chat(chatSurface, { replace: true });
@@ -262,6 +269,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     backendChatToken: 0,
     pendingPromptEchoIds: new Map<string, string[]>(),
     pendingAssistantEchoIds: new Map<string, string[]>(),
+    completedRunIds: new Set<string>(),
   };
 
   if (!selected?.sessionId) {
@@ -291,6 +299,16 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   }
 
   return cleanup;
+}
+
+function removeMountedPluginSurfaces(app: AppWithRuntime | undefined): void {
+  if (!app) {
+    return;
+  }
+
+  app.querySelectorAll<HTMLElement>(".pi-web-chat-surface, .pi-web-chat-composer").forEach((surface: HTMLElement): void => {
+    surface.remove();
+  });
 }
 
 function bindMountedPromptMeta(context: PluginContext, composerSurface: HTMLElement): void {
@@ -1446,6 +1464,8 @@ async function submitMountedPromptWithStreaming(
       runController.signal,
     );
   } finally {
+    rememberCompletedRunId(mountedState, start.runId);
+
     if (mountedState.activeRunId === start.runId) {
       mountedState.activeRunId = undefined;
       mountedState.activeRunSessionId = undefined;
@@ -2072,12 +2092,15 @@ async function openMountedSessionEvents(
         "chatState",
         promptEchoIds,
         assistantEchoIds,
-        activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+        {
+          allowAssistantOnlyTailEcho: activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+          preserveOnlyEchoMessages: true,
+        },
       );
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
       clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
       clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-      if (messages.length) {
+      if (messages.length || Array.isArray(response.messages)) {
         render.request();
       }
     });
@@ -2121,12 +2144,15 @@ async function refreshMountedBackendChatState(
       "chatState",
       promptEchoIds,
       assistantEchoIds,
-      activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+      {
+        allowAssistantOnlyTailEcho: activeAssistantTailEchoAllowed(mountedState, response, sessionIdForEcho),
+        preserveOnlyEchoMessages: true,
+      },
     );
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
     clearMatchedPendingEchoIds(mountedState.pendingPromptEchoIds, sessionIdForEcho, messages, promptEchoIds);
     clearMatchedPendingEchoIds(mountedState.pendingAssistantEchoIds, sessionIdForEcho, messages, assistantEchoIds);
-    if (messages.length) {
+    if (messages.length || Array.isArray(response.messages)) {
       renderMountedBackendMessages(chatSurface, messages, store.activeSessionId);
     }
   } catch {
@@ -2164,7 +2190,12 @@ function syncMountedRunStateFromBackendResponse(
   workspacePath: string,
   workspaceId: string,
 ): void {
-  if (response.isStreaming === true && typeof response.runId === "string" && response.runId) {
+  if (
+    response.isStreaming === true
+    && typeof response.runId === "string"
+    && response.runId
+    && !mountedState.completedRunIds.has(response.runId)
+  ) {
     mountedState.activeRunId = response.runId;
     mountedState.activeRunSessionId = typeof response.activeSessionId === "string" && response.activeSessionId ? response.activeSessionId : sessionId;
     mountedState.activeRunWorkspacePath = workspacePath;
@@ -2179,6 +2210,20 @@ function syncMountedRunStateFromBackendResponse(
     mountedState.activeRunWorkspacePath = undefined;
     mountedState.activeRunWorkspaceId = undefined;
     mountedState.onRunStateChange?.();
+  }
+}
+
+function rememberCompletedRunId(mountedState: MountedState, runId: string): void {
+  mountedState.completedRunIds.add(runId);
+
+  if (mountedState.completedRunIds.size <= 50) {
+    return;
+  }
+
+  const oldestRunId = mountedState.completedRunIds.values().next().value;
+
+  if (typeof oldestRunId === "string") {
+    mountedState.completedRunIds.delete(oldestRunId);
   }
 }
 
@@ -2215,8 +2260,9 @@ function applyBackendResponseToMountedStore(
   reason: string,
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
-  allowAssistantOnlyTailEcho = false,
+  options: MergeChatMessagesOptions = {},
 ): ChatMessage[] {
+  const hasResponseMessages: boolean = Array.isArray(response.messages);
   const responseMessages = sanitizeChatMessages(response.messages);
 
   if (typeof response.activeSessionId === "string" && response.activeSessionId) {
@@ -2236,18 +2282,18 @@ function applyBackendResponseToMountedStore(
     }
   }
 
-  const session = activeSession(store);
-
-  if (!responseMessages.length) {
+  if (!hasResponseMessages) {
     return [];
   }
+
+  const session = activeSession(store);
 
   const nextMessages = mergeChatMessages(
     session.messages,
     responseMessages,
     optimisticEchoIds,
     assistantEchoIds,
-    allowAssistantOnlyTailEcho,
+    options,
   ).slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return [];
@@ -3483,16 +3529,25 @@ function mergeChatMessages(
   backendMessages: ChatMessage[],
   optimisticEchoIds: string | string[] = "",
   assistantEchoIds: string | string[] = "",
-  allowAssistantOnlyTailEcho = false,
+  options: MergeChatMessagesOptions = {},
 ): ChatMessage[] {
   const promptEchoIds = toEchoIdList(optimisticEchoIds);
   const assistantEchoIdList = toEchoIdList(assistantEchoIds);
+  const preservedLocalIds: Set<string> = new Set<string>([...promptEchoIds, ...assistantEchoIdList]);
+  const backendMessageIds: Set<string> = new Set<string>(backendMessages.map((message: ChatMessage): string => message.id));
+  const preserveOnlyEchoMessages: boolean = options.preserveOnlyEchoMessages === true;
+  const allowAssistantOnlyTailEcho: boolean = options.allowAssistantOnlyTailEcho === true;
+  const mergeLocalMessages: ChatMessage[] = preserveOnlyEchoMessages
+    ? localMessages.filter((message: ChatMessage): boolean => {
+      return backendMessageIds.has(message.id) || preservedLocalIds.has(message.id) || isPendingMountedSteeringMessage(message);
+    })
+    : localMessages;
   const merged = new Map<string, ChatMessage>();
   const orderById = new Map<string, number>();
   const assistantEchoByBackendUserId = new Map<string, string>();
   let localOrder = backendMessages.length;
 
-  for (const message of localMessages) {
+  for (const message of mergeLocalMessages) {
     merged.set(message.id, message);
     orderById.set(message.id, localOrder++);
   }
@@ -3501,12 +3556,12 @@ function mergeChatMessages(
   const usedAssistantEchoIds: Set<string> = new Set<string>();
 
   backendMessages.forEach((message: ChatMessage, backendOrder: number): void => {
-    const promptDuplicate = findOptimisticPromptEchoMessage(localMessages, message, promptEchoIds, usedPromptEchoIds);
+    const promptDuplicate = findOptimisticPromptEchoMessage(mergeLocalMessages, message, promptEchoIds, usedPromptEchoIds);
 
     if (promptDuplicate) {
       usedPromptEchoIds.add(promptDuplicate.id);
       const assistantEchoId = nextAssistantEchoIdAfterMessage(
-        localMessages,
+        mergeLocalMessages,
         promptDuplicate.id,
         assistantEchoIdList,
         usedAssistantEchoIds,
@@ -3521,7 +3576,7 @@ function mergeChatMessages(
     }
 
     const assistantDuplicateId = immediateAssistantEchoIdForBackendMessage(
-      localMessages,
+      mergeLocalMessages,
       backendMessages,
       message,
       backendOrder,
@@ -3537,7 +3592,7 @@ function mergeChatMessages(
     }
 
     const pendingAssistantDuplicateId = tailAssistantEchoIdForAssistantOnlyBackendState(
-      localMessages,
+      mergeLocalMessages,
       backendMessages,
       message,
       backendOrder,
@@ -3556,6 +3611,21 @@ function mergeChatMessages(
         message,
         orderById.get(pendingAssistantDuplicateId) ?? backendOrder,
       );
+      return;
+    }
+
+    const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
+      mergeLocalMessages,
+      backendMessages,
+      message,
+      promptEchoIds,
+      allowAssistantOnlyTailEcho,
+    );
+
+    if (promptAnchor) {
+      const anchoredOrder = (orderById.get(promptAnchor.id) ?? backendOrder) + (backendOrder + 1) / 1_000;
+      orderById.set(message.id, anchoredOrder);
+      merged.set(message.id, { ...merged.get(message.id), ...message });
       return;
     }
 
@@ -3651,29 +3721,41 @@ function tailAssistantEchoIdForAssistantOnlyBackendState(
   usedAssistantEchoIds: Set<string>,
   allowed: boolean,
 ): string {
-  if (
-    !allowed
-    || backendMessage.role !== "assistant"
-    || backendOrder !== backendMessages.length - 1
-    || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
-  ) {
+  const promptAnchor = pendingPromptAnchorForAssistantOnlyBackendState(
+    localMessages,
+    backendMessages,
+    backendMessage,
+    promptEchoIds,
+    allowed,
+  );
+
+  if (!promptAnchor || backendOrder !== backendMessages.length - 1) {
     return "";
   }
 
-  for (const promptEchoId of promptEchoIds) {
-    const assistantEchoId = nextAssistantEchoIdAfterMessage(
-      localMessages,
-      promptEchoId,
-      assistantEchoIds,
-      usedAssistantEchoIds,
-    );
+  return nextAssistantEchoIdAfterMessage(localMessages, promptAnchor.id, assistantEchoIds, usedAssistantEchoIds);
+}
 
-    if (assistantEchoId) {
-      return assistantEchoId;
-    }
+function pendingPromptAnchorForAssistantOnlyBackendState(
+  localMessages: ChatMessage[],
+  backendMessages: ChatMessage[],
+  backendMessage: ChatMessage,
+  promptEchoIds: string[],
+  allowed: boolean,
+): ChatMessage | undefined {
+  if (
+    !allowed
+    || backendMessage.role !== "assistant"
+    || backendMessages.some((message: ChatMessage): boolean => message.role === "user")
+  ) {
+    return undefined;
   }
 
-  return "";
+  return localMessages.find((message: ChatMessage): boolean => {
+    return promptEchoIds.includes(message.id)
+      && message.role === "user"
+      && backendMessage.createdAt >= message.createdAt;
+  });
 }
 
 function nextAssistantEchoIdAfterMessage(
