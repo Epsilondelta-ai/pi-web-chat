@@ -137,6 +137,9 @@ test("plugin styles target mounted chat surfaces", () => {
   assert.match(styles, /prompt-bar\.shell-mode \.send-btn[\s\S]*var\(--warning, #facc15\)/);
   assert.match(styles, /composer-spinner[\s\S]*animation: pi-web-chat-composer-spin/);
   assert.match(styles, /composer-spinner[\s\S]*border-right-color: transparent/);
+  assert.match(styles, /@keyframes pi-web-chat-terminal-spinner/);
+  assert.match(styles, /spinner span[\s\S]*animation: pi-web-chat-terminal-spinner/);
+  assert.doesNotMatch(styles, /spinner\[data-frame/);
   assert.match(styles, /data-composer-mode="shell"\] \.pi-web-chat-send[\s\S]*var\(--warning, #facc15\)/);
 });
 
@@ -2487,7 +2490,7 @@ test("mounted tool calls render collapsed cards with tool icons", async () => {
     assert.equal(cards[2].querySelector(".tc-glyph").textContent, "●");
     assert.ok(cards[3].querySelector("[data-tool-icon='circle-check']"));
     assert.equal(cards[3].querySelectorAll(".tc-meta .spinner span").length, 6);
-    assert.match(cards[3].querySelector(".tc-meta .spinner").dataset.frame, /^[0-5]$/);
+    assert.equal(cards[3].querySelector(".tc-meta .spinner").hasAttribute("data-frame"), false);
     assert.equal(cards[3].querySelector(".tc-meta .running").textContent, "running");
     assert.equal(cards[3].querySelector(".tc-meta .ok"), null);
     assert.equal(cards[3].querySelector(".tc-toggle-label").textContent, "show");
@@ -2642,7 +2645,7 @@ test("mounted terminal spinner respects reduced motion", async () => {
       await tick(200);
 
       const spinner = window.document.querySelector(".tc-meta .spinner");
-      assert.equal(spinner.dataset.frame, "0");
+      assert.equal(spinner.hasAttribute("data-frame"), false);
       assert.equal(spinner.querySelectorAll("span").length, 6);
       assert.equal(intervalCount, 0);
       cleanup();

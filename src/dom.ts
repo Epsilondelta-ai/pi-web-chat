@@ -968,94 +968,41 @@ export function pluginStyleText(): string {
     .pi-web-chat-composer .spinner span,
     .pi-web-chat-surface .spinner span {
       align-items: center;
-      color: #000;
+      animation: pi-web-chat-terminal-spinner 900ms linear infinite;
+      color: currentColor;
       display: inline-flex;
       font-size: 0.9em;
       height: 0.3em;
       justify-content: center;
       line-height: 1;
+      opacity: 0;
       width: 0.42ch;
     }
 
     .pi-web-chat-composer .spinner span::before,
     .pi-web-chat-surface .spinner span::before { content: "."; }
     .pi-web-chat-composer .spinner span:nth-child(1), .pi-web-chat-surface .spinner span:nth-child(1) { grid-column: 1; grid-row: 1; }
-    .pi-web-chat-composer .spinner span:nth-child(2), .pi-web-chat-surface .spinner span:nth-child(2) { grid-column: 2; grid-row: 1; }
-    .pi-web-chat-composer .spinner span:nth-child(3), .pi-web-chat-surface .spinner span:nth-child(3) { grid-column: 2; grid-row: 2; }
-    .pi-web-chat-composer .spinner span:nth-child(4), .pi-web-chat-surface .spinner span:nth-child(4) { grid-column: 2; grid-row: 3; }
-    .pi-web-chat-composer .spinner span:nth-child(5), .pi-web-chat-surface .spinner span:nth-child(5) { grid-column: 1; grid-row: 3; }
-    .pi-web-chat-composer .spinner span:nth-child(6), .pi-web-chat-surface .spinner span:nth-child(6) { grid-column: 1; grid-row: 2; }
-    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(1),
-    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(2),
-    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(3),
-    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(4),
-    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(5),
-    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(6),
-    .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(1),
-    .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(2),
-    .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(3),
-    .pi-web-chat-surface .spinner[data-frame="3"] span:nth-child(4),
-    .pi-web-chat-surface .spinner[data-frame="4"] span:nth-child(5),
-    .pi-web-chat-surface .spinner[data-frame="5"] span:nth-child(6) {
-      color: currentColor;
-      opacity: 1;
-    }
+    .pi-web-chat-composer .spinner span:nth-child(2), .pi-web-chat-surface .spinner span:nth-child(2) { animation-delay: -150ms; grid-column: 2; grid-row: 1; }
+    .pi-web-chat-composer .spinner span:nth-child(3), .pi-web-chat-surface .spinner span:nth-child(3) { animation-delay: -300ms; grid-column: 2; grid-row: 2; }
+    .pi-web-chat-composer .spinner span:nth-child(4), .pi-web-chat-surface .spinner span:nth-child(4) { animation-delay: -450ms; grid-column: 2; grid-row: 3; }
+    .pi-web-chat-composer .spinner span:nth-child(5), .pi-web-chat-surface .spinner span:nth-child(5) { animation-delay: -600ms; grid-column: 1; grid-row: 3; }
+    .pi-web-chat-composer .spinner span:nth-child(6), .pi-web-chat-surface .spinner span:nth-child(6) { animation-delay: -750ms; grid-column: 1; grid-row: 2; }
 
-    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(6),
-    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(1),
-    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(2),
-    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(3),
-    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(4),
-    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(5),
-    .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(6),
-    .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(1),
-    .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(2),
-    .pi-web-chat-surface .spinner[data-frame="3"] span:nth-child(3),
-    .pi-web-chat-surface .spinner[data-frame="4"] span:nth-child(4),
-    .pi-web-chat-surface .spinner[data-frame="5"] span:nth-child(5) {
-      color: currentColor;
-      opacity: 0.68;
-    }
-
-    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(5),
-    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(6),
-    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(1),
-    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(2),
-    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(3),
-    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(4),
-    .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(5),
-    .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(6),
-    .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(1),
-    .pi-web-chat-surface .spinner[data-frame="3"] span:nth-child(2),
-    .pi-web-chat-surface .spinner[data-frame="4"] span:nth-child(3),
-    .pi-web-chat-surface .spinner[data-frame="5"] span:nth-child(4) {
-      color: currentColor;
-      opacity: 0.42;
-    }
-
-    .pi-web-chat-composer .spinner[data-frame="0"] span:nth-child(4),
-    .pi-web-chat-composer .spinner[data-frame="1"] span:nth-child(5),
-    .pi-web-chat-composer .spinner[data-frame="2"] span:nth-child(6),
-    .pi-web-chat-composer .spinner[data-frame="3"] span:nth-child(1),
-    .pi-web-chat-composer .spinner[data-frame="4"] span:nth-child(2),
-    .pi-web-chat-composer .spinner[data-frame="5"] span:nth-child(3),
-    .pi-web-chat-surface .spinner[data-frame="0"] span:nth-child(4),
-    .pi-web-chat-surface .spinner[data-frame="1"] span:nth-child(5),
-    .pi-web-chat-surface .spinner[data-frame="2"] span:nth-child(6),
-    .pi-web-chat-surface .spinner[data-frame="3"] span:nth-child(1),
-    .pi-web-chat-surface .spinner[data-frame="4"] span:nth-child(2),
-    .pi-web-chat-surface .spinner[data-frame="5"] span:nth-child(3) {
-      color: currentColor;
-      opacity: 0.24;
+    @keyframes pi-web-chat-terminal-spinner {
+      0%, 16.66% { opacity: 1; }
+      16.67%, 33.33% { opacity: 0.68; }
+      33.34%, 50% { opacity: 0.42; }
+      50.01%, 66.66% { opacity: 0.24; }
+      66.67%, 100% { opacity: 0; }
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .pi-web-chat-composer .spinner[data-frame] span:nth-child(1), .pi-web-chat-surface .spinner[data-frame] span:nth-child(1) { color: currentColor; opacity: 1; }
-      .pi-web-chat-composer .spinner[data-frame] span:nth-child(2), .pi-web-chat-surface .spinner[data-frame] span:nth-child(2) { color: currentColor; opacity: 0.68; }
-      .pi-web-chat-composer .spinner[data-frame] span:nth-child(3), .pi-web-chat-surface .spinner[data-frame] span:nth-child(3) { color: currentColor; opacity: 0.42; }
-      .pi-web-chat-composer .spinner[data-frame] span:nth-child(4), .pi-web-chat-surface .spinner[data-frame] span:nth-child(4) { color: currentColor; opacity: 0.24; }
-      .pi-web-chat-composer .spinner[data-frame] span:nth-child(5), .pi-web-chat-surface .spinner[data-frame] span:nth-child(5) { color: #000; opacity: 1; }
-      .pi-web-chat-composer .spinner[data-frame] span:nth-child(6), .pi-web-chat-surface .spinner[data-frame] span:nth-child(6) { color: #000; opacity: 1; }
+      .pi-web-chat-composer .spinner span,
+      .pi-web-chat-surface .spinner span { animation: none; }
+      .pi-web-chat-composer .spinner span:nth-child(1), .pi-web-chat-surface .spinner span:nth-child(1) { opacity: 1; }
+      .pi-web-chat-composer .spinner span:nth-child(2), .pi-web-chat-surface .spinner span:nth-child(2) { opacity: 0.68; }
+      .pi-web-chat-composer .spinner span:nth-child(3), .pi-web-chat-surface .spinner span:nth-child(3) { opacity: 0.42; }
+      .pi-web-chat-composer .spinner span:nth-child(4), .pi-web-chat-surface .spinner span:nth-child(4) { opacity: 0.24; }
     }
 
     .pi-web-chat-surface .tool-card .tc-meta .err {
