@@ -70,20 +70,6 @@ async function rejectBackend(method, workspaceRoot, data = {}) {
   assert.ok(result.stderr.trim());
 }
 
-async function waitForActiveRun(root, sessionId, runId, env = {}) {
-  for (let index = 0; index < 30; index += 1) {
-    const state = await callBackend("chatState", root, { sessionId }, env);
-
-    if (state.runId === runId && state.isStreaming === true) {
-      return state;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-
-  throw new Error(`run ${runId} did not become active`);
-}
-
 async function waitForFileIncludes(path, expected) {
   for (let index = 0; index < 30; index += 1) {
     try {
@@ -980,11 +966,12 @@ setTimeout(() => process.exit(2), 10000);
   await chmod(fakePi, 0o755);
 
   const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_STEER_MARKER: marker };
-  const start = await callBackend("startPrompt", root, { text: "first" }, env);
-  await waitForActiveRun(root, start.activeSessionId, start.runId, env);
+  const start = await runBackendBinary("startPrompt", root, { data: { text: "first" } }, env);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
   const message = `${"a".repeat(4057)}😀`;
-  const steer = await callBackend("steerPrompt", root, { runId: start.runId, text: message }, env);
-  assert.equal(steer.accepted, true);
+  const steer = await runBackendBinary("steerPrompt", root, { data: { runId: started.runId, text: message } }, env);
+  assert.equal(steer.code, 0, steer.stderr);
 
   const content = await waitForFileIncludes(marker, "😀");
   assert.equal(content.trim(), message);
