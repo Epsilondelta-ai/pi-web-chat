@@ -1111,6 +1111,110 @@ test("mounted chatState refresh preserves loaded history beyond cache cap", asyn
   });
 });
 
+test("mounted chatState refresh keeps overlapping loaded history before the capped tail", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let streamController;
+    const currentMessages = Array.from({ length: 4 }, (_, index) => ({
+      id: `m${index + 5}`,
+      role: "assistant",
+      text: `current ${index + 5}`,
+      createdAt: index + 5,
+    }));
+    const refreshedMessages = Array.from({ length: 5 }, (_, index) => ({
+      id: `m${index + 3}`,
+      role: "assistant",
+      text: `current ${index + 3}`,
+      createdAt: index + 3,
+    }));
+    const currentState = JSON.stringify({
+      type: "chat.state",
+      activeSessionId: "history-overlap-session",
+      hasMoreBefore: true,
+      oldestMessageId: "m5",
+      messages: currentMessages,
+    });
+    const refreshedState = JSON.stringify({
+      type: "chat.state",
+      activeSessionId: "history-overlap-session",
+      hasMoreBefore: true,
+      oldestMessageId: "m3",
+      messages: refreshedMessages,
+    });
+    app.piWebSidebar = {
+      getSnapshot: () => ({ activeSessionId: "history-overlap-session", activeWorkspaceId: "workspace-2" }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.beforeMessageId === "m5") {
+          return {
+            activeSessionId: "history-overlap-session",
+            hasMoreBefore: false,
+            oldestMessageId: "m1",
+            messages: [
+              { id: "m1", role: "assistant", text: "history 1", createdAt: 1 },
+              { id: "m2", role: "assistant", text: "history 2", createdAt: 2 },
+              { id: "m3", role: "assistant", text: "history 3", createdAt: 3 },
+              { id: "m4", role: "assistant", text: "history 4", createdAt: 4 },
+            ],
+          };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => method === "sessionEventsSse"
+        ? captureStream((controller) => {
+          streamController = controller;
+          controller.enqueue(encoder.encode(`event: chat.state\ndata: ${currentState}\n\n`));
+        })
+        : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    await tick(180);
+    await tick();
+
+    streamController.enqueue(encoder.encode(`event: chat.state\ndata: ${refreshedState}\n\n`));
+
+    for (let index = 0; index < 10; index += 1) {
+      await tick(30);
+
+      if (!window.document.querySelector(".term-inner").textContent.includes("current 8")) {
+        break;
+      }
+    }
+
+    assert.deepEqual(visibleTranscriptText(window), [
+      "pi >history 1",
+      "pi >history 2",
+      "pi >current 3",
+      "pi >current 4",
+      "pi >current 5",
+      "pi >current 6",
+      "pi >current 7",
+    ]);
+    assert.equal(
+      window.document.querySelector("[data-message-id='m3']")?.getAttribute("data-history-page"),
+      "true",
+    );
+    assert.equal(
+      window.document.querySelector("[data-message-id='m4']")?.getAttribute("data-history-page"),
+      "true",
+    );
+    streamController.close();
+    cleanup();
+  });
+});
+
 test("mounted session switch removes loaded history from previous session", async () => {
   await withWindow(async ({ window }) => {
     const app = window.document.querySelector("pi-app");

@@ -2369,12 +2369,51 @@ function applyBackendResponseToMountedStore(
 }
 
 function preserveMountedHistoryMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): ChatMessage[] {
-  const nextIds: Set<string> = new Set<string>(nextMessages.map((message: ChatMessage): string => message.id));
-  const previousHistory: ChatMessage[] = previousMessages.filter((message: ChatMessage): boolean => {
-    return isMountedHistoryPageMessage(message) && !nextIds.has(message.id);
-  });
+  const nextMessagesById: Record<string, ChatMessage | undefined> = Object.create(null) as Record<
+    string,
+    ChatMessage | undefined
+  >;
 
-  return previousHistory.length ? [...previousHistory, ...nextMessages] : nextMessages;
+  for (const nextMessage of nextMessages) {
+    nextMessagesById[nextMessage.id] = nextMessage;
+  }
+
+  const retainedHistoryMessages: ChatMessage[] = [];
+  const retainedHistoryIds: Record<string, true | undefined> = Object.create(null) as Record<string, true | undefined>;
+
+  for (const previousMessage of previousMessages) {
+    if (!isMountedHistoryPageMessage(previousMessage)) {
+      continue;
+    }
+
+    const refreshedMessage: ChatMessage | undefined = nextMessagesById[previousMessage.id];
+    const retainedMessage: ChatMessage = refreshedMessage
+      ? markMountedHistoryPageMessage(refreshedMessage)
+      : previousMessage;
+    retainedHistoryMessages.push(retainedMessage);
+    retainedHistoryIds[retainedMessage.id] = true;
+  }
+
+  if (!retainedHistoryMessages.length) {
+    return nextMessages;
+  }
+
+  const currentMessages: ChatMessage[] = [];
+
+  for (const message of nextMessages) {
+    if (retainedHistoryIds[message.id] !== true) {
+      currentMessages.push(message);
+    }
+  }
+
+  return [...retainedHistoryMessages, ...currentMessages];
+}
+
+function markMountedHistoryPageMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    meta: { ...(message.meta || {}), piWebChatHistoryPage: true },
+  };
 }
 
 function pruneMountedChatStateMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -3075,12 +3114,7 @@ async function loadMountedPreviousMessages(
 }
 
 function markMountedHistoryPageMessages(messages: ChatMessage[], _sessionId: string): ChatMessage[] {
-  return messages.map((message: ChatMessage): ChatMessage => {
-    return {
-      ...message,
-      meta: { ...(message.meta || {}), piWebChatHistoryPage: true },
-    };
-  });
+  return messages.map(markMountedHistoryPageMessage);
 }
 
 function isMountedHistoryPageMessage(message: ChatMessage): boolean {
