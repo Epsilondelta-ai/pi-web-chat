@@ -848,12 +848,113 @@ test("mounted top scroll loads older chatState messages and prepends them", asyn
 
     const term = window.document.querySelector(".term");
     term.scrollTop = 0;
-    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    term.dispatchEvent(new window.WheelEvent("wheel", { deltaY: -30, bubbles: true }));
     await tick();
     await tick();
 
     assert.deepEqual(visibleTranscriptText(window), ["pi >older transcript", "pi >latest transcript"]);
     assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "m201"));
+    cleanup();
+  });
+});
+
+test("mounted scroll event at top loads older chatState messages", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-scroll-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method !== "chatState") {
+          return {};
+        }
+
+        if (input.data.beforeMessageId === "s201") {
+          return {
+            activeSessionId: "history-scroll-session",
+            hasMoreBefore: false,
+            oldestMessageId: "s001",
+            messages: [{ id: "s001", role: "assistant", text: "scroll older transcript", createdAt: 1 }],
+          };
+        }
+
+        return {
+          activeSessionId: "history-scroll-session",
+          hasMoreBefore: true,
+          oldestMessageId: "s201",
+          messages: [{ id: "s201", role: "assistant", text: "scroll latest transcript", createdAt: 201 }],
+        };
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    await tick();
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), ["pi >scroll older transcript", "pi >scroll latest transcript"]);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "s201"));
+    cleanup();
+  });
+});
+
+test("mounted touch pull at top loads older chatState messages", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-touch-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method !== "chatState") {
+          return {};
+        }
+
+        if (input.data.beforeMessageId === "t201") {
+          return {
+            activeSessionId: "history-touch-session",
+            hasMoreBefore: false,
+            oldestMessageId: "t001",
+            messages: [{ id: "t001", role: "assistant", text: "touch older transcript", createdAt: 1 }],
+          };
+        }
+
+        return {
+          activeSessionId: "history-touch-session",
+          hasMoreBefore: true,
+          oldestMessageId: "t201",
+          messages: [{ id: "t201", role: "assistant", text: "touch latest transcript", createdAt: 201 }],
+        };
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    const touchStart = new window.Event("touchstart", { bubbles: true });
+    Object.defineProperty(touchStart, "touches", { value: { item: () => ({ clientY: 10 }) } });
+    term.dispatchEvent(touchStart);
+    const touchMove = new window.Event("touchmove", { bubbles: true });
+    Object.defineProperty(touchMove, "touches", { value: { item: () => ({ clientY: 30 }) } });
+    term.dispatchEvent(touchMove);
+    await tick();
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), ["pi >touch older transcript", "pi >touch latest transcript"]);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "t201"));
     cleanup();
   });
 });

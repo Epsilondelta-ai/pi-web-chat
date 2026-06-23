@@ -2963,12 +2963,29 @@ function bindMountedHistoryPagination(
     return;
   }
 
-  disposables.listen(scrollLock.term, "scroll", (): void => {
+  const requestPreviousMessages = (): void => {
     if (scrollLock.term.scrollTop > CHAT_HISTORY_TOP_THRESHOLD_PX) {
       return;
     }
 
     void loadMountedPreviousMessages(context, chatSurface, store, mountedState, scrollLock);
+  };
+
+  disposables.listen(scrollLock.term, "scroll", requestPreviousMessages);
+  disposables.listen(scrollLock.term, "wheel", (event: Event): void => {
+    const wheelEvent = event as WheelEvent;
+
+    if (wheelEvent.deltaY < 0) {
+      requestPreviousMessages();
+    }
+  });
+  disposables.listen(scrollLock.term, "touchmove", (event: Event): void => {
+    const touchEvent = event as TouchEvent;
+    const currentY: number | undefined = touchEvent.touches.item(0)?.clientY;
+
+    if (typeof currentY === "number" && scrollLock.touchStartY !== null && currentY - scrollLock.touchStartY > 8) {
+      requestPreviousMessages();
+    }
   });
 }
 
