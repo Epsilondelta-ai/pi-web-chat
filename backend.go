@@ -962,8 +962,9 @@ func runGoStreamRunner(args []string) error {
 	scanner := bufio.NewScanner(stdout)
 	buffer := make([]byte, 0, 64*1024)
 	scanner.Buffer(buffer, maxOutputBytes)
+	mapper := rpcLineMapper{}
 	for scanner.Scan() {
-		if emitMappedPiRPCLine(eventsPath, statePath, scanner.Bytes()) == "agent_end" {
+		if mapper.emitMappedPiRPCLine(eventsPath, statePath, scanner.Bytes()) == "agent_end" {
 			closeRPCInput()
 		}
 	}
@@ -1089,7 +1090,12 @@ func ackGoSteeringPayload(path string, line string) {
 	_, _ = file.WriteString(id + "\n")
 }
 
-func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) string {
+type rpcLineMapper struct {
+	compactionIndex    int
+	activeCompactionID string
+}
+
+func (mapper *rpcLineMapper) emitMappedPiRPCLine(eventsPath, statePath string, line []byte) string {
 	var event map[string]any
 	if err := json.Unmarshal(line, &event); err != nil {
 		return "parse_error"
@@ -1127,8 +1133,76 @@ func emitMappedPiRPCLine(eventsPath, statePath string, line []byte) string {
 		emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.agent.start"})
 	case "agent_end":
 		emitGoStreamEvent(eventsPath, statePath, streamEvent{"type": "run.agent.end"})
+	case "compaction_start":
+		emitGoStreamEvent(eventsPath, statePath, mapper.streamCompactionStartEvent(event))
+	case "compaction_end":
+		emitGoStreamEvent(eventsPath, statePath, mapper.streamCompactionEndEvent(event))
 	}
 	return typeName
+}
+
+func (mapper *rpcLineMapper) streamCompactionStartEvent(event map[string]any) streamEvent {
+	reason := stringFromAny(event["reason"])
+	if reason == "" {
+		reason = "unknown"
+	}
+	mapper.compactionIndex += 1
+	mapper.activeCompactionID = fmt.Sprintf("context.compaction.%d", mapper.compactionIndex)
+	return streamEvent{
+		"type":       "tool.start",
+		"toolCallId": mapper.activeCompactionID,
+		"toolName":   "context.compaction",
+		"args":       map[string]any{"reason": reason},
+		"argsStatus": "present",
+	}
+}
+
+func (mapper *rpcLineMapper) streamCompactionEndEvent(event map[string]any) streamEvent {
+	result, _ := event["result"].(map[string]any)
+	errorMessage := stringFromAny(event["errorMessage"])
+	aborted, _ := event["aborted"].(bool)
+	isError := aborted || errorMessage != ""
+	toolCallID := mapper.activeCompactionID
+	if toolCallID == "" {
+		mapper.compactionIndex += 1
+		toolCallID = fmt.Sprintf("context.compaction.%d", mapper.compactionIndex)
+	}
+	mapper.activeCompactionID = ""
+	return streamEvent{
+		"type":       "tool.end",
+		"toolCallId": toolCallID,
+		"toolName":   "context.compaction",
+		"result":     compactionResultText(event, result),
+		"isError":    isError,
+	}
+}
+
+func compactionResultText(event map[string]any, result map[string]any) string {
+	errorMessage := stringFromAny(event["errorMessage"])
+	if errorMessage != "" {
+		return "Context compaction failed.\nError: " + errorMessage
+	}
+	if aborted, _ := event["aborted"].(bool); aborted {
+		return "Context compaction aborted."
+	}
+	if result == nil {
+		return "Context compaction completed."
+	}
+	return persistedCompactionText(result)
+}
+
+func persistedCompactionText(entry map[string]any) string {
+	parts := []string{"Context compaction completed."}
+	if tokensBefore := intFromAny(entry["tokensBefore"]); tokensBefore > 0 {
+		parts = append(parts, fmt.Sprintf("Tokens before: %d", tokensBefore))
+	}
+	if firstKeptEntryID := stringFromAny(entry["firstKeptEntryId"]); firstKeptEntryID != "" {
+		parts = append(parts, "First kept entry: "+firstKeptEntryID)
+	}
+	if summary := strings.TrimSpace(stringFromAny(entry["summary"])); summary != "" {
+		parts = append(parts, "Summary:\n"+summary)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func mapAssistantMessageEvent(raw any) streamEvent {
@@ -1779,6 +1853,10 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 			}
 			continue
 		}
+		if entry["type"] == "compaction" {
+			messages = append(messages, piCompactionMessage(entry, len(messages)))
+			continue
+		}
 		if entry["type"] != "message" {
 			continue
 		}
@@ -1813,6 +1891,37 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 	}
 	messages = trimChatMessagesForResponse(messages)
 	return messages, sessionID, nil
+}
+
+func piCompactionMessage(entry map[string]any, index int) chatMessage {
+	createdAt := unixMillis(entry["timestamp"])
+	id, _ := entry["id"].(string)
+	if id == "" {
+		id = fmt.Sprintf("compaction-%d", index+1)
+	}
+	toolID := id + "-tool-0"
+	tool := chatToolCall{
+		ID:         toolID,
+		Name:       "context.compaction",
+		Args:       map[string]any{"firstKeptEntryId": stringFromAny(entry["firstKeptEntryId"])},
+		ArgsStatus: "present",
+		Text:       persistedCompactionText(entry),
+		Status:     "ok",
+	}
+	return chatMessage{
+		ID:        id,
+		Role:      "assistant",
+		Text:      "",
+		CreatedAt: createdAt,
+		Meta:      map[string]any{"piRole": "compaction"},
+		Blocks: []chatMessageBlock{{
+			ID:       id + "-tool-block-0",
+			Type:     "tool",
+			Text:     "",
+			ToolCall: &tool,
+		}},
+		ToolCalls: []chatToolCall{tool},
+	}
 }
 
 func mergeToolResult(messages []chatMessage, msg map[string]any, text string) bool {

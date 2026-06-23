@@ -549,6 +549,7 @@ function runStreamRunnerProcess(args, resolve) {
   };
 
   emit({ type: "run.start", runId });
+  const rpcMapper = createRpcLineMapper();
   proc.stdout.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
     while (true) {
@@ -556,7 +557,7 @@ function runStreamRunnerProcess(args, resolve) {
       if (index < 0) break;
       const line = buffer.slice(0, index).replace(/\r$/, "");
       buffer = buffer.slice(index + 1);
-      if (line.trim() && mapRpcLine(line, emit) === "agent_end") closeRpcInput();
+      if (line.trim() && rpcMapper.map(line, emit) === "agent_end") closeRpcInput();
     }
   });
   proc.stderr.on("data", (chunk) => emit({ type: "error", message: chunk.toString("utf8") }));
@@ -573,7 +574,40 @@ function runStreamRunnerProcess(args, resolve) {
   steeringTimer = setInterval(pumpSteering, 50);
 }
 
-function mapRpcLine(line, emit) {
+function createRpcLineMapper() {
+  const mapper = createRpcCompactionMapper();
+
+  return {
+    map(line, emit) {
+      return mapRpcLine(line, emit, mapper);
+    },
+  };
+}
+
+function createRpcCompactionMapper() {
+  let compactionIndex = 0;
+  let activeCompactionId = "";
+
+  return {
+    startCompaction() {
+      compactionIndex += 1;
+      activeCompactionId = `context.compaction.${compactionIndex}`;
+      return activeCompactionId;
+    },
+    endCompaction() {
+      if (!activeCompactionId) {
+        compactionIndex += 1;
+        return `context.compaction.${compactionIndex}`;
+      }
+
+      const id = activeCompactionId;
+      activeCompactionId = "";
+      return id;
+    },
+  };
+}
+
+function mapRpcLine(line, emit, mapper = createRpcCompactionMapper()) {
   let event;
   try {
     event = JSON.parse(line);
@@ -606,7 +640,46 @@ function mapRpcLine(line, emit) {
   else if (event.type === "tool_execution_end") emit({ type: "tool.end", toolCallId: event.toolCallId, toolName: event.toolName, result: toolResultText(event.result), isError: Boolean(event.isError) });
   else if (event.type === "agent_start") emit({ type: "run.agent.start" });
   else if (event.type === "agent_end") emit({ type: "run.agent.end" });
+  else if (event.type === "compaction_start") emit(compactionStartEvent(event, mapper.startCompaction()));
+  else if (event.type === "compaction_end") emit(compactionEndEvent(event, mapper.endCompaction()));
   return event.type;
+}
+
+function compactionStartEvent(event, toolCallId) {
+  const reason = typeof event.reason === "string" && event.reason ? event.reason : "unknown";
+  return {
+    type: "tool.start",
+    toolCallId,
+    toolName: "context.compaction",
+    args: { reason },
+    argsStatus: "present",
+  };
+}
+
+function compactionEndEvent(event, toolCallId) {
+  const result = event.result && typeof event.result === "object" ? event.result : undefined;
+  return {
+    type: "tool.end",
+    toolCallId,
+    toolName: "context.compaction",
+    result: compactionResultText(event, result),
+    isError: Boolean(event.aborted || event.errorMessage),
+  };
+}
+
+function compactionResultText(event, result) {
+  if (typeof event.errorMessage === "string" && event.errorMessage) return `Context compaction failed.\nError: ${event.errorMessage}`;
+  if (event.aborted) return "Context compaction aborted.";
+  if (!result) return "Context compaction completed.";
+  return persistedCompactionText(result);
+}
+
+function persistedCompactionText(entry) {
+  const parts = ["Context compaction completed."];
+  if (Number.isFinite(entry.tokensBefore) && entry.tokensBefore > 0) parts.push(`Tokens before: ${entry.tokensBefore}`);
+  if (typeof entry.firstKeptEntryId === "string" && entry.firstKeptEntryId) parts.push(`First kept entry: ${entry.firstKeptEntryId}`);
+  if (typeof entry.summary === "string" && entry.summary.trim()) parts.push(`Summary:\n${entry.summary.trim()}`);
+  return parts.join("\n");
 }
 
 function toolCallStreamEvent(type, delta) {
