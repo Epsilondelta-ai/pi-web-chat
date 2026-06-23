@@ -70,6 +70,20 @@ async function rejectBackend(method, workspaceRoot, data = {}) {
   assert.ok(result.stderr.trim());
 }
 
+async function waitForActiveRun(root, sessionId, runId, env = {}) {
+  for (let index = 0; index < 30; index += 1) {
+    const state = await callBackend("chatState", root, { sessionId }, env);
+
+    if (state.runId === runId && state.isStreaming === true) {
+      return state;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`run ${runId} did not become active`);
+}
+
 async function waitForFileIncludes(path, expected) {
   for (let index = 0; index < 30; index += 1) {
     try {
@@ -110,7 +124,7 @@ process.stdin.on('end', () => {
   sawEnd = true;
   process.exit(0);
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `;
 }
 
@@ -914,7 +928,7 @@ process.stdin.on('data', chunk => {
     }
   }
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `);
   await chmod(fakePi, 0o755);
 
@@ -961,12 +975,13 @@ process.stdin.on('data', chunk => {
     }
   }
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `);
   await chmod(fakePi, 0o755);
 
   const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_STEER_MARKER: marker };
   const start = await callBackend("startPrompt", root, { text: "first" }, env);
+  await waitForActiveRun(root, start.activeSessionId, start.runId, env);
   const message = `${"a".repeat(4057)}😀`;
   const steer = await callBackend("steerPrompt", root, { runId: start.runId, text: message }, env);
   assert.equal(steer.accepted, true);
@@ -1005,7 +1020,7 @@ process.stdin.on('data', chunk => {
     }
   }
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `);
   await chmod(fakePi, 0o755);
 
