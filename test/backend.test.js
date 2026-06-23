@@ -648,7 +648,11 @@ test("streaming methods capture pi rpc text thinking and tool events", async () 
     console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', toolCall: { id: 't3', name: 'edit', arguments: { patch: '漢'.repeat(400) } } } }));
     console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pwd' } }));
     console.log(JSON.stringify({ type: 'tool_execution_update', toolCallId: 't1', toolName: 'bash', partialResult: { content: [{ type: 'text', text: 'out' }] } }));
-    console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));`));
+    console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'done' }] } }));
+    console.log(JSON.stringify({ type: 'compaction_start', reason: 'threshold' }));
+    console.log(JSON.stringify({ type: 'compaction_end', reason: 'threshold', result: { summary: 'old context', firstKeptEntryId: 'k1', tokensBefore: 150000 }, aborted: false, willRetry: false }));
+    console.log(JSON.stringify({ type: 'compaction_start', reason: 'overflow' }));
+    console.log(JSON.stringify({ type: 'compaction_end', reason: 'overflow', result: { summary: 'retried context', firstKeptEntryId: 'k2', tokensBefore: 160000 }, aborted: false, willRetry: true }));`));
   await chmod(fakePi, 0o755);
 
   const start = await callBackend("startPrompt", root, { text: "hello pi" }, { HOME: home, PATH: `${bin}:${process.env.PATH}` });
@@ -676,6 +680,13 @@ test("streaming methods capture pi rpc text thinking and tool events", async () 
   assert.equal(events.find((event) => event.toolCallId === "t3" && event.type === "tool.start").args._truncated, true);
   assert.deepEqual(events.find((event) => event.toolCallId === "t1" && event.type === "tool.start").args, { command: "pwd" });
   assert.equal(events.find((event) => event.toolCallId === "t1" && event.type === "tool.start").argsStatus, "present");
+  const compactionStarts = events.filter((event) => event.toolName === "context.compaction" && event.type === "tool.start");
+  const compactionEnds = events.filter((event) => event.toolName === "context.compaction" && event.type === "tool.end");
+  assert.deepEqual(compactionStarts.map((event) => event.toolCallId), ["context.compaction.1", "context.compaction.2"]);
+  assert.deepEqual(compactionEnds.map((event) => event.toolCallId), ["context.compaction.1", "context.compaction.2"]);
+  assert.deepEqual(compactionStarts.map((event) => event.args), [{ reason: "threshold" }, { reason: "overflow" }]);
+  assert.match(compactionEnds[0].result, /old context/);
+  assert.match(compactionEnds[1].result, /retried context/);
   assert.equal(stream.isStreaming, false);
   assert.equal(events.some((event) => event.type === "run.end"), true);
 });
@@ -1295,6 +1306,46 @@ test("chatState parses pi JSONL session fixtures", async () => {
   const selected = await callBackend("chatState", root, { sessionId: "pi-session-2" }, { HOME: home });
   assert.equal(selected.activeSessionId, "pi-session-2");
   assert.deepEqual(selected.messages.map((message) => [message.id, message.role, message.text]), [["u2", "user", "selected"]]);
+});
+
+test("chatState persists compaction entries as context tool cards", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "compacted-session.jsonl"), [
+    JSON.stringify({ type: "session", id: "compacted-session" }),
+    JSON.stringify({ type: "message", id: "u1", timestamp: "2026-01-02T03:04:05.000Z", message: { role: "user", content: "hello" } }),
+    JSON.stringify({
+      type: "compaction",
+      id: "c1",
+      timestamp: "2026-01-02T03:04:06.000Z",
+      summary: "Older work was summarized.",
+      firstKeptEntryId: "u1",
+      tokensBefore: 150000,
+    }),
+    JSON.stringify({ type: "message", id: "a1", timestamp: "2026-01-02T03:04:07.000Z", message: { role: "assistant", content: "done" } }),
+  ].join("\n"));
+
+  const result = await callBackend("chatState", root, { sessionId: "compacted-session" });
+  const compaction = result.messages.find((message) => message.id === "c1");
+
+  assert.equal(result.activeSessionId, "compacted-session");
+  assert.equal(compaction.role, "assistant");
+  assert.equal(compaction.meta.piRole, "compaction");
+  assert.deepEqual(compaction.toolCalls, [{
+    id: "c1-tool-0",
+    name: "context.compaction",
+    args: { firstKeptEntryId: "u1" },
+    argsStatus: "present",
+    text: "Context compaction completed.\nTokens before: 150000\nFirst kept entry: u1\nSummary:\nOlder work was summarized.",
+    status: "ok",
+  }]);
+  assert.deepEqual(compaction.blocks, [{
+    id: "c1-tool-block-0",
+    type: "tool",
+    text: "",
+    toolCall: compaction.toolCalls[0],
+  }]);
 });
 
 test("chatState caps large tool call arguments and generates stable fallback ids", async () => {
