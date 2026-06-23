@@ -853,11 +853,86 @@ test("mounted top scroll loads older chatState messages and prepends them", asyn
     });
     term.scrollTop = 0;
     term.dispatchEvent(new window.WheelEvent("wheel", { deltaY: -30, bubbles: true }));
-    await tick();
+    await tick(180);
     await tick();
 
     assert.deepEqual(visibleTranscriptText(window), ["pi >older transcript", "pi >latest transcript"]);
-    assert.equal(term.scrollTop, 0);
+    assert.equal(term.scrollTop, 500);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "m201"));
+    cleanup();
+  });
+});
+
+test("mounted repeated top scroll loads multiple older chatState pages", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-multi-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method !== "chatState") {
+          return {};
+        }
+
+        if (input.data.beforeMessageId === "m401") {
+          return {
+            activeSessionId: "history-multi-session",
+            hasMoreBefore: true,
+            oldestMessageId: "m201",
+            messages: [{ id: "m201", role: "assistant", text: "middle transcript", createdAt: 201 }],
+          };
+        }
+
+        if (input.data.beforeMessageId === "m201") {
+          return {
+            activeSessionId: "history-multi-session",
+            hasMoreBefore: false,
+            oldestMessageId: "m001",
+            messages: [{ id: "m001", role: "assistant", text: "oldest transcript", createdAt: 1 }],
+          };
+        }
+
+        return {
+          activeSessionId: "history-multi-session",
+          hasMoreBefore: true,
+          oldestMessageId: "m401",
+          messages: [{ id: "m401", role: "assistant", text: "latest transcript", createdAt: 401 }],
+        };
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    Object.defineProperty(term, "scrollHeight", {
+      configurable: true,
+      get: () => window.document.querySelector(".term-inner").children.length * 500,
+    });
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    await tick(180);
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), ["pi >middle transcript", "pi >latest transcript"]);
+    assert.equal(term.scrollTop, 500);
+
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.WheelEvent("wheel", { deltaY: -30, bubbles: true }));
+    await tick(180);
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), [
+      "pi >oldest transcript",
+      "pi >middle transcript",
+      "pi >latest transcript",
+    ]);
+    assert.equal(term.scrollTop, 500);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "m401"));
     assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "m201"));
     cleanup();
   });
@@ -902,7 +977,7 @@ test("mounted scroll event at top loads older chatState messages", async () => {
     const term = window.document.querySelector(".term");
     term.scrollTop = 0;
     term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
-    await tick();
+    await tick(180);
     await tick();
 
     assert.deepEqual(visibleTranscriptText(window), ["pi >scroll older transcript", "pi >scroll latest transcript"]);
@@ -955,7 +1030,7 @@ test("mounted touch pull at top loads older chatState messages", async () => {
     const touchMove = new window.Event("touchmove", { bubbles: true });
     Object.defineProperty(touchMove, "touches", { value: { item: () => ({ clientY: 30 }) } });
     term.dispatchEvent(touchMove);
-    await tick();
+    await tick(180);
     await tick();
 
     assert.deepEqual(visibleTranscriptText(window), ["pi >touch older transcript", "pi >touch latest transcript"]);
@@ -1015,7 +1090,7 @@ test("mounted chatState refresh preserves loaded history beyond cache cap", asyn
     term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
 
     for (let index = 0; index < 10; index += 1) {
-      await tick();
+      await tick(30);
 
       if (window.document.querySelector(".term-inner").textContent.includes("oldest loaded")) {
         break;
@@ -1085,7 +1160,7 @@ test("mounted session switch removes loaded history from previous session", asyn
     const term = window.document.querySelector(".term");
     term.scrollTop = 0;
     term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
-    await tick();
+    await tick(180);
     await tick();
     assert.match(window.document.querySelector(".term-inner").textContent, /session a older/);
 
@@ -1115,6 +1190,7 @@ test("mounted top-scroll history loading swallows backend failures", async () =>
       app,
       backend: async (method, input) => {
         if (method === "chatState" && input.data.beforeMessageId === "m201") {
+          await tick(30);
           throw new Error("page failed");
         }
 
@@ -1138,8 +1214,9 @@ test("mounted top-scroll history loading swallows backend failures", async () =>
     const term = window.document.querySelector(".term");
     term.scrollTop = 0;
     term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    await tick(160);
     assert.equal(term.getAttribute("aria-busy"), "true");
-    await tick();
+    await tick(60);
     await tick();
 
     assert.equal(term.getAttribute("aria-busy"), "false");

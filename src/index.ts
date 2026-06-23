@@ -55,6 +55,7 @@ const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
 const CHAT_HISTORY_PAGE_SIZE = 200;
 const CHAT_HISTORY_TOP_THRESHOLD_PX = 24;
+const CHAT_HISTORY_LOAD_SETTLE_MS = 140;
 const MAX_MESSAGE_BLOCKS = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
@@ -2963,12 +2964,29 @@ function bindMountedHistoryPagination(
     return;
   }
 
+  let historyLoadTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearHistoryLoadTimer = (): void => {
+    if (historyLoadTimer !== undefined) {
+      clearTimeout(historyLoadTimer);
+      historyLoadTimer = undefined;
+    }
+  };
   const requestPreviousMessages = (): void => {
     if (scrollLock.term.scrollTop > CHAT_HISTORY_TOP_THRESHOLD_PX) {
+      clearHistoryLoadTimer();
       return;
     }
 
-    void loadMountedPreviousMessages(context, chatSurface, store, mountedState, scrollLock);
+    clearHistoryLoadTimer();
+    historyLoadTimer = setTimeout((): void => {
+      historyLoadTimer = undefined;
+
+      if (scrollLock.term.scrollTop > CHAT_HISTORY_TOP_THRESHOLD_PX) {
+        return;
+      }
+
+      void loadMountedPreviousMessages(context, chatSurface, store, mountedState, scrollLock);
+    }, CHAT_HISTORY_LOAD_SETTLE_MS);
   };
 
   disposables.listen(scrollLock.term, "scroll", requestPreviousMessages);
@@ -2987,6 +3005,7 @@ function bindMountedHistoryPagination(
       requestPreviousMessages();
     }
   });
+  disposables.add({ remove: clearHistoryLoadTimer });
 }
 
 async function loadMountedPreviousMessages(
@@ -3004,6 +3023,8 @@ async function loadMountedPreviousMessages(
   }
 
   historyState.loading = true;
+  const previousHeight: number = scrollLock.term.scrollHeight;
+  const previousTop: number = scrollLock.term.scrollTop;
   releaseMountedScrollLock(scrollLock);
   scrollLock.term.setAttribute("aria-busy", "true");
 
@@ -3036,7 +3057,7 @@ async function loadMountedPreviousMessages(
       session.messages = [...prependMessages, ...session.messages];
       session.updatedAt = Date.now();
       renderMountedBackendMessages(chatSurface, session.messages, sessionId);
-      scrollLock.term.scrollTop = 0;
+      scrollLock.term.scrollTop = previousTop + Math.max(0, scrollLock.term.scrollHeight - previousHeight);
     }
 
     updateMountedHistoryPageState(mountedState, response, sessionId);
