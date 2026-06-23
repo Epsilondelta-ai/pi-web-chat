@@ -3004,8 +3004,6 @@ async function loadMountedPreviousMessages(
   }
 
   historyState.loading = true;
-  const previousHeight: number = scrollLock.term.scrollHeight;
-  const previousTop: number = scrollLock.term.scrollTop;
   releaseMountedScrollLock(scrollLock);
   scrollLock.term.setAttribute("aria-busy", "true");
 
@@ -3038,7 +3036,7 @@ async function loadMountedPreviousMessages(
       session.messages = [...prependMessages, ...session.messages];
       session.updatedAt = Date.now();
       renderMountedBackendMessages(chatSurface, session.messages, sessionId);
-      scrollLock.term.scrollTop = previousTop + Math.max(0, scrollLock.term.scrollHeight - previousHeight);
+      scrollLock.term.scrollTop = 0;
     }
 
     updateMountedHistoryPageState(mountedState, response, sessionId);

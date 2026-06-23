@@ -847,12 +847,17 @@ test("mounted top scroll loads older chatState messages and prepends them", asyn
     await tick();
 
     const term = window.document.querySelector(".term");
+    Object.defineProperty(term, "scrollHeight", {
+      configurable: true,
+      get: () => window.document.querySelector(".term-inner").children.length * 500,
+    });
     term.scrollTop = 0;
     term.dispatchEvent(new window.WheelEvent("wheel", { deltaY: -30, bubbles: true }));
     await tick();
     await tick();
 
     assert.deepEqual(visibleTranscriptText(window), ["pi >older transcript", "pi >latest transcript"]);
+    assert.equal(term.scrollTop, 0);
     assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "m201"));
     cleanup();
   });
