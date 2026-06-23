@@ -1195,6 +1195,46 @@ test("chatState paginates earlier selected session messages", async () => {
   assert.equal(previous.oldestMessageId, "m1");
 });
 
+test("chatState reports more history when response trimming drops earlier page messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  const lines = [JSON.stringify({ type: "session", id: "trimmed-session" })];
+
+  for (let index = 0; index < 20; index += 1) {
+    lines.push(JSON.stringify({
+      type: "message",
+      id: `m${String(index).padStart(2, "0")}`,
+      timestamp: `2026-01-02T03:04:${String(index).padStart(2, "0")}.000Z`,
+      message: {
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `message ${index} ${"x".repeat(index < 5 ? 20 : 5000)}`,
+      },
+    }));
+  }
+
+  await writeFile(join(sessionDir, "trimmed-session.jsonl"), lines.join("\n"));
+
+  const latest = await callBackend("chatState", root, { sessionId: "trimmed-session", limit: 20 });
+  const returnedIds = latest.messages.map((message) => message.id);
+
+  assert.equal(latest.activeSessionId, "trimmed-session");
+  assert.ok(returnedIds.length > 0);
+  assert.notEqual(returnedIds[0], "m00");
+  assert.equal(latest.oldestMessageId, returnedIds[0]);
+  assert.equal(latest.hasMoreBefore, true);
+
+  const previous = await callBackend("chatState", root, {
+    sessionId: "trimmed-session",
+    beforeMessageId: latest.oldestMessageId,
+    limit: 20,
+  });
+
+  assert.ok(previous.messages.some((message) => message.id === "m00"));
+  assert.equal(previous.hasMoreBefore, false);
+  assert.equal(previous.oldestMessageId, "m00");
+});
+
 test("chatState without a session id does not fall back to the newest session", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const sessionDir = join(root, ".pi", "sessions");

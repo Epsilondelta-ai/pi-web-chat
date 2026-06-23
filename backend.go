@@ -1729,11 +1729,13 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	if beforeMessageID == "" {
 		beforeMessageID = strings.TrimSpace(stringInput(input, "before"))
 	}
-	pageMessages, hasMoreBefore := chatMessagePage(messages, beforeMessageID, intInput(input, "limit", maxChatMessages))
+	pageMessages, _ := chatMessagePage(messages, beforeMessageID, intInput(input, "limit", maxChatMessages))
 	pageMessages = trimChatMessagesForResponse(pageMessages)
 	oldestMessageID := ""
+	hasMoreBefore := false
 	if len(pageMessages) > 0 {
 		oldestMessageID = pageMessages[0].ID
+		hasMoreBefore = chatMessagesBefore(messages, oldestMessageID)
 	}
 	info, _ := os.Stat(sessionFile)
 	isStreaming := false
@@ -1781,6 +1783,20 @@ func chatMessagePage(messages []chatMessage, beforeMessageID string, limit int) 
 	}
 
 	return messages[start:end], start > 0
+}
+
+func chatMessagesBefore(messages []chatMessage, messageID string) bool {
+	if messageID == "" {
+		return false
+	}
+
+	for index, message := range messages {
+		if message.ID == messageID {
+			return index > 0
+		}
+	}
+
+	return false
 }
 
 func activeRunIDForSession(sessionID string, sessionFile string) string {
