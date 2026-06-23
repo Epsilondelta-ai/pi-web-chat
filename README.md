@@ -71,7 +71,7 @@ The backend receives `method` and `workspaceRoot` from pi-web and JSON on stdin.
 - `searchFiles` with `{ query, limit }` → `{ files }`
 - `readFile` with `{ path }` → `{ file }`
 - `resolveContext` with `{ text, refs }` → `{ refs, attachments, errors }`
-- `chatState` with `{ sessionId, workspacePath }` → `{ activeSessionId, messages, runId, isStreaming }`; empty `sessionId` returns an empty state
+- `chatState` with `{ sessionId, workspacePath, beforeMessageId?, before?, limit? }` → `{ activeSessionId, messages, runId, isStreaming, hasMoreBefore, oldestMessageId }`; empty `sessionId` returns an empty state. Use `beforeMessageId` (or `before`) plus `limit` to load earlier transcript pages.
 - `startPrompt` with `{ text, attachments, sessionId, workspacePath }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `steerPrompt` with `{ runId, text, attachments }` → `{ accepted, runId, activeSessionId, isStreaming }`
 - `streamEvents` with `{ runId, cursor }` → `{ events, cursor, activeSessionId, isStreaming }`

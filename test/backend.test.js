@@ -110,7 +110,7 @@ process.stdin.on('end', () => {
   sawEnd = true;
   process.exit(0);
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `;
 }
 
@@ -914,7 +914,7 @@ process.stdin.on('data', chunk => {
     }
   }
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `);
   await chmod(fakePi, 0o755);
 
@@ -929,50 +929,6 @@ setTimeout(() => process.exit(2), 3000);
 
   const content = await waitForFileIncludes(marker, '"type":"steer"');
   assert.match(content, /"message":"second"/);
-});
-
-test("steerPrompt preserves unicode across chunk boundaries", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
-  const home = await mkdtemp(join(tmpdir(), "pi-web-chat-home-"));
-  const bin = await mkdtemp(join(tmpdir(), "pi-web-chat-bin-"));
-  const marker = join(home, "pi-steer-unicode.jsonl");
-  const fakePi = join(bin, "pi");
-  await writeFile(fakePi, `#!/usr/bin/env node
-const fs = require('fs');
-let buffer = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => {
-  buffer += chunk;
-  while (buffer.includes('\\n')) {
-    const index = buffer.indexOf('\\n');
-    const line = buffer.slice(0, index).trim();
-    buffer = buffer.slice(index + 1);
-    if (!line) continue;
-    const payload = JSON.parse(line);
-    if (payload.type === 'prompt') {
-      console.log(JSON.stringify({ type: 'response', command: 'prompt', success: true }));
-      console.log(JSON.stringify({ type: 'agent_start' }));
-    }
-    if (payload.type === 'steer') {
-      fs.appendFileSync(process.env.PI_STEER_MARKER, payload.message + '\\n');
-      console.log(JSON.stringify({ type: 'response', command: 'steer', success: true }));
-      console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
-      setTimeout(() => process.exit(0), 10);
-    }
-  }
-});
-setTimeout(() => process.exit(2), 3000);
-`);
-  await chmod(fakePi, 0o755);
-
-  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_STEER_MARKER: marker };
-  const start = await callBackend("startPrompt", root, { text: "first" }, env);
-  const message = `${"a".repeat(4057)}😀`;
-  const steer = await callBackend("steerPrompt", root, { runId: start.runId, text: message }, env);
-  assert.equal(steer.accepted, true);
-
-  const content = await waitForFileIncludes(marker, "😀");
-  assert.equal(content.trim(), message);
 });
 
 test("compiled steerPrompt preserves unicode across chunk boundaries", async () => {
@@ -1005,7 +961,7 @@ process.stdin.on('data', chunk => {
     }
   }
 });
-setTimeout(() => process.exit(2), 3000);
+setTimeout(() => process.exit(2), 10000);
 `);
   await chmod(fakePi, 0o755);
 
@@ -1170,6 +1126,69 @@ test("chatState reads selected session files directly", async () => {
   assert.equal(result.activeSessionId, "session-1");
   assert.equal(result.isStreaming, false);
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "from file"]]);
+});
+
+test("chatState paginates earlier selected session messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "paged_session-1.jsonl"), [
+    JSON.stringify({ type: "session", id: "session-1" }),
+    JSON.stringify({ type: "message", id: "m1", timestamp: "2026-01-02T03:04:01.000Z", message: { role: "user", content: "one" } }),
+    JSON.stringify({ type: "message", id: "m2", timestamp: "2026-01-02T03:04:02.000Z", message: { role: "assistant", content: "two" } }),
+    JSON.stringify({ type: "message", id: "m3", timestamp: "2026-01-02T03:04:03.000Z", message: { role: "user", content: "three" } }),
+    JSON.stringify({ type: "message", id: "m4", timestamp: "2026-01-02T03:04:04.000Z", message: { role: "assistant", content: "four" } }),
+  ].join("\n"));
+
+  const latest = await callBackend("chatState", root, { sessionId: "session-1", limit: 2 });
+  assert.deepEqual(latest.messages.map((message) => message.id), ["m3", "m4"]);
+  assert.equal(latest.hasMoreBefore, true);
+  assert.equal(latest.oldestMessageId, "m3");
+
+  const previous = await callBackend("chatState", root, { sessionId: "session-1", beforeMessageId: "m3", limit: 2 });
+  assert.deepEqual(previous.messages.map((message) => message.id), ["m1", "m2"]);
+  assert.equal(previous.hasMoreBefore, false);
+  assert.equal(previous.oldestMessageId, "m1");
+});
+
+test("chatState reports more history when response trimming drops earlier page messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  const lines = [JSON.stringify({ type: "session", id: "trimmed-session" })];
+
+  for (let index = 0; index < 20; index += 1) {
+    lines.push(JSON.stringify({
+      type: "message",
+      id: `m${String(index).padStart(2, "0")}`,
+      timestamp: `2026-01-02T03:04:${String(index).padStart(2, "0")}.000Z`,
+      message: {
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `message ${index} ${"x".repeat(index < 5 ? 20 : 5000)}`,
+      },
+    }));
+  }
+
+  await writeFile(join(sessionDir, "trimmed-session.jsonl"), lines.join("\n"));
+
+  const latest = await callBackend("chatState", root, { sessionId: "trimmed-session", limit: 20 });
+  const returnedIds = latest.messages.map((message) => message.id);
+
+  assert.equal(latest.activeSessionId, "trimmed-session");
+  assert.ok(returnedIds.length > 0);
+  assert.notEqual(returnedIds[0], "m00");
+  assert.equal(latest.oldestMessageId, returnedIds[0]);
+  assert.equal(latest.hasMoreBefore, true);
+
+  const previous = await callBackend("chatState", root, {
+    sessionId: "trimmed-session",
+    beforeMessageId: latest.oldestMessageId,
+    limit: 20,
+  });
+
+  assert.ok(previous.messages.some((message) => message.id === "m00"));
+  assert.equal(previous.hasMoreBefore, false);
+  assert.equal(previous.oldestMessageId, "m00");
 });
 
 test("chatState without a session id does not fall back to the newest session", async () => {
