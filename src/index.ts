@@ -2369,15 +2369,29 @@ function applyBackendResponseToMountedStore(
 }
 
 function preserveMountedHistoryMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): ChatMessage[] {
+  const nextMessagesById: Record<string, ChatMessage | undefined> = Object.create(null) as Record<
+    string,
+    ChatMessage | undefined
+  >;
+
+  for (const nextMessage of nextMessages) {
+    nextMessagesById[nextMessage.id] = nextMessage;
+  }
+
   const retainedHistoryMessages: ChatMessage[] = [];
+  const retainedHistoryIds: Record<string, true | undefined> = Object.create(null) as Record<string, true | undefined>;
 
   for (const previousMessage of previousMessages) {
     if (!isMountedHistoryPageMessage(previousMessage)) {
       continue;
     }
 
-    const refreshedMessage: ChatMessage | undefined = findChatMessageById(nextMessages, previousMessage.id);
-    retainedHistoryMessages.push(refreshedMessage ? markMountedHistoryPageMessage(refreshedMessage) : previousMessage);
+    const refreshedMessage: ChatMessage | undefined = nextMessagesById[previousMessage.id];
+    const retainedMessage: ChatMessage = refreshedMessage
+      ? markMountedHistoryPageMessage(refreshedMessage)
+      : previousMessage;
+    retainedHistoryMessages.push(retainedMessage);
+    retainedHistoryIds[retainedMessage.id] = true;
   }
 
   if (!retainedHistoryMessages.length) {
@@ -2387,20 +2401,12 @@ function preserveMountedHistoryMessages(previousMessages: ChatMessage[], nextMes
   const currentMessages: ChatMessage[] = [];
 
   for (const message of nextMessages) {
-    if (!chatMessageListIncludesId(retainedHistoryMessages, message.id)) {
+    if (retainedHistoryIds[message.id] !== true) {
       currentMessages.push(message);
     }
   }
 
   return [...retainedHistoryMessages, ...currentMessages];
-}
-
-function findChatMessageById(messages: ChatMessage[], messageId: string): ChatMessage | undefined {
-  return messages.find((message: ChatMessage): boolean => message.id === messageId);
-}
-
-function chatMessageListIncludesId(messages: ChatMessage[], messageId: string): boolean {
-  return messages.some((message: ChatMessage): boolean => message.id === messageId);
 }
 
 function markMountedHistoryPageMessage(message: ChatMessage): ChatMessage {
