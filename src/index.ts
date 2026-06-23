@@ -2369,12 +2369,46 @@ function applyBackendResponseToMountedStore(
 }
 
 function preserveMountedHistoryMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): ChatMessage[] {
-  const nextIds: Set<string> = new Set<string>(nextMessages.map((message: ChatMessage): string => message.id));
-  const previousHistory: ChatMessage[] = previousMessages.filter((message: ChatMessage): boolean => {
-    return isMountedHistoryPageMessage(message) && !nextIds.has(message.id);
+  const previousHistoryIds: string[] = previousMessages
+    .filter(isMountedHistoryPageMessage)
+    .map((message: ChatMessage): string => message.id);
+
+  if (!previousHistoryIds.length) {
+    return nextMessages;
+  }
+
+  const nextMessagesById: Map<string, ChatMessage> = new Map<string, ChatMessage>(
+    nextMessages.map((message: ChatMessage): [string, ChatMessage] => [message.id, message]),
+  );
+  const previousMessagesById: Map<string, ChatMessage> = new Map<string, ChatMessage>(
+    previousMessages.map((message: ChatMessage): [string, ChatMessage] => [message.id, message]),
+  );
+  const retainedHistoryMessages: ChatMessage[] = previousHistoryIds
+    .map((messageId: string): ChatMessage | undefined => {
+      const nextMessage: ChatMessage | undefined = nextMessagesById.get(messageId);
+
+      if (nextMessage) {
+        return markMountedHistoryPageMessage(nextMessage);
+      }
+
+      return previousMessagesById.get(messageId);
+    })
+    .filter((message: ChatMessage | undefined): message is ChatMessage => Boolean(message));
+  const historyIds: Set<string> = new Set<string>(
+    retainedHistoryMessages.map((message: ChatMessage): string => message.id),
+  );
+  const currentMessages: ChatMessage[] = nextMessages.filter((message: ChatMessage): boolean => {
+    return !historyIds.has(message.id);
   });
 
-  return previousHistory.length ? [...previousHistory, ...nextMessages] : nextMessages;
+  return [...retainedHistoryMessages, ...currentMessages];
+}
+
+function markMountedHistoryPageMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    meta: { ...(message.meta || {}), piWebChatHistoryPage: true },
+  };
 }
 
 function pruneMountedChatStateMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -3075,12 +3109,7 @@ async function loadMountedPreviousMessages(
 }
 
 function markMountedHistoryPageMessages(messages: ChatMessage[], _sessionId: string): ChatMessage[] {
-  return messages.map((message: ChatMessage): ChatMessage => {
-    return {
-      ...message,
-      meta: { ...(message.meta || {}), piWebChatHistoryPage: true },
-    };
-  });
+  return messages.map(markMountedHistoryPageMessage);
 }
 
 function isMountedHistoryPageMessage(message: ChatMessage): boolean {
