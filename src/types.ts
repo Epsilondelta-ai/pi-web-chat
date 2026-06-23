@@ -124,6 +124,8 @@ export type BackendResponse = {
   isStreaming?: boolean;
   errors?: unknown[];
   warnings?: unknown[];
+  hasMoreBefore?: boolean;
+  oldestMessageId?: string;
   exitCode?: number;
   durationMs?: number;
   output?: string;
@@ -145,6 +147,8 @@ export type ChatEvent = {
   activeSessionId?: string;
   messages?: ChatMessage[];
   isStreaming?: boolean;
+  hasMoreBefore?: boolean;
+  oldestMessageId?: string;
 };
 
 export type ChatMessage = {

@@ -810,6 +810,240 @@ test("mounted chat starts at bottom and scroll-bottom button controls pinned scr
   });
 });
 
+test("mounted top scroll loads older chatState messages and prepends them", async () => {
+  await withWindow(async ({ window, backendCalls }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        backendCalls.push({ method, input });
+
+        if (method !== "chatState") {
+          return {};
+        }
+
+        if (input.data.beforeMessageId === "m201") {
+          return {
+            activeSessionId: "history-session",
+            hasMoreBefore: false,
+            oldestMessageId: "m001",
+            messages: [{ id: "m001", role: "assistant", text: "older transcript", createdAt: 1 }],
+          };
+        }
+
+        return {
+          activeSessionId: "history-session",
+          hasMoreBefore: true,
+          oldestMessageId: "m201",
+          messages: [{ id: "m201", role: "assistant", text: "latest transcript", createdAt: 201 }],
+        };
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    await tick();
+    await tick();
+
+    assert.deepEqual(visibleTranscriptText(window), ["pi >older transcript", "pi >latest transcript"]);
+    assert.ok(backendCalls.some((call) => call.method === "chatState" && call.input.data.beforeMessageId === "m201"));
+    cleanup();
+  });
+});
+
+test("mounted chatState refresh preserves loaded history beyond cache cap", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    const encoder = new TextEncoder();
+    let streamController;
+    const currentMessages = Array.from({ length: 200 }, (_, index) => ({
+      id: `m${String(index + 201).padStart(4, "0")}`,
+      role: "assistant",
+      text: `current ${index + 201}`,
+      createdAt: index + 201,
+    }));
+    const currentState = JSON.stringify({
+      type: "chat.state",
+      activeSessionId: "history-refresh-session",
+      hasMoreBefore: true,
+      oldestMessageId: "m0201",
+      messages: currentMessages,
+    });
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-refresh-session", activeWorkspaceId: "workspace-2" }) };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.beforeMessageId === "m0201") {
+          return {
+            activeSessionId: "history-refresh-session",
+            hasMoreBefore: false,
+            oldestMessageId: "m0001",
+            messages: [{ id: "m0001", role: "assistant", text: "oldest loaded", createdAt: 1 }],
+          };
+        }
+
+        return {};
+      },
+      backendStream: async (method) => method === "sessionEventsSse"
+        ? captureStream((controller) => {
+          streamController = controller;
+          controller.enqueue(encoder.encode(`event: chat.state\ndata: ${currentState}\n\n`));
+        })
+        : {},
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+
+    for (let index = 0; index < 10; index += 1) {
+      await tick();
+
+      if (window.document.querySelector(".term-inner").textContent.includes("oldest loaded")) {
+        break;
+      }
+    }
+
+    assert.equal(window.document.querySelector(".term-inner").textContent.includes("oldest loaded"), true);
+    streamController.enqueue(encoder.encode(`event: chat.state\ndata: ${currentState}\n\n`));
+    streamController.close();
+    await tick();
+    await tick();
+
+    const store = JSON.parse(window.localStorage.getItem("pi-web-chat.sessions.v1"));
+    const session = store.sessions.find((item) => item.id === "history-refresh-session");
+    assert.equal(window.document.querySelector(".term-inner").textContent.includes("oldest loaded"), true);
+    assert.equal(session.messages.some((message) => message.id === "m0001"), false);
+    cleanup();
+  });
+});
+
+test("mounted session switch removes loaded history from previous session", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    let selectedSession = "history-switch-a";
+    app.piWebSidebar = {
+      getSnapshot: () => ({ activeSessionId: selectedSession, activeWorkspaceId: "workspace-2" }),
+    };
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method !== "chatState") {
+          return {};
+        }
+
+        if (input.data.beforeMessageId === "a2") {
+          return {
+            activeSessionId: "history-switch-a",
+            hasMoreBefore: false,
+            oldestMessageId: "a1",
+            messages: [{ id: "a1", role: "assistant", text: "session a older", createdAt: 1 }],
+          };
+        }
+
+        if (input.data.sessionId === "history-switch-b") {
+          return {
+            activeSessionId: "history-switch-b",
+            hasMoreBefore: false,
+            oldestMessageId: "b1",
+            messages: [{ id: "b1", role: "assistant", text: "session b only", createdAt: 1 }],
+          };
+        }
+
+        return {
+          activeSessionId: "history-switch-a",
+          hasMoreBefore: true,
+          oldestMessageId: "a2",
+          messages: [{ id: "a2", role: "assistant", text: "session a latest", createdAt: 2 }],
+        };
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    await tick();
+    await tick();
+    assert.match(window.document.querySelector(".term-inner").textContent, /session a older/);
+
+    selectedSession = "history-switch-b";
+    globalThis.piWeb.behaviorSubject("plugin.pi-web-sidebar.selectedSession", null)
+      .next({ sessionId: selectedSession, workspaceId: "workspace-2" });
+    await tick();
+    await tick();
+
+    const text = window.document.querySelector(".term-inner").textContent;
+    assert.match(text, /session b only/);
+    assert.doesNotMatch(text, /session a older/);
+    assert.doesNotMatch(text, /session a latest/);
+    cleanup();
+  });
+});
+
+test("mounted top-scroll history loading swallows backend failures", async () => {
+  await withWindow(async ({ window }) => {
+    const app = window.document.querySelector("pi-app");
+    app.piWebSidebar = { getSnapshot: () => ({ activeSessionId: "history-error-session", activeWorkspaceId: "workspace-2" }) };
+    const errors = [];
+    const previousUnhandled = window.onunhandledrejection;
+    window.onunhandledrejection = (event) => errors.push(event.reason);
+
+    const cleanup = activate({
+      app,
+      backend: async (method, input) => {
+        if (method === "chatState" && input.data.beforeMessageId === "m201") {
+          throw new Error("page failed");
+        }
+
+        if (method === "chatState") {
+          return {
+            activeSessionId: "history-error-session",
+            hasMoreBefore: true,
+            oldestMessageId: "m201",
+            messages: [{ id: "m201", role: "assistant", text: "latest transcript", createdAt: 201 }],
+          };
+        }
+
+        return {};
+      },
+      mount: createMount(window, app),
+    });
+
+    await tick();
+    await tick();
+
+    const term = window.document.querySelector(".term");
+    term.scrollTop = 0;
+    term.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+    assert.equal(term.getAttribute("aria-busy"), "true");
+    await tick();
+    await tick();
+
+    assert.equal(term.getAttribute("aria-busy"), "false");
+    assert.deepEqual(errors, []);
+    assert.deepEqual(visibleTranscriptText(window), ["pi >latest transcript"]);
+    cleanup();
+    window.onunhandledrejection = previousUnhandled;
+  });
+});
+
 test("mounted activation uses session SSE when available", async () => {
   await withWindow(async ({ window, backendCalls }) => {
     const app = window.document.querySelector("pi-app");

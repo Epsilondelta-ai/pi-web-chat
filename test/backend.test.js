@@ -1172,6 +1172,29 @@ test("chatState reads selected session files directly", async () => {
   assert.deepEqual(result.messages.map((message) => [message.id, message.role, message.text]), [["u1", "user", "hello"], ["a1", "assistant", "from file"]]);
 });
 
+test("chatState paginates earlier selected session messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
+  const sessionDir = join(root, ".pi", "sessions");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(sessionDir, "paged_session-1.jsonl"), [
+    JSON.stringify({ type: "session", id: "session-1" }),
+    JSON.stringify({ type: "message", id: "m1", timestamp: "2026-01-02T03:04:01.000Z", message: { role: "user", content: "one" } }),
+    JSON.stringify({ type: "message", id: "m2", timestamp: "2026-01-02T03:04:02.000Z", message: { role: "assistant", content: "two" } }),
+    JSON.stringify({ type: "message", id: "m3", timestamp: "2026-01-02T03:04:03.000Z", message: { role: "user", content: "three" } }),
+    JSON.stringify({ type: "message", id: "m4", timestamp: "2026-01-02T03:04:04.000Z", message: { role: "assistant", content: "four" } }),
+  ].join("\n"));
+
+  const latest = await callBackend("chatState", root, { sessionId: "session-1", limit: 2 });
+  assert.deepEqual(latest.messages.map((message) => message.id), ["m3", "m4"]);
+  assert.equal(latest.hasMoreBefore, true);
+  assert.equal(latest.oldestMessageId, "m3");
+
+  const previous = await callBackend("chatState", root, { sessionId: "session-1", beforeMessageId: "m3", limit: 2 });
+  assert.deepEqual(previous.messages.map((message) => message.id), ["m1", "m2"]);
+  assert.equal(previous.hasMoreBefore, false);
+  assert.equal(previous.oldestMessageId, "m1");
+});
+
 test("chatState without a session id does not fall back to the newest session", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-web-chat-workspace-"));
   const sessionDir = join(root, ".pi", "sessions");

@@ -53,6 +53,8 @@ const SIDEBAR_ACTIVE_WORKSPACE_KEY = "plugin.pi-web-sidebar.activeWorkspaceId";
 const FILE_REF_LIMIT = 12;
 const MAX_SESSIONS = 20;
 const MAX_MESSAGES_PER_SESSION = 200;
+const CHAT_HISTORY_PAGE_SIZE = 200;
+const CHAT_HISTORY_TOP_THRESHOLD_PX = 24;
 const MAX_MESSAGE_BLOCKS = 200;
 const MAX_LOCAL_ATTACHMENTS = 8;
 const MAX_LOCAL_ATTACHMENT_BYTES = 1_000_000;
@@ -103,6 +105,7 @@ type MountedSteeringRequest = {
 
 type MountedState = {
   backendChatToken: number;
+  historyPages: Map<string, MountedHistoryPageState>;
   pendingPromptEchoIds: Map<string, string[]>;
   pendingAssistantEchoIds: Map<string, string[]>;
   completedRunIds: Set<string>;
@@ -129,6 +132,12 @@ type MountedComposerTriggers = {
 type MergeChatMessagesOptions = {
   allowAssistantOnlyTailEcho?: boolean;
   preserveOnlyEchoMessages?: boolean;
+};
+
+type MountedHistoryPageState = {
+  hasMoreBefore: boolean;
+  oldestMessageId?: string;
+  loading: boolean;
 };
 
 type MountedScrollLock = {
@@ -268,6 +277,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
   const mountedStore = selected?.sessionId ? loadStore(selected.sessionId) : createNoSelectionStore();
   const mountedState: MountedState = {
     backendChatToken: 0,
+    historyPages: new Map<string, MountedHistoryPageState>(),
     pendingPromptEchoIds: new Map<string, string[]>(),
     pendingAssistantEchoIds: new Map<string, string[]>(),
     completedRunIds: new Set<string>(),
@@ -280,6 +290,7 @@ function activateMountedPiWeb(context: PluginContext, app: AppWithRuntime | unde
     void openMountedSessionEvents(context, chatSurface, mountedStore, mountedState, selected.sessionId);
   }
   bindMountedSidebarSelection(disposables, context, chatSurface, mountedStore, mountedState);
+  bindMountedHistoryPagination(disposables, context, chatSurface, mountedStore, mountedState);
   bindMountedSteeringCancel(disposables, chatSurface, mountedStore, mountedState);
   bindMountedComposer(disposables, context, composerSurface, chatSurface, mountedStore, mountedState);
   bindMountedPromptMeta(context, composerSurface);
@@ -2098,6 +2109,7 @@ async function openMountedSessionEvents(
           preserveOnlyEchoMessages: true,
         },
       );
+      updateMountedHistoryPageState(mountedState, response, sessionIdForEcho);
       syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, workspaceId);
 
       if (result.changed) {
@@ -2154,6 +2166,7 @@ async function refreshMountedBackendChatState(
         preserveOnlyEchoMessages: true,
       },
     );
+    updateMountedHistoryPageState(mountedState, response, sessionIdForEcho);
     syncMountedRunStateFromBackendResponse(mountedState, response, sessionIdForEcho, workspacePath, activeWorkspaceSelection(context).id);
 
     if (result.changed) {
@@ -2189,7 +2202,29 @@ function chatStateEventResponse(event: ChatEvent): BackendResponse {
     messages: event.messages,
     runId: event.runId,
     isStreaming: event.isStreaming,
+    hasMoreBefore: event.hasMoreBefore,
+    oldestMessageId: event.oldestMessageId,
   };
+}
+
+function updateMountedHistoryPageState(mountedState: MountedState, response: BackendResponse, fallbackSessionId: string): void {
+  const sessionId: string = typeof response.activeSessionId === "string" && response.activeSessionId
+    ? response.activeSessionId
+    : fallbackSessionId;
+
+  if (!sessionId || !Array.isArray(response.messages)) {
+    return;
+  }
+
+  const previous: MountedHistoryPageState | undefined = mountedState.historyPages.get(sessionId);
+  const oldestMessageId: string | undefined = typeof response.oldestMessageId === "string" && response.oldestMessageId
+    ? response.oldestMessageId
+    : response.messages[0]?.id || previous?.oldestMessageId;
+  mountedState.historyPages.set(sessionId, {
+    hasMoreBefore: response.hasMoreBefore === true,
+    oldestMessageId,
+    loading: previous?.loading === true,
+  });
 }
 
 function syncMountedRunStateFromBackendResponse(
@@ -2302,13 +2337,16 @@ function applyBackendResponseToMountedStore(
 
   const session = activeSession(store);
 
-  const nextMessages = mergeChatMessages(
+  const mergedMessages = mergeChatMessages(
     session.messages,
     responseMessages,
     optimisticEchoIds,
     assistantEchoIds,
     options,
-  ).slice(-MAX_MESSAGES_PER_SESSION);
+  );
+  const nextMessages = options.preserveOnlyEchoMessages === true
+    ? preserveMountedHistoryMessages(session.messages, pruneMountedChatStateMessages(mergedMessages))
+    : mergedMessages.slice(-MAX_MESSAGES_PER_SESSION);
   if (!sessionMessagesChanged(session.messages, nextMessages)) {
     return { messages: session.messages, changed: false };
   }
@@ -2316,12 +2354,52 @@ function applyBackendResponseToMountedStore(
   session.messages = nextMessages;
   const title = updateSessionTitleFromFirstUser(session);
   session.updatedAt = Date.now();
-  saveStore(store);
+
+  if (session.messages.some(isMountedHistoryPageMessage)) {
+    saveMountedStore(store);
+  } else {
+    saveStore(store);
+  }
 
   if (title) {
     publishMountedSessionTitleIfChanged(session.id, title);
   }
   return { messages: session.messages, changed: true };
+}
+
+function preserveMountedHistoryMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): ChatMessage[] {
+  const nextIds: Set<string> = new Set<string>(nextMessages.map((message: ChatMessage): string => message.id));
+  const previousHistory: ChatMessage[] = previousMessages.filter((message: ChatMessage): boolean => {
+    return isMountedHistoryPageMessage(message) && !nextIds.has(message.id);
+  });
+
+  return previousHistory.length ? [...previousHistory, ...nextMessages] : nextMessages;
+}
+
+function pruneMountedChatStateMessages(messages: ChatMessage[]): ChatMessage[] {
+  const currentMessages: ChatMessage[] = messages.filter((message: ChatMessage): boolean => {
+    return !isMountedHistoryPageMessage(message);
+  });
+  const retainedCurrentIds: Set<string> = new Set<string>(
+    currentMessages.slice(-MAX_MESSAGES_PER_SESSION).map((message: ChatMessage): string => message.id),
+  );
+
+  return messages.filter((message: ChatMessage): boolean => {
+    return isMountedHistoryPageMessage(message) || retainedCurrentIds.has(message.id);
+  });
+}
+
+function saveMountedStore(store: ChatStore): void {
+  const snapshot: ChatStore = {
+    activeSessionId: store.activeSessionId,
+    sessions: store.sessions.map((session: ChatSession): ChatSession => ({
+      ...session,
+      messages: session.messages.filter((message: ChatMessage): boolean => {
+        return !isMountedHistoryPageMessage(message);
+      }),
+    })),
+  };
+  saveStore(snapshot);
 }
 
 function sessionMessagesChanged(current: ChatMessage[], next: ChatMessage[]): boolean {
@@ -2680,18 +2758,27 @@ function renderMountedBackendMessages(chatSurface: HTMLElement, messages: ChatMe
   }
 
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
-  reconcileMountedBackendMessages(container, messages, sessionId);
+  reconcileMountedBackendMessages(container, messages, sessionId, { preserveHistoryPageNodes: true });
   syncMountedScrollAfterRender(chatSurface);
 }
 
 function renderMountedSessionSwitch(chatSurface: HTMLElement, messages: ChatMessage[], sessionId: string): void {
   pruneMountedExpandedToolCards(messages, sessionId);
   const container = chatSurface.querySelector<HTMLElement>(".term-inner") || chatSurface;
-  reconcileMountedBackendMessages(container, messages, sessionId);
+  reconcileMountedBackendMessages(container, messages, sessionId, { preserveHistoryPageNodes: false });
   syncMountedScrollAfterRender(chatSurface);
 }
 
-function reconcileMountedBackendMessages(container: HTMLElement, messages: ChatMessage[], sessionId: string): void {
+type MountedReconcileOptions = {
+  preserveHistoryPageNodes?: boolean;
+};
+
+function reconcileMountedBackendMessages(
+  container: HTMLElement,
+  messages: ChatMessage[],
+  sessionId: string,
+  options: MountedReconcileOptions = {},
+): void {
   const existingItems: Map<string, HTMLElement> = mountedTranscriptItemsById(container);
   const nextItems: HTMLElement[] = messages.map((message: ChatMessage): HTMLElement => {
     const signature: string = `${sessionId}:${messageSignature(message)}`;
@@ -2722,6 +2809,10 @@ function reconcileMountedBackendMessages(container: HTMLElement, messages: ChatM
 
   for (const child of Array.from(container.children)) {
     if (isMountedTranscriptItem(container, child) && !nextItemSet.has(child)) {
+      if (options.preserveHistoryPageNodes === true && child.dataset.sessionId === sessionId && child.dataset.historyPage === "true") {
+        continue;
+      }
+
       child.remove();
       continue;
     }
@@ -2795,6 +2886,7 @@ function renderMountedDocumentation(chatSurface: HTMLElement): void {
     "Type @ to list project files, then pick one to tag it as prompt context.",
     "Type / at the start to open the slash command list.",
     "Chats are cached locally after you start or select a session.",
+    "When older messages exist, scroll to the top of the transcript to load previous history."
   ]) {
     const item = document.createElement("li");
     item.textContent = text;
@@ -2858,6 +2950,107 @@ function installMountedScrollLock(disposables: Disposables, chatSurface: HTMLEle
   });
 }
 
+function bindMountedHistoryPagination(
+  disposables: Disposables,
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+): void {
+  const scrollLock = mountedScrollLocks.get(chatSurface);
+
+  if (!scrollLock) {
+    return;
+  }
+
+  disposables.listen(scrollLock.term, "scroll", (): void => {
+    if (scrollLock.term.scrollTop > CHAT_HISTORY_TOP_THRESHOLD_PX) {
+      return;
+    }
+
+    void loadMountedPreviousMessages(context, chatSurface, store, mountedState, scrollLock);
+  });
+}
+
+async function loadMountedPreviousMessages(
+  context: PluginContext,
+  chatSurface: HTMLElement,
+  store: ChatStore,
+  mountedState: MountedState,
+  scrollLock: MountedScrollLock,
+): Promise<void> {
+  const sessionId: string = store.activeSessionId;
+  const historyState: MountedHistoryPageState | undefined = mountedState.historyPages.get(sessionId);
+
+  if (!sessionId || !historyState?.hasMoreBefore || !historyState.oldestMessageId || historyState.loading) {
+    return;
+  }
+
+  historyState.loading = true;
+  const previousHeight: number = scrollLock.term.scrollHeight;
+  const previousTop: number = scrollLock.term.scrollTop;
+  releaseMountedScrollLock(scrollLock);
+  scrollLock.term.setAttribute("aria-busy", "true");
+
+  try {
+    const workspace: { id: string; path: string } = activeWorkspaceSelection(context);
+    const response: BackendResponse = await backendCall(
+      context,
+      "chatState",
+      {
+        ...chatStateRequestData(context, sessionId, workspace.path),
+        beforeMessageId: historyState.oldestMessageId,
+        limit: CHAT_HISTORY_PAGE_SIZE,
+      },
+      workspace.id,
+    );
+    const responseSessionId: string = typeof response.activeSessionId === "string" && response.activeSessionId
+      ? response.activeSessionId
+      : sessionId;
+
+    if (responseSessionId !== store.activeSessionId) {
+      return;
+    }
+
+    const olderMessages: ChatMessage[] = markMountedHistoryPageMessages(sanitizeChatMessages(response.messages), sessionId);
+    const session: ChatSession = sessionById(store, sessionId);
+    const existingIds: Set<string> = new Set<string>(session.messages.map((message: ChatMessage): string => message.id));
+    const prependMessages: ChatMessage[] = olderMessages.filter((message: ChatMessage): boolean => !existingIds.has(message.id));
+
+    if (prependMessages.length) {
+      session.messages = [...prependMessages, ...session.messages];
+      session.updatedAt = Date.now();
+      renderMountedBackendMessages(chatSurface, session.messages, sessionId);
+      scrollLock.term.scrollTop = previousTop + Math.max(0, scrollLock.term.scrollHeight - previousHeight);
+    }
+
+    updateMountedHistoryPageState(mountedState, response, sessionId);
+  } catch {
+    // History pagination is best effort; a failed page load must not break normal chat scrolling.
+  } finally {
+    const nextState: MountedHistoryPageState | undefined = mountedState.historyPages.get(sessionId);
+
+    if (nextState) {
+      nextState.loading = false;
+    }
+
+    scrollLock.term.setAttribute("aria-busy", "false");
+  }
+}
+
+function markMountedHistoryPageMessages(messages: ChatMessage[], _sessionId: string): ChatMessage[] {
+  return messages.map((message: ChatMessage): ChatMessage => {
+    return {
+      ...message,
+      meta: { ...(message.meta || {}), piWebChatHistoryPage: true },
+    };
+  });
+}
+
+function isMountedHistoryPageMessage(message: ChatMessage): boolean {
+  return message.meta?.piWebChatHistoryPage === true;
+}
+
 function syncMountedScrollAfterRender(chatSurface: HTMLElement): void {
   const state = mountedScrollLocks.get(chatSurface);
 
@@ -2890,6 +3083,7 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
   const item = document.createElement("article");
   item.className = "transcript-item";
   item.dataset.messageId = message.id;
+  item.dataset.sessionId = sessionId;
 
   if (isPendingMountedSteeringMessage(message)) {
     appendMountedPendingSteeringRow(item, message, sessionId);
@@ -2903,6 +3097,10 @@ function renderMountedBackendMessage(message: ChatMessage, sessionId: string): H
     renderMountedMessageBlocks(item, message, sessionId, skipTextBlocks);
   } else {
     renderMountedLegacyMessage(item, message, sessionId);
+  }
+
+  if (isMountedHistoryPageMessage(message)) {
+    item.dataset.historyPage = "true";
   }
 
   if (message.streaming) {
@@ -3561,7 +3759,8 @@ function mergeChatMessages(
       return backendMessageIds.has(message.id)
         || preservedLocalIds.has(message.id)
         || isAssistantOnlyPromptAnchor(message)
-        || isPendingMountedSteeringMessage(message);
+        || isPendingMountedSteeringMessage(message)
+        || isMountedHistoryPageMessage(message);
     })
     : localMessages;
   const merged = new Map<string, ChatMessage>();
@@ -3571,9 +3770,16 @@ function mergeChatMessages(
   const hasBackendUserMessages = backendMessages.some((message: ChatMessage): boolean => message.role === "user");
   const lastKnownBackendOrder = lastKnownBackendMessageOrder(mergeLocalMessages, backendMessages);
   let localOrder = backendMessages.length;
+  let historyOrder = -mergeLocalMessages.length;
 
   for (const message of mergeLocalMessages) {
     merged.set(message.id, message);
+
+    if (isMountedHistoryPageMessage(message) && !backendMessageIds.has(message.id)) {
+      orderById.set(message.id, historyOrder++);
+      continue;
+    }
+
     orderById.set(message.id, localOrder++);
   }
 

@@ -587,7 +587,13 @@ func submitPiPrompt(workspaceRoot string, input request) (any, error) {
 	if parsedID != "" {
 		sessionID = parsedID
 	}
-	return map[string]any{"accepted": true, "activeSessionId": responseSessionID(sessionID), "messages": messages, "isStreaming": false, "warnings": warnings}, nil
+	return map[string]any{
+		"accepted":        true,
+		"activeSessionId": responseSessionID(sessionID),
+		"messages":        trimChatMessagesForResponse(messages),
+		"isStreaming":     false,
+		"warnings":        warnings,
+	}, nil
 }
 
 type streamRunState struct {
@@ -1719,6 +1725,16 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	beforeMessageID := strings.TrimSpace(stringInput(input, "beforeMessageId"))
+	if beforeMessageID == "" {
+		beforeMessageID = strings.TrimSpace(stringInput(input, "before"))
+	}
+	pageMessages, hasMoreBefore := chatMessagePage(messages, beforeMessageID, intInput(input, "limit", maxChatMessages))
+	pageMessages = trimChatMessagesForResponse(pageMessages)
+	oldestMessageID := ""
+	if len(pageMessages) > 0 {
+		oldestMessageID = pageMessages[0].ID
+	}
 	info, _ := os.Stat(sessionFile)
 	isStreaming := false
 	if len(messages) > 0 && time.Since(info.ModTime()) < 3*time.Second {
@@ -1729,7 +1745,42 @@ func readPiChatState(workspaceRoot string, input request) (any, error) {
 	if activeRunID != "" {
 		isStreaming = true
 	}
-	return map[string]any{"activeSessionId": responseSessionID(sessionID), "messages": messages, "runId": activeRunID, "isStreaming": isStreaming}, nil
+	return map[string]any{
+		"activeSessionId": responseSessionID(sessionID),
+		"messages":        pageMessages,
+		"runId":           activeRunID,
+		"isStreaming":     isStreaming,
+		"hasMoreBefore":   hasMoreBefore,
+		"oldestMessageId": oldestMessageID,
+	}, nil
+}
+
+func chatMessagePage(messages []chatMessage, beforeMessageID string, limit int) ([]chatMessage, bool) {
+	if limit <= 0 || limit > maxChatMessages {
+		limit = maxChatMessages
+	}
+
+	end := len(messages)
+	if beforeMessageID != "" {
+		end = 0
+		for index, message := range messages {
+			if message.ID == beforeMessageID {
+				end = index
+				break
+			}
+		}
+	}
+
+	if end <= 0 {
+		return []chatMessage{}, false
+	}
+
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+
+	return messages[start:end], start > 0
 }
 
 func activeRunIDForSession(sessionID string, sessionFile string) string {
@@ -1890,7 +1941,6 @@ func readPiSessionMessages(sessionFile string) ([]chatMessage, string, error) {
 			Meta: map[string]any{"piRole": role}, Blocks: blocks, ToolCalls: toolCalls,
 		})
 	}
-	messages = trimChatMessagesForResponse(messages)
 	return messages, sessionID, nil
 }
 
