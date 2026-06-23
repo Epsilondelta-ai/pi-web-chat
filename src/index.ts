@@ -2369,39 +2369,38 @@ function applyBackendResponseToMountedStore(
 }
 
 function preserveMountedHistoryMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): ChatMessage[] {
-  const previousHistoryIds: string[] = previousMessages
-    .filter(isMountedHistoryPageMessage)
-    .map((message: ChatMessage): string => message.id);
+  const retainedHistoryMessages: ChatMessage[] = [];
 
-  if (!previousHistoryIds.length) {
+  for (const previousMessage of previousMessages) {
+    if (!isMountedHistoryPageMessage(previousMessage)) {
+      continue;
+    }
+
+    const refreshedMessage: ChatMessage | undefined = findChatMessageById(nextMessages, previousMessage.id);
+    retainedHistoryMessages.push(refreshedMessage ? markMountedHistoryPageMessage(refreshedMessage) : previousMessage);
+  }
+
+  if (!retainedHistoryMessages.length) {
     return nextMessages;
   }
 
-  const nextMessagesById: Map<string, ChatMessage> = new Map<string, ChatMessage>(
-    nextMessages.map((message: ChatMessage): [string, ChatMessage] => [message.id, message]),
-  );
-  const previousMessagesById: Map<string, ChatMessage> = new Map<string, ChatMessage>(
-    previousMessages.map((message: ChatMessage): [string, ChatMessage] => [message.id, message]),
-  );
-  const retainedHistoryMessages: ChatMessage[] = previousHistoryIds
-    .map((messageId: string): ChatMessage | undefined => {
-      const nextMessage: ChatMessage | undefined = nextMessagesById.get(messageId);
+  const currentMessages: ChatMessage[] = [];
 
-      if (nextMessage) {
-        return markMountedHistoryPageMessage(nextMessage);
-      }
-
-      return previousMessagesById.get(messageId);
-    })
-    .filter((message: ChatMessage | undefined): message is ChatMessage => Boolean(message));
-  const historyIds: Set<string> = new Set<string>(
-    retainedHistoryMessages.map((message: ChatMessage): string => message.id),
-  );
-  const currentMessages: ChatMessage[] = nextMessages.filter((message: ChatMessage): boolean => {
-    return !historyIds.has(message.id);
-  });
+  for (const message of nextMessages) {
+    if (!chatMessageListIncludesId(retainedHistoryMessages, message.id)) {
+      currentMessages.push(message);
+    }
+  }
 
   return [...retainedHistoryMessages, ...currentMessages];
+}
+
+function findChatMessageById(messages: ChatMessage[], messageId: string): ChatMessage | undefined {
+  return messages.find((message: ChatMessage): boolean => message.id === messageId);
+}
+
+function chatMessageListIncludesId(messages: ChatMessage[], messageId: string): boolean {
+  return messages.some((message: ChatMessage): boolean => message.id === messageId);
 }
 
 function markMountedHistoryPageMessage(message: ChatMessage): ChatMessage {
