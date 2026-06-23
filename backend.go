@@ -990,7 +990,8 @@ func waitForGoSteeringAck(state streamRunState, steeringID string, timeout time.
 		}
 		latest, err := readGoStreamState(state.RunID)
 		if err == nil && latest.Status != "running" && latest.Status != "starting" {
-			return false
+			time.Sleep(100 * time.Millisecond)
+			return goSteeringAcked(state.SteeringAckPath, steeringID)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

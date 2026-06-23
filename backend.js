@@ -285,7 +285,8 @@ function waitForSteeringAck(state, steeringId, timeoutMs) {
 
     const current = safeReadJson(runStatePath(state.runId)) || {};
     if (current.status !== "running" && current.status !== "starting") {
-      return false;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      return steeringAcked(state.steeringAckPath, steeringId);
     }
 
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
